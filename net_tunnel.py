@@ -1,5 +1,5 @@
 """
-Network Split-Tunneler & Proxy Sharing Tool  v2
+Network Split-Tunneler & Proxy Sharing Tool  v3
 Windows 10/11 only — Python 3.10+
 
 Improvements over v1:
@@ -39,7 +39,7 @@ def get_resource_path(relative_path: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 PROXY_PORT    = 8080
 BEACON_PORT   = 54321          # UDP broadcast port for host discovery
-BEACON_MAGIC  = b"NST_HOST_V2" # payload the host sends
+BEACON_MAGIC  = b"NST_HOST_V3" # payload the host sends
 BUFFER_SIZE   = 65536
 CONN_TIMEOUT  = 30
 
@@ -553,7 +553,7 @@ class App(tk.Tk):
         hdr.pack(fill="x", padx=20)
         tk.Label(hdr, text="⬡  NET SPLIT-TUNNELER", bg=DARK_BG,
                  fg=ACCENT, font=("Consolas", 13, "bold")).pack(side="left")
-        tk.Label(hdr, text="& Proxy Sharing Tool  v2", bg=DARK_BG,
+        tk.Label(hdr, text="& Proxy Sharing Tool  v3", bg=DARK_BG,
                  fg=TEXT_SEC, font=("Segoe UI", 9)).pack(side="left", padx=8, pady=4)
 
         # ── TAB BAR ───────────────────────────────────────────────────────────
@@ -1022,11 +1022,11 @@ if __name__ == "__main__":
 #  pip install pystray pillow pyinstaller
 #
 #  pyinstaller --onefile --windowed --uac-admin \
-#              --name "NetSplitTunnel" \
+#              --name "NetSplitTunnel_v3" \
 #              --hidden-import "pystray._win32" \
 #              --collect-all pystray \
 #              net_tunnel.py
 #
-#  Output: dist\NetSplitTunnel.exe
+#  Output: dist\NetSplitTunnel_v3.exe
 #  The --uac-admin manifest means Windows prompts for elevation on every launch.
 # ──────────────────────────────────────────────────────────────────────────────
