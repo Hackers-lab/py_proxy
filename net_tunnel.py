@@ -18,10 +18,11 @@ Third-party deps (pip install before running / bundle with PyInstaller):
 import ctypes, os, sys, socket, threading, subprocess, winreg, time, io
 import tkinter as tk
 from tkinter import ttk, messagebox
+import psutil
 
 try:
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
@@ -61,8 +62,28 @@ TITLE_FONT = ("Segoe UI", 10, "bold")
 _REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  ADMIN ELEVATION
+#  ADMIN & SINGLE-INSTANCE ELEVATION
 # ──────────────────────────────────────────────────────────────────────────────
+
+_app_mutex = None
+
+def check_single_instance() -> bool:
+    """Check if another instance of the app is already running using a named Mutex."""
+    global _app_mutex
+    try:
+        mutex_name = "Local\\NetSplitTunnel_SingleInstance_Mutex_3248"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _app_mutex = kernel32.CreateMutexW(None, True, mutex_name)
+        last_error = kernel32.GetLastError()
+        ERROR_ALREADY_EXISTS = 183
+        if last_error == ERROR_ALREADY_EXISTS:
+            if _app_mutex:
+                kernel32.CloseHandle(_app_mutex)
+                _app_mutex = None
+            return False
+        return True
+    except Exception:
+        return True
 
 def hide_console() -> None:
     """Hide the console window associated with the current process if it exists."""
@@ -97,16 +118,20 @@ def elevate() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_intranet_ip() -> str | None:
-    """Return the first 10.x.x.x address on this host."""
+    """Return the first 10.x.x.x address on this host using psutil (very fast, no DNS lookup)."""
     try:
-        for item in socket.getaddrinfo(socket.gethostname(), None):
-            ip = item[4][0]
-            if ip.startswith("10."):
-                return ip
+        import psutil
+        for interface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    ip = addr.address
+                    if ip.startswith("10."):
+                        return ip
     except Exception:
         pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.1)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             if ip.startswith("10."):
@@ -197,6 +222,33 @@ def is_autostart_enabled() -> bool:
             enabled = False
         winreg.CloseKey(key)
         return enabled
+    except Exception:
+        return False
+
+def load_show_speed_in_taskbar() -> bool:
+    try:
+        key_path = r"Software\NetSplitTunnel"
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+        try:
+            val, _ = winreg.QueryValueEx(key, "ShowSpeedInTaskbar")
+            enabled = bool(val)
+        except FileNotFoundError:
+            enabled = False
+        winreg.CloseKey(key)
+        return enabled
+    except Exception:
+        return False
+
+def save_show_speed_in_taskbar(enabled: bool) -> bool:
+    try:
+        key_path = r"Software\NetSplitTunnel"
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+        except Exception:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "ShowSpeedInTaskbar", 0, winreg.REG_DWORD, 1 if enabled else 0)
+        winreg.CloseKey(key)
+        return True
     except Exception:
         return False
 
@@ -485,12 +537,101 @@ def _label(parent, text, color=TEXT_PRI, font=None, anchor="w"):
     return tk.Label(parent, text=text, bg=PANEL_BG,
                     fg=color, font=font or LABEL_FONT, anchor=anchor)
 
+def format_speed_short(bps) -> str:
+    if bps < 1024:
+        return f"{int(bps)}"
+    elif bps < 1024 * 1024:
+        kb = bps / 1024
+        if kb < 10:
+            return f"{kb:.1f}K"
+        return f"{int(kb)}K"
+    else:
+        mb = bps / (1024 * 1024)
+        if mb < 10:
+            return f"{mb:.1f}M"
+        return f"{int(mb)}M"
+
+def draw_speed_icon(up_speed_str, down_speed_str, font) -> "Image.Image":
+    # 32x32 icon (high DPI system tray icon)
+    img = Image.new("RGBA", (32, 32), (0, 0, 0, 0)) # transparent background
+    draw = ImageDraw.Draw(img)
+    # Draw rounded dark card background
+    draw.rounded_rectangle([0, 0, 31, 31], radius=4, fill=(26, 29, 35, 240))
+    # Draw speeds in two lines
+    draw.text((2, 2), f"▲{up_speed_str}", fill=(245, 158, 11, 255), font=font)
+    draw.text((2, 16), f"▼{down_speed_str}", fill=(34, 197, 94, 255), font=font)
+    return img
+
+def get_tray_notify_rect():
+    try:
+        user32 = ctypes.windll.user32
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+        shell_tray = user32.FindWindowW("Shell_TrayWnd", None)
+        if not shell_tray:
+            return None
+        tray_notify = user32.FindWindowExW(shell_tray, 0, "TrayNotifyWnd", None)
+        if not tray_notify:
+            return None
+            
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long)]
+        rect = RECT()
+        if user32.GetWindowRect(tray_notify, ctypes.byref(rect)):
+            return (rect.left, rect.top, rect.right, rect.bottom)
+    except Exception:
+        pass
+    return None
+
+def set_clickthrough(hwnd):
+    try:
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        LWA_ALPHA = 0x00000002
+        
+        is_64bit = (ctypes.sizeof(ctypes.c_void_p) == 8)
+        if is_64bit:
+            get_style = user32.GetWindowLongPtrW
+            set_style = user32.SetWindowLongPtrW
+            get_style.restype = ctypes.c_void_p
+            set_style.restype = ctypes.c_void_p
+            get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        else:
+            get_style = user32.GetWindowLongW
+            set_style = user32.SetWindowLongW
+            get_style.restype = ctypes.c_long
+            set_style.restype = ctypes.c_long
+            get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+            
+        style = get_style(hwnd, GWL_EXSTYLE)
+        new_style = style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+        set_style(hwnd, GWL_EXSTYLE, new_style)
+        user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+    except Exception:
+        pass
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  MAIN APPLICATION
 # ──────────────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     def __init__(self) -> None:
+        # Set AppUserModelID so Windows taskbar displays the custom application icon
+        try:
+            myappid = 'hackerslab.netsplittunnel.v3'
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
         super().__init__()
         self.title("Net Split-Tunneler & Proxy Sharing Tool")
         self.resizable(False, False)
@@ -520,6 +661,14 @@ class App(tk.Tk):
         self._detected_gw: str | None = None
         self._tray: "pystray.Icon | None" = None
 
+        # Cache font for system tray speed monitor
+        self._tiny_font = self._get_tiny_font(9)
+
+        # Network speed tracking state
+        self._last_net_bytes = psutil.net_io_counters()
+        self._last_net_time = time.time()
+
+        self._build_menu()
         self._build_ui()
 
         # Apply recovered state to button labels
@@ -538,7 +687,12 @@ class App(tk.Tk):
         # Start background host internet checking thread
         threading.Thread(target=self._internet_check_loop, daemon=True).start()
 
-        self._poll_status()
+        # Start tray icon early if speed monitor is enabled
+        if self._show_speed_in_taskbar_var.get():
+            self._start_tray()
+
+        self._update_traffic_speed()
+        self.after(50, self._poll_status)
         self._log_msg("Application started.  Administrator ✓")
         if self._route_active:
             self._log_msg("Existing 10.0.0.0 route detected — marked ACTIVE.")
@@ -595,8 +749,9 @@ class App(tk.Tk):
         self._btn_tab_client.bind("<Leave>", on_leave_client)
 
         # Tab content container frame
-        self._tab_container = tk.Frame(self, bg=DARK_BG)
+        self._tab_container = tk.Frame(self, bg=DARK_BG, height=215)
         self._tab_container.pack(fill="x", padx=20, pady=(0, 10))
+        self._tab_container.pack_propagate(False)
 
         # ── HOST MODE ─────────────────────────────────────────────────────────
         self._hf = tk.LabelFrame(self._tab_container, text="  HOST MODE  —  Internet Provider  ",
@@ -670,36 +825,30 @@ class App(tk.Tk):
         # Show Host Tab by default
         self._show_host_tab()
 
-        # ── GENERAL OPTIONS ───────────────────────────────────────────────────
-        of = tk.Frame(self, bg=DARK_BG)
-        of.pack(fill="x", padx=22, pady=(0, 10))
-
-        self._autostart_var = tk.BooleanVar(value=is_autostart_enabled())
-        self._chk_autostart = tk.Checkbutton(
-            of, text="Start with Windows",
-            variable=self._autostart_var, command=self._toggle_autostart,
-            bg=DARK_BG, fg=TEXT_SEC, activebackground=DARK_BG,
-            activeforeground=TEXT_PRI, selectcolor=DARK_BG,
-            font=LABEL_FONT, bd=0, highlightthickness=0
+        # ── TRAFFIC MONITOR ───────────────────────────────────────────────────
+        self._traffic_frame = tk.LabelFrame(
+            self, text="  NETWORK TRAFFIC MONITOR  ",
+            bg=PANEL_BG, fg=ACCENT, font=TITLE_FONT,
+            bd=1, relief="solid", labelanchor="nw"
         )
-        self._chk_autostart.pack(side="left")
+        self._traffic_frame.pack(fill="x", padx=20, pady=(0, 10))
 
-        # ── COLLAPSIBLE LOG ───────────────────────────────────────────────────
-        self._log_visible = False
-        
-        self._log_toggle_btn = tk.Button(
-            self, text="▶  Show Event Log", command=self._toggle_log_visibility,
-            font=BTN_FONT, relief="flat", cursor="hand2",
-            bg=PANEL_BG, fg=TEXT_SEC, activebackground=PANEL_BG,
-            activeforeground=TEXT_PRI, bd=0, pady=4
-        )
-        self._log_toggle_btn.pack(fill="x", padx=20, pady=(0, 10))
+        tf_row = tk.Frame(self._traffic_frame, bg=PANEL_BG, pady=6)
+        tf_row.pack(fill="x", padx=12)
 
+        self._lbl_down_speed = _label(tf_row, "Download  :  0.0 KB/s", color=SUCCESS, font=MONO_FONT)
+        self._lbl_down_speed.pack(side="left", expand=True, fill="x")
+
+        self._lbl_up_speed = _label(tf_row, "Upload    :  0.0 KB/s", color=WARNING, font=MONO_FONT)
+        self._lbl_up_speed.pack(side="left", expand=True, fill="x")
+
+        # ── EVENT LOG ─────────────────────────────────────────────────────────
         self._lf_log = tk.LabelFrame(self, text="  EVENT LOG  ",
                            bg=PANEL_BG, fg=TEXT_SEC, font=TITLE_FONT,
                            bd=1, relief="solid")
+        self._lf_log.pack(fill="both", expand=True, padx=20, pady=(0, 10))
 
-        self._log = tk.Text(self._lf_log, height=6, bg="#12151b", fg=TEXT_PRI,
+        self._log = tk.Text(self._lf_log, height=5, bg="#12151b", fg=TEXT_PRI,
                             font=MONO_FONT, relief="flat", state="disabled",
                             wrap="word", bd=6)
         vsb = ttk.Scrollbar(self._lf_log, command=self._log.yview)
@@ -712,6 +861,217 @@ class App(tk.Tk):
         self._footer_frame.pack(fill="x", side="bottom", padx=20, pady=(0, 6))
         tk.Label(self._footer_frame, text="Copyright © Pramod Verma", bg=DARK_BG,
                  fg=TEXT_SEC, font=("Segoe UI", 8)).pack(side="right")
+
+    # ── MENU & TRAFFIC METHODS ────────────────────────────────────────────────
+
+    def _get_tiny_font(self, size=9):
+        for name in ["tahoma.ttf", "arial.ttf", "segoeui.ttf"]:
+            try:
+                return ImageFont.truetype(name, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    def _build_menu(self) -> None:
+        # Create Menu Bar
+        menu_bar = tk.Menu(self)
+        self.config(menu=menu_bar)
+
+        # File Menu
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Exit", command=self._quit_app)
+
+        # Settings Menu
+        settings_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Settings", menu=settings_menu)
+
+        # Start with Windows
+        self._autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+        settings_menu.add_checkbutton(
+            label="Start with Windows",
+            variable=self._autostart_var,
+            command=self._toggle_autostart
+        )
+
+        # Show Speed in Taskbar
+        self._show_speed_in_taskbar_var = tk.BooleanVar(value=load_show_speed_in_taskbar())
+        settings_menu.add_checkbutton(
+            label="Show Speed in Taskbar",
+            variable=self._show_speed_in_taskbar_var,
+            command=self._toggle_show_speed_in_taskbar
+        )
+
+        # About Menu
+        about_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="About", menu=about_menu)
+        about_menu.add_command(label="About Net Split-Tunneler", command=self._show_about_dialog)
+
+    def _toggle_show_speed_in_taskbar(self) -> None:
+        enabled = self._show_speed_in_taskbar_var.get()
+        ok = save_show_speed_in_taskbar(enabled)
+        if ok:
+            status = "enabled" if enabled else "disabled"
+            self._log_msg(f"Show Speed in Taskbar {status}.")
+            if enabled:
+                self._start_tray()
+            else:
+                self._hide_overlay()
+                if self.winfo_viewable() and self._tray:
+                    self._tray.stop()
+                    self._tray = None
+                elif not self.winfo_viewable() and self._tray:
+                    self._tray.icon = _make_tray_icon()
+                    self._tray.title = "Net Split-Tunneler\n(running in background)"
+        else:
+            self._log_msg("Failed to save Show Speed in Taskbar setting.")
+            messagebox.showerror("Registry Error", "Failed to save settings to registry.")
+
+    def _show_about_dialog(self) -> None:
+        about_win = tk.Toplevel(self)
+        about_win.title("About Net Split-Tunneler")
+        about_win.resizable(False, False)
+        about_win.configure(bg=DARK_BG)
+        
+        # Make modal
+        about_win.transient(self)
+        about_win.grab_set()
+        
+        # Center about window relative to parent
+        about_win.update_idletasks()
+        w, h = 380, 260
+        pw = self.winfo_width()
+        ph = self.winfo_height()
+        px = self.winfo_x()
+        py = self.winfo_y()
+        x = px + (pw - w) // 2
+        y = py + (ph - h) // 2
+        about_win.geometry(f"{w}x{h}+{x}+{y}")
+        
+        # Content
+        pad = 15
+        main_frame = tk.Frame(about_win, bg=PANEL_BG, bd=1, relief="solid")
+        main_frame.pack(fill="both", expand=True, padx=pad, pady=pad)
+        
+        # App Icon or Emblem
+        tk.Label(main_frame, text="⬡", bg=PANEL_BG, fg=ACCENT, font=("Segoe UI", 32)).pack(pady=(10, 2))
+        
+        tk.Label(main_frame, text="Net Split-Tunneler v3.1", bg=PANEL_BG, fg=TEXT_PRI, font=("Segoe UI", 12, "bold")).pack()
+        tk.Label(main_frame, text="Proxy Sharing Tool", bg=PANEL_BG, fg=TEXT_SEC, font=("Segoe UI", 9, "italic")).pack(pady=(0, 10))
+        
+        desc = (
+            "A lightweight Windows utility to split-tunnel local traffic "
+            "and share network proxy connections.\n\n"
+            "Developed by Pramod Verma"
+        )
+        tk.Label(main_frame, text=desc, bg=PANEL_BG, fg=TEXT_PRI, font=("Segoe UI", 9), justify="center", wrap=300).pack(padx=10)
+        
+        # Close Button
+        btn = tk.Button(
+            main_frame, text="Close", command=about_win.destroy,
+            font=BTN_FONT, relief="flat", cursor="hand2", bg=ACCENT, fg=TEXT_PRI,
+            activebackground=ACCENT, activeforeground=TEXT_PRI, bd=0, padx=20, pady=4
+        )
+        btn.pack(side="bottom", pady=15)
+
+    def _update_traffic_speed(self) -> None:
+        try:
+            curr_bytes = psutil.net_io_counters()
+            curr_time = time.time()
+            dt = curr_time - self._last_net_time
+            if dt > 0:
+                bytes_sent = curr_bytes.bytes_sent - self._last_net_bytes.bytes_sent
+                bytes_recv = curr_bytes.bytes_recv - self._last_net_bytes.bytes_recv
+                
+                up_speed = bytes_sent / dt
+                down_speed = bytes_recv / dt
+                
+                # Format speed
+                def format_speed(bps):
+                    if bps < 1024:
+                        return f"{bps:.1f} B/s"
+                    elif bps < 1024 * 1024:
+                        return f"{bps/1024:.1f} KB/s"
+                    else:
+                        return f"{bps/(1024*1024):.1f} MB/s"
+                
+                up_formatted = format_speed(up_speed)
+                down_formatted = format_speed(down_speed)
+                
+                self._lbl_down_speed.config(text=f"Download  :  {down_formatted}")
+                self._lbl_up_speed.config(text=f"Upload    :  {up_formatted}")
+                
+                # Update taskbar text overlay and tray icon if enabled
+                if self._show_speed_in_taskbar_var.get():
+                    self._show_overlay(up_formatted, down_formatted)
+                    self._start_tray()
+                    if self._tray:
+                        self._tray.icon = _make_tray_icon()
+                        self._tray.title = f"Net Split-Tunneler\nUp: {up_formatted}\nDown: {down_formatted}"
+                else:
+                    self._hide_overlay()
+                    if self.winfo_viewable() and self._tray:
+                        self._tray.stop()
+                        self._tray = None
+                    elif not self.winfo_viewable() and self._tray:
+                        self._tray.icon = _make_tray_icon()
+                        self._tray.title = "Net Split-Tunneler\n(running in background)"
+                
+            self._last_net_bytes = curr_bytes
+            self._last_net_time = curr_time
+        except Exception:
+            pass
+        self.after(1000, self._update_traffic_speed)
+
+    def _show_overlay(self, up_str: str, down_str: str) -> None:
+        if not hasattr(self, "_overlay") or self._overlay is None:
+            self._overlay = tk.Toplevel()  # standalone toplevel
+            self._overlay.overrideredirect(True)
+            self._overlay.wm_attributes("-topmost", True)
+            self._overlay.config(bg="#010101")
+            self._overlay.attributes("-transparentcolor", "#010101")
+            
+            # Place labels
+            self._overlay_up_lbl = tk.Label(
+                self._overlay, text="", fg="#f59e0b", bg="#010101",
+                font=("Segoe UI", 8, "bold"), anchor="w"
+            )
+            self._overlay_up_lbl.pack(anchor="w", fill="x", padx=0, pady=0)
+            
+            self._overlay_down_lbl = tk.Label(
+                self._overlay, text="", fg="#22c55e", bg="#010101",
+                font=("Segoe UI", 8, "bold"), anchor="w"
+            )
+            self._overlay_down_lbl.pack(anchor="w", fill="x", padx=0, pady=0)
+            
+            # Make click-through
+            self._overlay.update_idletasks()
+            hwnd = self._overlay.winfo_id()
+            set_clickthrough(hwnd)
+            
+        self._overlay_up_lbl.config(text=f"U: {up_str}")
+        self._overlay_down_lbl.config(text=f"D: {down_str}")
+        
+        # Position overlay
+        rect = get_tray_notify_rect()
+        if rect:
+            left, top, right, bottom = rect
+            ow, oh = 95, 34
+            # If horizontal taskbar
+            if (bottom - top) < (right - left):
+                x = left - ow - 8
+                y = top + (bottom - top - oh) // 2
+            else:
+                x = left + (right - left - ow) // 2
+                y = top - oh - 8
+            self._overlay.geometry(f"{ow}x{oh}+{x}+{y}")
+            self._overlay.deiconify() # ensure visible
+        else:
+            self._overlay.withdraw() # hide if tray rect not found
+
+    def _hide_overlay(self) -> None:
+        if hasattr(self, "_overlay") and self._overlay is not None:
+            self._overlay.withdraw()
 
     # ── LOGGING ───────────────────────────────────────────────────────────────
 
@@ -843,41 +1203,17 @@ class App(tk.Tk):
         if not ok:
             messagebox.showerror("Registry Error", msg)
 
-    def _toggle_log_visibility(self) -> None:
-        if self._log_visible:
-            self._lf_log.pack_forget()
-            self._log_toggle_btn.config(text="▶  Show Event Log")
-            self._log_visible = False
-        else:
-            self._footer_frame.pack_forget()
-            self._lf_log.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-            self._footer_frame.pack(fill="x", side="bottom", padx=20, pady=(0, 6))
-            self._log_toggle_btn.config(text="▼  Hide Event Log")
-            self._log_visible = True
-        
-        self._adjust_window_size()
-
-    def _adjust_window_size(self) -> None:
-        self.geometry("")
-        self.update_idletasks()
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-        x = self.winfo_x()
-        y = self.winfo_y()
-        self.geometry(f"{w}x{h}+{x}+{y}")
-
     def _show_host_tab(self) -> None:
         self._btn_tab_host.config(bg=PANEL_BG, fg=ACCENT)
         self._btn_tab_client.config(bg=DARK_BG, fg=TEXT_SEC)
         self._cf.pack_forget()
-        self._hf.pack(fill="x")
-        self._adjust_window_size()
+        self._hf.pack(fill="both", expand=True)
 
     def _show_client_tab(self) -> None:
         self._btn_tab_host.config(bg=DARK_BG, fg=TEXT_SEC)
         self._btn_tab_client.config(bg=PANEL_BG, fg="#a78bfa")
         self._hf.pack_forget()
-        self._cf.pack(fill="x")
-        self._adjust_window_size()
+        self._cf.pack(fill="both", expand=True)
 
     def _client_health_check(self) -> None:
         """Runs in a background thread to check client connection health."""
@@ -969,13 +1305,13 @@ class App(tk.Tk):
         icon_img = _make_tray_icon()
         self._tray = pystray.Icon(
             "NetSplitTunnel", icon_img,
-            "Net Split-Tunneler\n(running in background)",
+            "Net Split-Tunneler",
             menu,
         )
         threading.Thread(target=self._tray.run, daemon=True).start()
 
     def _restore_from_tray(self, icon=None, item=None) -> None:
-        if self._tray:
+        if self._tray and not self._show_speed_in_taskbar_var.get():
             self._tray.stop()
             self._tray = None
         self.after(0, self.deiconify)
@@ -986,6 +1322,11 @@ class App(tk.Tk):
             self._proxy.stop()
         self._beacon.stop()
         self._scanner.stop()
+        if hasattr(self, "_overlay") and self._overlay:
+            try:
+                self._overlay.destroy()
+            except Exception:
+                pass
         if self._tray:
             self._tray.stop()
         self.after(0, self.destroy)
@@ -1000,6 +1341,16 @@ if __name__ == "__main__":
     if not is_admin():
         elevate()
 
+    # Elevated now, check for single instance
+    if not check_single_instance():
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Another instance of Net Split-Tunneler is already running.",
+            "Application Already Running",
+            0x10 | 0x0  # MB_ICONERROR | MB_OK
+        )
+        sys.exit(0)
+
     if not HAS_TRAY:
         import warnings
         warnings.warn(
@@ -1009,8 +1360,7 @@ if __name__ == "__main__":
         )
 
     app = App()
-    app.update_idletasks()
-    w, h = app.winfo_reqwidth(), app.winfo_reqheight()
+    w, h = 480, 575
     sw, sh = app.winfo_screenwidth(), app.winfo_screenheight()
     app.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
     app.mainloop()
