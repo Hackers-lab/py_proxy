@@ -140,6 +140,22 @@ class ChatService:
         self._emit_roster()
         threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
 
+    def remove_peer(self, ip: str) -> None:
+        """Forget a peer entirely: stop probing it (if manual), drop its presence
+        entry and any access-control state.
+
+        Auto-discovered peers on the local subnet may reappear on their next
+        presence broadcast — deletion is only permanent for manual IP peers.
+        """
+        with self._lock:
+            self._peers.pop(ip, None)
+            self._virtual.pop(ip, None)
+            self._manual.discard(ip)
+            self._approved_ips.discard(ip)
+            self._blocked_ips.discard(ip)
+            self._pending_requests.pop(ip, None)
+        self._emit_roster()
+
     def approve_ip(self, ip: str) -> None:
         """Approve an external IP and deliver any buffered messages."""
         with self._lock:

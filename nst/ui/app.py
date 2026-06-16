@@ -14,6 +14,7 @@ from tkinter import messagebox, ttk
 import psutil
 
 from .. import config
+from .. import __version__
 from ..beacon import ClientScanner, HostBeacon
 from ..constants import MONO_FONT, PROXY_PORT, TITLE_FONT
 from ..chat import ChatService
@@ -171,24 +172,30 @@ class App(tk.Tk):
 
     # ── UI BUILD ──────────────────────────────────────────────────────────────
     def _build_ui(self) -> None:
-        # Header
+        # Header — a single, centered wordmark. A left spacer balances the
+        # right-side theme toggle so the title sits dead-center.
         hdr = tk.Frame(self, bg=theme.color("bg"))
         theme.register(hdr, bg="bg")
-        hdr.pack(fill="x", padx=20, pady=10)
-        themed_label(hdr, "⬡  NET SPLIT-TUNNELER", color_role="accent",
-                     font=("Consolas", 13, "bold"), bg_role="bg").pack(side="left")
-        themed_label(hdr, "& Proxy Sharing Tool  v4.2", color_role="text_sec",
-                     font=("Segoe UI", 9), bg_role="bg").pack(side="left", padx=8, pady=4)
+        hdr.pack(fill="x", padx=20, pady=(12, 8))
+
+        spacer = tk.Frame(hdr, bg=theme.color("bg"), width=30, height=1)
+        theme.register(spacer, bg="bg")
+        spacer.pack(side="left")
+        spacer.pack_propagate(False)
 
         # Quick theme toggle button (☀/🌙)
         self._theme_btn = tk.Button(
             hdr, text=("☀" if theme.is_dark() else "🌙"), command=self._toggle_theme,
-            font=("Segoe UI", 11), relief="flat", cursor="hand2", bd=0,
+            font=("Segoe UI", 12), relief="flat", cursor="hand2", bd=0, width=2,
             bg=theme.color("bg"), fg=theme.color("text_sec"),
             activebackground=theme.color("bg"), activeforeground=theme.color("accent"))
         theme.register(self._theme_btn, bg="bg", activebackground="bg",
                        fg="text_sec", activeforeground="accent")
         self._theme_btn.pack(side="right")
+
+        themed_label(hdr, "NetSplitter", color_role="accent",
+                     font=("Segoe UI", 16, "bold"), bg_role="bg",
+                     anchor="center").pack(side="left", fill="x", expand=True)
 
         # Tab bar
         tab_bar = tk.Frame(self, bg=theme.color("bg"))
@@ -205,7 +212,7 @@ class App(tk.Tk):
         # LAN Chat opens in its own standalone window (a launcher, not a tab).
         self._btn_open_chat = themed_button(tab_bar, "💬  LAN Chat",
                                             self._open_chat_window,
-                                            color_role="accent", width=14)
+                                            color_role="chat_btn", width=14)
         self._btn_open_chat.pack(side="right")
 
         # Footer is pinned to the bottom first so it can never be clipped.
@@ -235,8 +242,12 @@ class App(tk.Tk):
     def _make_tab_button(self, parent, text, command) -> tk.Button:
         btn = tk.Button(
             parent, text=text, command=command,
-            font=("Consolas", 9, "bold"), relief="flat", cursor="hand2",
-            bd=0, padx=16, pady=6)
+            font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+            bd=0, padx=18, pady=7,
+            highlightthickness=1,
+            highlightbackground=theme.color("border"),
+            highlightcolor=theme.color("border"))
+        theme.register(btn, highlightbackground="border", highlightcolor="border")
         btn.bind("<Enter>", lambda e: self._tab_hover(btn, True))
         btn.bind("<Leave>", lambda e: self._tab_hover(btn, False))
         return btn
@@ -248,7 +259,7 @@ class App(tk.Tk):
 
     def _build_host_tab(self) -> None:
         self._hf = tk.LabelFrame(
-            self._tab_container, text="  HOST MODE  —  Internet Provider  ",
+            self._tab_container, text="  HOST MODE  ",
             bg=theme.color("panel"), fg=theme.color("accent"), font=TITLE_FONT,
             bd=1, relief="solid", labelanchor="nw")
         theme.register(self._hf, bg="panel", fg="accent")
@@ -280,7 +291,7 @@ class App(tk.Tk):
 
     def _build_client_tab(self) -> None:
         self._cf = tk.LabelFrame(
-            self._tab_container, text="  CLIENT MODE  —  Internet Consumer  ",
+            self._tab_container, text="  CLIENT MODE  ",
             bg=theme.color("panel"), fg=theme.color("accent2_text"), font=TITLE_FONT,
             bd=1, relief="solid", labelanchor="nw")
         theme.register(self._cf, bg="panel", fg="accent2_text")
@@ -364,7 +375,7 @@ class App(tk.Tk):
         self._footer.pack(fill="x", side="bottom", padx=20, pady=(2, 6))
         themed_label(self._footer, "Copyright © Pramod Verma", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="right")
-        themed_label(self._footer, "v4.1", color_role="text_sec",
+        themed_label(self._footer, f"v{__version__}", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="left")
 
     # ── THEME ─────────────────────────────────────────────────────────────────
@@ -438,7 +449,7 @@ class App(tk.Tk):
         frame.pack(fill="both", expand=True, padx=15, pady=15)
         tk.Label(frame, text="⬡", bg=theme.color("panel"), fg=theme.color("accent"),
                  font=("Segoe UI", 32)).pack(pady=(10, 2))
-        tk.Label(frame, text="Net Split-Tunneler v4.1", bg=theme.color("panel"),
+        tk.Label(frame, text=f"Net Split-Tunneler v{__version__}", bg=theme.color("panel"),
                  fg=theme.color("text_pri"), font=("Segoe UI", 12, "bold")).pack()
         tk.Label(frame, text="Proxy Sharing Tool + LAN Chat", bg=theme.color("panel"),
                  fg=theme.color("text_sec"), font=("Segoe UI", 9, "italic")).pack(pady=(0, 10))

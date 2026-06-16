@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox, simpledialog
 
 from .. import config
 from ..chat import DemoBot
@@ -192,6 +192,9 @@ class ChatView(tk.Frame):
         self._active_ip: str | None = None
         self._visible = False
         self._placeholder_on = True
+        # Last set of online IPs rendered — lets the periodic tick skip rebuilds
+        # when nothing changed.
+        self._last_online_sig: frozenset = frozenset()
 
         # File transfer state (keyed by transfer_id)
         self._progress_vars: dict[str, tk.StringVar] = {}
@@ -205,15 +208,13 @@ class ChatView(tk.Frame):
         # Custom aliases for manual peers (takes priority over _names)
         self._aliases: dict[str, str] = {}
 
-        # Inline roster rename state
-        self._roster_edit_ip: str | None = None
-
         self._ft = FileTransferService(chat_service)
         self._ft.start()
 
         self._build()
         self._load_history()
         theme.on_change(self._refresh_active)
+        self.after(3000, self._roster_tick)
 
     # ── construction ──────────────────────────────────────────────────────────
     def _build(self) -> None:
@@ -281,7 +282,7 @@ class ChatView(tk.Frame):
         connect_lbl.bind("<Button-1>", lambda e: self._connect_manual_ip())
         connect_lbl.pack(side="left", padx=6)
 
-        themed_label(left, "ONLINE PEERS", color_role="text_sec",
+        themed_label(left, "PEERS", color_role="text_sec",
                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
         self._roster = ScrollFrame(left, bg_role="log_bg")
         self._roster.pack(fill="both", expand=True, pady=(4, 8))
@@ -324,7 +325,6 @@ class ChatView(tk.Frame):
         self._clear_btn = themed_button(head_btns, "Clear", self._clear_chat,
                                         color_role="text_sec", width=7)
         self._clear_btn.pack(side="right", pady=6)
-        self._clear_btn.config(state="disabled")
 
         self._messages = ScrollFrame(right, bg_role="log_bg")
         self._messages.pack(fill="both", expand=True, pady=8)
@@ -332,6 +332,7 @@ class ChatView(tk.Frame):
         composer = tk.Frame(right, bg=theme.color("panel2"))
         theme.register(composer, bg="panel2")
         composer.pack(fill="x")
+        self._composer = composer
         self._entry = tk.Entry(
             composer, font=("Segoe UI", 10), relief="flat", bd=8,
             bg=theme.color("panel2"), fg=theme.color("text_sec"),
@@ -376,13 +377,52 @@ class ChatView(tk.Frame):
         self._log(f"Chat display name set to '{new}'.")
 
     # ── roster ────────────────────────────────────────────────────────────────
+    def _is_online(self, ip: str, live_ips: set[str]) -> bool:
+        """Resolve online state for any IP (live, demo, manual, or historical)."""
+        if ip == DemoBot.IP:
+            return True
+        # Auto-discovered peers are only in live_ips while broadcasting.
+        if ip in live_ips and not self.chat.is_manual_peer(ip):
+            return True
+        return self.chat.is_peer_online(ip)
+
+    def _online_ips(self, peers) -> list[str]:
+        """All IPs to show in the roster: only those currently online.
+
+        Candidates are live broadcasters plus anyone we have history/manual
+        registration for (so a known IP peer reappears the moment it comes back
+        online), filtered down to those that pass the online check.
+        """
+        live_ips = {p.ip for p in peers}
+        candidates = (live_ips
+                      | set(self._conversations)
+                      | set(self._names)
+                      | set(self._aliases))
+        candidates.discard(self.chat.my_ip)
+        return [ip for ip in candidates if self._is_online(ip, live_ips)]
+
+    def _roster_tick(self) -> None:
+        """Re-check online status on a timer. No presence event fires when a
+        peer simply stops broadcasting, so without this an offline peer would
+        linger in the list until the next unrelated roster change."""
+        try:
+            peers = self.chat.peers()
+            if frozenset(self._online_ips(peers)) != self._last_online_sig:
+                self.update_roster(peers)
+        except tk.TclError:
+            return  # view torn down
+        self.after(3000, self._roster_tick)
+
     def update_roster(self, peers) -> None:
         for p in peers:
             self._names[p.ip] = p.name
         self._roster.clear()
         body = self._roster.body
 
-        if not peers:
+        online = self._online_ips(peers)
+        self._last_online_sig = frozenset(online)
+
+        if not online:
             hint = tk.Frame(body, bg=theme.color("log_bg"))
             theme.register(hint, bg="log_bg")
             hint.pack(fill="x", pady=20, padx=10)
@@ -396,27 +436,20 @@ class ChatView(tk.Frame):
                          bg_role="log_bg", anchor="center").pack(pady=(6, 0))
             return
 
-        for p in sorted(peers, key=lambda x: x.name.lower()):
-            self._add_roster_row(body, p.ip, p.name)
+        for ip in sorted(online, key=lambda x: self._peer_display_name(x).lower()):
+            self._add_roster_row(body, ip, True)
 
         # Update active peer subtext if one is selected
         if self._active_ip:
             ip = self._active_ip
             if ip == DemoBot.IP:
                 sub_text = "demo peer"
-            elif self.chat.is_manual_peer(ip):
-                online = self.chat.is_peer_online(ip)
-                sub_text = f"{ip}  ·  {'Online' if online else 'Offline'}"
             else:
-                sub_text = f"{ip}  ·  Online"
+                is_on = self._is_online(ip, {p.ip for p in peers})
+                sub_text = f"{ip}  ·  {'Online' if is_on else 'Offline'}"
             self._head_sub.config(text=sub_text)
 
-    def _add_roster_row(self, body, ip: str, name: str) -> None:
-        # Inline rename mode: show edit row instead
-        if ip == self._roster_edit_ip:
-            self._add_roster_edit_row(body, ip)
-            return
-
+    def _add_roster_row(self, body, ip: str, online: bool) -> None:
         display = self._peer_display_name(ip)
         active = (ip == self._active_ip)
         bg_role = "select_bg" if active else "log_bg"
@@ -425,32 +458,32 @@ class ChatView(tk.Frame):
         row.pack(fill="x", pady=1)
 
         # Pack right-side widgets FIRST so the expanding txt frame leaves them room
+        # Delete (forget) button — removes the peer from the list & its history.
+        if ip != DemoBot.IP:
+            del_btn = tk.Button(
+                row, text="✕",
+                bg=theme.color(bg_role), fg=theme.color("text_sec"),
+                font=("Segoe UI", 9), relief="flat", cursor="hand2", bd=0,
+                activebackground=theme.color(bg_role),
+                activeforeground=theme.color("danger"))
+            del_btn.pack(side="right", padx=(0, 6), pady=3)
+
+            def _on_del_press(e):
+                return "break"   # block <Button-1> from reaching row → no select
+
+            def _on_del_release(e, _ip=ip):
+                self._delete_peer(_ip)
+                return "break"
+
+            del_btn.bind("<Button-1>", _on_del_press)
+            del_btn.bind("<ButtonRelease-1>", _on_del_release)
+
         unread = self._unread.get(ip, 0)
         if unread:
             badge = tk.Label(row, text=str(unread), bg=theme.color("danger"),
                              fg="#ffffff", font=("Segoe UI", 8, "bold"),
                              padx=5, pady=0)
             badge.pack(side="right", padx=6)
-
-        # Rename button for manual peers — stops click from reaching row's select binding
-        if self.chat.is_manual_peer(ip):
-            pen_btn = tk.Button(
-                row, text="✎",
-                bg=theme.color(bg_role), fg=theme.color("accent"),
-                font=("Segoe UI", 11), relief="flat", cursor="hand2", bd=0,
-                activebackground=theme.color(bg_role),
-                activeforeground=theme.color("success"))
-            pen_btn.pack(side="right", padx=(0, 4), pady=3)
-
-            def _on_pen_press(e):
-                return "break"   # block <Button-1> reaching row → no select_peer
-
-            def _on_pen_release(e, _ip=ip):
-                self._start_rename_peer(_ip)
-                return "break"
-
-            pen_btn.bind("<Button-1>", _on_pen_press)
-            pen_btn.bind("<ButtonRelease-1>", _on_pen_release)
 
         make_avatar(row, display, size=32, bg_role=bg_role).pack(side="left",
                                                                   padx=6, pady=5)
@@ -464,19 +497,10 @@ class ChatView(tk.Frame):
         sub_row = tk.Frame(txt, bg=theme.color(bg_role))
         theme.register(sub_row, bg=bg_role)
         sub_row.pack(anchor="w")
-        if ip == DemoBot.IP:
-            _status_dot(sub_row, True, bg_role).pack(side="left", padx=(0, 3))
-            themed_label(sub_row, "demo peer", color_role="text_sec",
-                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
-        elif self.chat.is_manual_peer(ip):
-            online = self.chat.is_peer_online(ip)
-            _status_dot(sub_row, online, bg_role).pack(side="left", padx=(0, 3))
-            themed_label(sub_row, ip, color_role="text_sec",
-                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
-        else:
-            _status_dot(sub_row, True, bg_role).pack(side="left", padx=(0, 3))
-            themed_label(sub_row, ip, color_role="text_sec",
-                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
+        sub_label = "demo peer" if ip == DemoBot.IP else ip
+        _status_dot(sub_row, online, bg_role).pack(side="left", padx=(0, 3))
+        themed_label(sub_row, sub_label, color_role="text_sec",
+                     font=("Consolas", 7), bg_role=bg_role).pack(side="left")
 
         for w in (row, txt, sub_row):
             w.bind("<Button-1>", lambda e, _ip=ip: self.select_peer(_ip))
@@ -488,62 +512,44 @@ class ChatView(tk.Frame):
             row.bind("<Enter>", lambda e: self._hover_row(row, txt, True))
             row.bind("<Leave>", lambda e: self._hover_row(row, txt, False))
 
-    def _add_roster_edit_row(self, body, ip: str) -> None:
-        """Render an inline name-entry row for the given IP."""
-        row = tk.Frame(body, bg=theme.color("log_bg"))
-        theme.register(row, bg="log_bg")
-        row.pack(fill="x", pady=1)
+    def _delete_peer(self, ip: str) -> None:
+        """Forget a peer: drop it from the roster, the chat service and disk."""
+        name = self._peer_display_name(ip)
+        if not messagebox.askyesno(
+                "Remove peer",
+                f"Remove {name} from the list and delete its chat history?",
+                parent=self):
+            return
+        self.chat.remove_peer(ip)   # stops probing manual peers, drops presence
+        self._conversations.pop(ip, None)
+        self._unread.pop(ip, None)
+        self._names.pop(ip, None)
+        self._aliases.pop(ip, None)
+        self._chat_req_states.pop(ip, None)
+        self._delete_peer_history(ip)
 
-        make_avatar(row, self._peer_display_name(ip), size=32,
-                    bg_role="log_bg").pack(side="left", padx=6, pady=5)
+        if self._active_ip == ip:
+            self._active_ip = None
+            self._head_name.config(text="LAN Chat")
+            self._head_sub.config(text="Select a peer on the left")
+            for c in self._head_avatar_holder.winfo_children():
+                c.destroy()
+            self._set_composer_state(False)
+            self._show_empty_state()
 
-        var = tk.StringVar(value=self._aliases.get(ip) or self._names.get(ip, ip))
-        entry = tk.Entry(row, textvariable=var, font=("Segoe UI", 9),
-                         relief="flat", bd=4, bg=theme.color("panel2"),
-                         fg=theme.color("text_pri"),
-                         insertbackground=theme.color("text_pri"), width=10)
-        entry.pack(side="left", fill="x", expand=True, padx=4, pady=6)
-        # Defer focus so any pending propagated events (select_peer) fire first
-        def _focus_entry():
-            try:
-                entry.focus_set()
-                entry.select_range(0, "end")
-            except tk.TclError:
-                pass
-        entry.after(80, _focus_entry)
-
-        def _save():
-            alias = var.get().strip()[:32]
-            if alias and alias != ip:
-                self._aliases[ip] = alias
-            elif ip in self._aliases:
-                del self._aliases[ip]
-            self._roster_edit_ip = None
-            self._save_peer_history(ip)
-            self.update_roster(self.chat.peers())
-            if self._active_ip == ip:
-                self._head_name.config(text=self._peer_display_name(ip))
-
-        def _cancel_edit():
-            self._roster_edit_ip = None
-            self.update_roster(self.chat.peers())
-
-        ok = tk.Label(row, text="OK", bg=theme.color("success"), fg="#ffffff",
-                      font=("Segoe UI", 7, "bold"), cursor="hand2", padx=4, pady=2)
-        ok.bind("<Button-1>", lambda e: _save())
-        ok.pack(side="left", padx=2)
-
-        x = tk.Label(row, text="X", bg=theme.color("danger"), fg="#ffffff",
-                     font=("Segoe UI", 7, "bold"), cursor="hand2", padx=4, pady=2)
-        x.bind("<Button-1>", lambda e: _cancel_edit())
-        x.pack(side="left", padx=(0, 4))
-
-        entry.bind("<Return>", lambda e: _save())
-        entry.bind("<Escape>", lambda e: _cancel_edit())
-
-    def _start_rename_peer(self, ip: str) -> None:
-        self._roster_edit_ip = ip
         self.update_roster(self.chat.peers())
+        self._log(f"Removed {name} from the chat list.")
+
+    def _delete_peer_history(self, ip: str) -> None:
+        def _rm():
+            try:
+                safe = ip.replace(".", "_").replace(":", "_")
+                path = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        threading.Thread(target=_rm, daemon=True).start()
 
     def _hover_row(self, row, txt, entering) -> None:
         c = theme.color("hover" if entering else "log_bg")
@@ -828,11 +834,14 @@ class ChatView(tk.Frame):
 
     # ── composer ──────────────────────────────────────────────────────────────
     def _set_composer_state(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self._entry.config(state=state)
-        self._send_btn.config(state=state)
-        self._attach_btn.config(state=state)
-        self._clear_btn.config(state=state)
+        """Show the composer + Clear button only when a peer is selected;
+        hide them entirely otherwise (rather than leaving them greyed out)."""
+        if enabled:
+            self._composer.pack(fill="x")
+            self._clear_btn.pack(side="right", pady=6)
+        else:
+            self._composer.pack_forget()
+            self._clear_btn.pack_forget()
 
     def _clear_placeholder(self, _e=None) -> None:
         if self._placeholder_on:
@@ -927,11 +936,21 @@ class ChatView(tk.Frame):
             self._log("Cannot chat with yourself.")
             return
 
+        # Ask the user to name this PC so the roster shows something friendlier
+        # than a bare IP. Cancelling / leaving it blank keeps the IP as the name.
+        name = simpledialog.askstring(
+            "Name this PC",
+            f"Enter a name for {ip}:",
+            parent=self)
+        if name and name.strip():
+            self._aliases[ip] = name.strip()[:32]
+
         self.chat.add_manual_peer(ip)
         self._names.setdefault(ip, ip)
         self._manual_ip_var.set("")
         self._restore_ip_hint()
         self.select_peer(ip)
+        self._save_peer_history(ip)  # persist the alias + manual flag right away
 
         def _probe():
             ok = check_host_reachable(ip, CHAT_TCP_PORT)
@@ -968,6 +987,10 @@ class ChatView(tk.Frame):
                     self._conversations[ip] = [
                         tuple(m) for m in data.get("messages", [])[-_MAX_HISTORY_PER_PEER:]
                     ]
+                    # Re-register manually-added (cross-subnet) peers so presence
+                    # probing resumes and their online status stays accurate.
+                    if data.get("manual"):
+                        self.chat.add_manual_peer(ip)
                     loaded_any = True
                 except Exception:
                     pass
@@ -1003,6 +1026,7 @@ class ChatView(tk.Frame):
         msgs = list(self._conversations.get(ip, []))
         name = self._names.get(ip, ip)
         alias = self._aliases.get(ip)
+        manual = self.chat.is_manual_peer(ip)
 
         def _write():
             try:
@@ -1017,6 +1041,8 @@ class ChatView(tk.Frame):
                 }
                 if alias:
                     data["alias"] = alias
+                if manual:
+                    data["manual"] = True
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
             except Exception:

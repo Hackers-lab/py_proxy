@@ -21,6 +21,7 @@ import tkinter as tk
 #   accent2_text  readable secondary-accent text on a panel
 #   proxy_btn     proxy button base color
 #   success_btn   "enable" button base color
+#   chat_btn      LAN chat launcher button color (teal)
 #   success / danger / warning  status colors
 #   text_pri      primary text
 #   text_sec      muted / secondary text
@@ -37,6 +38,7 @@ DARK = {
     "accent2_text": "#a78bfa",
     "proxy_btn":    "#7c3aed",
     "success_btn":  "#16a34a",
+    "chat_btn":     "#14b8a6",
     "success":      "#22c55e",
     "danger":       "#ef4444",
     "warning":      "#f59e0b",
@@ -62,6 +64,7 @@ LIGHT = {
     "accent2_text": "#6d28d9",
     "proxy_btn":    "#7c3aed",
     "success_btn":  "#16a34a",
+    "chat_btn":     "#0d9488",
     "success":      "#16a34a",
     "danger":       "#dc2626",
     "warning":      "#d97706",
