@@ -59,6 +59,64 @@ _PLACEHOLDER = "Type a message..."
 _MAX_HISTORY_PER_PEER = 200
 
 
+class _ToggleSwitch(tk.Canvas):
+    """Small on/off toggle switch drawn on a Canvas."""
+    _W, _H = 36, 18
+
+    def __init__(self, parent, initial: bool = True, command=None, bg_role: str = "panel"):
+        self._bg_role = bg_role
+        super().__init__(parent, width=self._W, height=self._H,
+                         bg=theme.color(bg_role), highlightthickness=0, cursor="hand2")
+        theme.register(self, bg=bg_role)
+        self._on = initial
+        self._cmd = command
+        self.bind("<ButtonRelease-1>", self._click)
+
+    def _draw(self) -> None:
+        self.delete("all")
+        track = "#4CAF50" if self._on else "#9E9E9E"
+        r = self._H // 2
+        # Rounded track via smooth polygon
+        pts = [r, 0, self._W - r, 0, self._W, 0, self._W, r,
+               self._W, self._H - r, self._W, self._H,
+               self._W - r, self._H, r, self._H,
+               0, self._H, 0, self._H - r, 0, r, 0, 0]
+        self.create_polygon(pts, smooth=True, fill=track, outline="")
+        # Thumb
+        pad = 2
+        x = self._W - self._H + pad if self._on else pad
+        self.create_oval(x, pad, x + self._H - pad * 2, self._H - pad,
+                         fill="white", outline="")
+
+    def _click(self, _e=None) -> None:
+        self._on = not self._on
+        self._draw()
+        if self._cmd:
+            self._cmd(self._on)
+
+    def set(self, value: bool) -> None:
+        self._on = value
+        self._draw()
+
+    def pack(self, **kw):
+        super().pack(**kw)
+        self._draw()   # draw after widget is placed so canvas size is finalised
+
+    def grid(self, **kw):
+        super().grid(**kw)
+        self._draw()
+
+
+def _status_dot(parent, online: bool, bg_role: str) -> tk.Canvas:
+    """Return a small filled circle (green = online, red = offline)."""
+    color = "#4CAF50" if online else "#E53935"
+    c = tk.Canvas(parent, width=8, height=8,
+                  bg=theme.color(bg_role), highlightthickness=0)
+    theme.register(c, bg=bg_role)
+    c.create_oval(1, 1, 7, 7, fill=color, outline="")
+    return c
+
+
 class ChatWindow(tk.Toplevel):
     """A standalone, resizable window that hosts the :class:`ChatView`.
 
@@ -195,18 +253,10 @@ class ChatView(tk.Frame):
         ip_hdr.pack(fill="x", pady=(4, 0))
         themed_label(ip_hdr, "CONNECT BY IP", color_role="text_sec",
                      font=("Segoe UI", 8, "bold"), bg_role="panel").pack(side="left")
-        # External-IP chat toggle (ON/OFF) — inline next to the label
-        self._ip_chat_btn = tk.Button(
-            ip_hdr,
-            text="ON" if self.chat.ip_chat_enabled else "OFF",
-            bg=theme.color("success") if self.chat.ip_chat_enabled else "#888888",
-            fg="#ffffff", font=("Segoe UI", 7, "bold"), relief="flat",
-            cursor="hand2", padx=4, pady=0,
-            activeforeground="#ffffff",
-            command=self._toggle_ip_chat)
-        self._ip_chat_btn.pack(side="right", padx=(4, 0))
-        themed_label(ip_hdr, "ext:", color_role="text_sec",
-                     font=("Segoe UI", 7), bg_role="panel").pack(side="right")
+        # Sliding toggle for external-IP chat, right-aligned in the header row
+        self._ip_toggle = _ToggleSwitch(ip_hdr, initial=self.chat.ip_chat_enabled,
+                                        command=self._toggle_ip_chat, bg_role="panel")
+        self._ip_toggle.pack(side="right", padx=(4, 0), pady=2)
 
         ip_row = tk.Frame(left, bg=theme.color("panel2"))
         theme.register(ip_row, bg="panel2")
@@ -225,7 +275,7 @@ class ChatView(tk.Frame):
         self._manual_ip_entry.bind("<FocusOut>", self._restore_ip_hint)
         self._manual_ip_entry.bind("<Return>", lambda e: self._connect_manual_ip())
         self._manual_ip_entry.pack(side="left", fill="x", expand=True)
-        connect_lbl = themed_label(ip_row, "->", color_role="accent",
+        connect_lbl = themed_label(ip_row, "➤", color_role="accent",
                                    font=("Segoe UI", 10, "bold"), bg_role="panel2")
         connect_lbl.config(cursor="hand2")
         connect_lbl.bind("<Button-1>", lambda e: self._connect_manual_ip())
@@ -292,7 +342,7 @@ class ChatView(tk.Frame):
         self._entry.bind("<FocusIn>", self._clear_placeholder)
         self._entry.bind("<FocusOut>", self._restore_placeholder)
         self._entry.bind("<Return>", lambda e: self._send())
-        self._attach_btn = themed_button(composer, "Attach", self._attach_file,
+        self._attach_btn = themed_button(composer, "File", self._attach_file,
                                          color_role="text_sec", width=7)
         self._attach_btn.pack(side="left", padx=(4, 0), pady=4)
         self._send_btn = themed_button(composer, "Send", self._send,
@@ -356,9 +406,9 @@ class ChatView(tk.Frame):
                 sub_text = "demo peer"
             elif self.chat.is_manual_peer(ip):
                 online = self.chat.is_peer_online(ip)
-                sub_text = f"{ip}  .  manual  ({'reachable' if online else 'unreachable'})"
+                sub_text = f"{ip}  ·  {'Online' if online else 'Offline'}"
             else:
-                sub_text = f"{ip}  .  online"
+                sub_text = f"{ip}  ·  Online"
             self._head_sub.config(text=sub_text)
 
     def _add_roster_row(self, body, ip: str, name: str) -> None:
@@ -374,6 +424,34 @@ class ChatView(tk.Frame):
         theme.register(row, bg=bg_role)
         row.pack(fill="x", pady=1)
 
+        # Pack right-side widgets FIRST so the expanding txt frame leaves them room
+        unread = self._unread.get(ip, 0)
+        if unread:
+            badge = tk.Label(row, text=str(unread), bg=theme.color("danger"),
+                             fg="#ffffff", font=("Segoe UI", 8, "bold"),
+                             padx=5, pady=0)
+            badge.pack(side="right", padx=6)
+
+        # Rename button for manual peers — stops click from reaching row's select binding
+        if self.chat.is_manual_peer(ip):
+            pen_btn = tk.Button(
+                row, text="✎",
+                bg=theme.color(bg_role), fg=theme.color("accent"),
+                font=("Segoe UI", 11), relief="flat", cursor="hand2", bd=0,
+                activebackground=theme.color(bg_role),
+                activeforeground=theme.color("success"))
+            pen_btn.pack(side="right", padx=(0, 4), pady=3)
+
+            def _on_pen_press(e):
+                return "break"   # block <Button-1> reaching row → no select_peer
+
+            def _on_pen_release(e, _ip=ip):
+                self._start_rename_peer(_ip)
+                return "break"
+
+            pen_btn.bind("<Button-1>", _on_pen_press)
+            pen_btn.bind("<ButtonRelease-1>", _on_pen_release)
+
         make_avatar(row, display, size=32, bg_role=bg_role).pack(side="left",
                                                                   padx=6, pady=5)
         txt = tk.Frame(row, bg=theme.color(bg_role))
@@ -382,35 +460,29 @@ class ChatView(tk.Frame):
         themed_label(txt, display, color_role="text_pri",
                      font=("Segoe UI", 9, "bold"), bg_role=bg_role).pack(anchor="w")
 
+        # Status row: coloured dot + IP / label
+        sub_row = tk.Frame(txt, bg=theme.color(bg_role))
+        theme.register(sub_row, bg=bg_role)
+        sub_row.pack(anchor="w")
         if ip == DemoBot.IP:
-            sub = "demo peer"
+            _status_dot(sub_row, True, bg_role).pack(side="left", padx=(0, 3))
+            themed_label(sub_row, "demo peer", color_role="text_sec",
+                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
         elif self.chat.is_manual_peer(ip):
             online = self.chat.is_peer_online(ip)
-            sub = f"{ip}  .  {'reachable' if online else 'unreachable'}"
+            _status_dot(sub_row, online, bg_role).pack(side="left", padx=(0, 3))
+            themed_label(sub_row, ip, color_role="text_sec",
+                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
         else:
-            sub = ip
+            _status_dot(sub_row, True, bg_role).pack(side="left", padx=(0, 3))
+            themed_label(sub_row, ip, color_role="text_sec",
+                         font=("Consolas", 7), bg_role=bg_role).pack(side="left")
 
-        themed_label(txt, sub, color_role="text_sec",
-                     font=("Consolas", 7), bg_role=bg_role).pack(anchor="w")
-
-        # Rename button (manual peers only)
-        if self.chat.is_manual_peer(ip):
-            pen = themed_label(row, "[ ]", color_role="text_sec",
-                               font=("Segoe UI", 8), bg_role=bg_role)
-            pen.config(cursor="hand2", text="edit")
-            pen.bind("<Button-1>", lambda e, _ip=ip: self._start_rename_peer(_ip))
-            pen.pack(side="right", padx=(0, 6))
-
-        unread = self._unread.get(ip, 0)
-        if unread:
-            badge = tk.Label(row, text=str(unread), bg=theme.color("danger"),
-                             fg="#ffffff", font=("Segoe UI", 8, "bold"),
-                             padx=5, pady=0)
-            badge.pack(side="right", padx=6)
-
-        for w in (row, txt):
+        for w in (row, txt, sub_row):
             w.bind("<Button-1>", lambda e, _ip=ip: self.select_peer(_ip))
         for child in txt.winfo_children():
+            child.bind("<Button-1>", lambda e, _ip=ip: self.select_peer(_ip))
+        for child in sub_row.winfo_children():
             child.bind("<Button-1>", lambda e, _ip=ip: self.select_peer(_ip))
         if not active:
             row.bind("<Enter>", lambda e: self._hover_row(row, txt, True))
@@ -431,8 +503,14 @@ class ChatView(tk.Frame):
                          fg=theme.color("text_pri"),
                          insertbackground=theme.color("text_pri"), width=10)
         entry.pack(side="left", fill="x", expand=True, padx=4, pady=6)
-        entry.focus_set()
-        entry.select_range(0, "end")
+        # Defer focus so any pending propagated events (select_peer) fire first
+        def _focus_entry():
+            try:
+                entry.focus_set()
+                entry.select_range(0, "end")
+            except tk.TclError:
+                pass
+        entry.after(80, _focus_entry)
 
         def _save():
             alias = var.get().strip()[:32]
@@ -478,13 +556,9 @@ class ChatView(tk.Frame):
             pass
 
     # ── IP chat toggle ─────────────────────────────────────────────────────────
-    def _toggle_ip_chat(self) -> None:
-        self.chat.ip_chat_enabled = not self.chat.ip_chat_enabled
-        enabled = self.chat.ip_chat_enabled
+    def _toggle_ip_chat(self, enabled: bool) -> None:
+        self.chat.ip_chat_enabled = enabled
         config.save_ip_chat_enabled(enabled)
-        self._ip_chat_btn.config(
-            text="ON" if enabled else "OFF",
-            bg=theme.color("success") if enabled else "#888888")
         self._log(f"External IP chat {'enabled' if enabled else 'disabled'}.")
 
     # ── conversation ──────────────────────────────────────────────────────────
@@ -501,9 +575,9 @@ class ChatView(tk.Frame):
             sub_text = "demo peer"
         elif self.chat.is_manual_peer(ip):
             online = self.chat.is_peer_online(ip)
-            sub_text = f"{ip}  .  manual  ({'reachable' if online else 'unreachable'})"
+            sub_text = f"{ip}  ·  {'Online' if online else 'Offline'}"
         else:
-            sub_text = f"{ip}  .  online"
+            sub_text = f"{ip}  ·  Online"
         self._head_sub.config(text=sub_text)
         self._set_composer_state(True)
         self._render(ip)
