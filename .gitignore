@@ -1,2 +1,5 @@
-# Python source caches (the PyInstaller build/ artifacts are tracked separately)
+# Python source caches
 __pycache__/
+
+# PyInstaller intermediate build artifacts
+build/

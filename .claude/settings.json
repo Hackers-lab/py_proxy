@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import nst.ui.widgets, nst.ui.tray, nst.ui.app; print\\('imports OK; version', nst.__version__ if hasattr\\(__import__\\('nst'\\),'__version__'\\) else '?'\\)\")",
+      "Bash(python -c \"import nst.win_utils, nst.ui.app, nst.ui.chat_view, nst.ui.tray; print\\('imports OK'\\)\")",
+      "Bash(python -m py_compile nst/ui/tray.py nst/win_utils.py)",
+      "Bash(python -c \"import nst.ui.tray, nst.win_utils; print\\('OK'\\)\")",
+      "Bash(python -m PyInstaller NetSplitTunnel.spec --noconfirm)",
+      "Bash(git check-ignore *)"
+    ]
+  }
+}
