@@ -154,11 +154,6 @@ class App(tk.Tk):
             command=self._toggle_show_speed_in_taskbar)
 
         settings_menu.add_separator()
-        self._ip_chat_var = tk.BooleanVar(value=config.load_ip_chat_enabled())
-        settings_menu.add_checkbutton(
-            label="Allow chat from external IPs", variable=self._ip_chat_var,
-            command=self._toggle_ip_chat)
-
         self._theme_light_var = tk.BooleanVar(value=not theme.is_dark())
         settings_menu.add_checkbutton(
             label="Light theme", variable=self._theme_light_var,
@@ -182,7 +177,7 @@ class App(tk.Tk):
         hdr.pack(fill="x", padx=20, pady=10)
         themed_label(hdr, "⬡  NET SPLIT-TUNNELER", color_role="accent",
                      font=("Consolas", 13, "bold"), bg_role="bg").pack(side="left")
-        themed_label(hdr, "& Proxy Sharing Tool  v4", color_role="text_sec",
+        themed_label(hdr, "& Proxy Sharing Tool  v4.2", color_role="text_sec",
                      font=("Segoe UI", 9), bg_role="bg").pack(side="left", padx=8, pady=4)
 
         # Quick theme toggle button (☀/🌙)
@@ -384,12 +379,6 @@ class App(tk.Tk):
                             arrowcolor=theme.color("text_sec"))
         except Exception:
             pass
-
-    def _toggle_ip_chat(self) -> None:
-        enabled = self._ip_chat_var.get()
-        self._chat.ip_chat_enabled = enabled
-        config.save_ip_chat_enabled(enabled)
-        self._log_msg(f"Chat from external IPs {'enabled' if enabled else 'disabled'}.")
 
     def _on_chat_request_received(self, ip: str, name: str, msg: dict) -> None:
         def _apply():

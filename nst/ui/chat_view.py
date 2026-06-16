@@ -10,6 +10,7 @@ decides whether to also raise a bottom-right toast.
 
 import json
 import os
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -54,7 +55,7 @@ def _fmt_eta(secs: float) -> str:
         return f"{s}s"
     return f"{s // 60}m {s % 60}s"
 
-_PLACEHOLDER = "Type a message…"
+_PLACEHOLDER = "Type a message..."
 _MAX_HISTORY_PER_PEER = 200
 
 
@@ -126,7 +127,7 @@ class ChatView(tk.Frame):
         self._log = log_fn
         self._on_name_change = on_name_change
 
-        # ip -> list[ (kind, ...) ]   kind in {"in","out","sys","file_out","file_in_offer","file_in"}
+        # ip -> list[ (kind, ...) ]
         self._conversations: dict[str, list[tuple]] = {}
         self._names: dict[str, str] = {}
         self._unread: dict[str, int] = {}
@@ -137,12 +138,17 @@ class ChatView(tk.Frame):
         # File transfer state (keyed by transfer_id)
         self._progress_vars: dict[str, tk.StringVar] = {}
         self._offer_states: dict[str, str] = {}   # "pending"|"accepted"|"rejected"|"expired"
+        # tid -> file path when transfer completes ("" = done but no file to open)
+        self._transfer_paths: dict[str, str] = {}
 
         # Chat request state (keyed by ip)
         self._chat_req_states: dict[str, str] = {}  # "pending"|"accepted"|"blocked"
 
         # Custom aliases for manual peers (takes priority over _names)
         self._aliases: dict[str, str] = {}
+
+        # Inline roster rename state
+        self._roster_edit_ip: str | None = None
 
         self._ft = FileTransferService(chat_service)
         self._ft.start()
@@ -184,8 +190,24 @@ class ChatView(tk.Frame):
         rename.pack(side="left", padx=6)
 
         # ── Manual IP connect (cross-subnet chat) ───────────────────────────
-        themed_label(left, "CONNECT BY IP", color_role="text_sec",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(4, 0))
+        ip_hdr = tk.Frame(left, bg=theme.color("panel"))
+        theme.register(ip_hdr, bg="panel")
+        ip_hdr.pack(fill="x", pady=(4, 0))
+        themed_label(ip_hdr, "CONNECT BY IP", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="panel").pack(side="left")
+        # External-IP chat toggle (ON/OFF) — inline next to the label
+        self._ip_chat_btn = tk.Button(
+            ip_hdr,
+            text="ON" if self.chat.ip_chat_enabled else "OFF",
+            bg=theme.color("success") if self.chat.ip_chat_enabled else "#888888",
+            fg="#ffffff", font=("Segoe UI", 7, "bold"), relief="flat",
+            cursor="hand2", padx=4, pady=0,
+            activeforeground="#ffffff",
+            command=self._toggle_ip_chat)
+        self._ip_chat_btn.pack(side="right", padx=(4, 0))
+        themed_label(ip_hdr, "ext:", color_role="text_sec",
+                     font=("Segoe UI", 7), bg_role="panel").pack(side="right")
+
         ip_row = tk.Frame(left, bg=theme.color("panel2"))
         theme.register(ip_row, bg="panel2")
         ip_row.pack(fill="x", pady=(2, 8))
@@ -203,8 +225,8 @@ class ChatView(tk.Frame):
         self._manual_ip_entry.bind("<FocusOut>", self._restore_ip_hint)
         self._manual_ip_entry.bind("<Return>", lambda e: self._connect_manual_ip())
         self._manual_ip_entry.pack(side="left", fill="x", expand=True)
-        connect_lbl = themed_label(ip_row, "➤", color_role="accent",
-                                   font=("Segoe UI", 12, "bold"), bg_role="panel2")
+        connect_lbl = themed_label(ip_row, "->", color_role="accent",
+                                   font=("Segoe UI", 10, "bold"), bg_role="panel2")
         connect_lbl.config(cursor="hand2")
         connect_lbl.bind("<Button-1>", lambda e: self._connect_manual_ip())
         connect_lbl.pack(side="left", padx=6)
@@ -214,7 +236,7 @@ class ChatView(tk.Frame):
         self._roster = ScrollFrame(left, bg_role="log_bg")
         self._roster.pack(fill="both", expand=True, pady=(4, 8))
 
-        self._demo_btn = themed_button(left, "✨  Try Demo Chat", self._start_demo,
+        self._demo_btn = themed_button(left, "Try Demo Chat", self._start_demo,
                                        color_role="accent", width=18)
         self._demo_btn.pack(fill="x")
 
@@ -249,8 +271,8 @@ class ChatView(tk.Frame):
         head_btns = tk.Frame(self._head, bg=theme.color("panel2"))
         theme.register(head_btns, bg="panel2")
         head_btns.pack(side="right", padx=8)
-        self._clear_btn = themed_button(head_btns, "🗑 Clear", self._clear_chat,
-                                        color_role="text_sec", width=8)
+        self._clear_btn = themed_button(head_btns, "Clear", self._clear_chat,
+                                        color_role="text_sec", width=7)
         self._clear_btn.pack(side="right", pady=6)
         self._clear_btn.config(state="disabled")
 
@@ -270,11 +292,11 @@ class ChatView(tk.Frame):
         self._entry.bind("<FocusIn>", self._clear_placeholder)
         self._entry.bind("<FocusOut>", self._restore_placeholder)
         self._entry.bind("<Return>", lambda e: self._send())
-        self._attach_btn = themed_button(composer, "📁 File", self._attach_file,
-                                         color_role="text_sec", width=6)
+        self._attach_btn = themed_button(composer, "Attach", self._attach_file,
+                                         color_role="text_sec", width=7)
         self._attach_btn.pack(side="left", padx=(4, 0), pady=4)
-        self._send_btn = themed_button(composer, "➤ Send", self._send,
-                                       color_role="accent", width=8)
+        self._send_btn = themed_button(composer, "Send", self._send,
+                                       color_role="accent", width=7)
         self._send_btn.pack(side="left", padx=(6, 6), pady=4)
 
         self._show_empty_state()
@@ -314,9 +336,9 @@ class ChatView(tk.Frame):
             hint = tk.Frame(body, bg=theme.color("log_bg"))
             theme.register(hint, bg="log_bg")
             hint.pack(fill="x", pady=20, padx=10)
-            themed_label(hint, "🔍", color_role="text_sec",
+            themed_label(hint, "...", color_role="text_sec",
                          font=("Segoe UI", 18), bg_role="log_bg", anchor="center").pack()
-            themed_label(hint, "Looking for people on\nyour network…",
+            themed_label(hint, "Looking for people on\nyour network...",
                          color_role="text_sec", font=("Segoe UI", 8),
                          bg_role="log_bg", anchor="center").pack()
             themed_label(hint, "Open this app on another PC,\nor click Try Demo Chat.",
@@ -334,12 +356,17 @@ class ChatView(tk.Frame):
                 sub_text = "demo peer"
             elif self.chat.is_manual_peer(ip):
                 online = self.chat.is_peer_online(ip)
-                sub_text = f"{ip}  ·  manual  ({'reachable ✓' if online else 'unreachable ✗'})"
+                sub_text = f"{ip}  .  manual  ({'reachable' if online else 'unreachable'})"
             else:
-                sub_text = f"{ip}  ·  online"
+                sub_text = f"{ip}  .  online"
             self._head_sub.config(text=sub_text)
 
     def _add_roster_row(self, body, ip: str, name: str) -> None:
+        # Inline rename mode: show edit row instead
+        if ip == self._roster_edit_ip:
+            self._add_roster_edit_row(body, ip)
+            return
+
         display = self._peer_display_name(ip)
         active = (ip == self._active_ip)
         bg_role = "select_bg" if active else "log_bg"
@@ -359,19 +386,19 @@ class ChatView(tk.Frame):
             sub = "demo peer"
         elif self.chat.is_manual_peer(ip):
             online = self.chat.is_peer_online(ip)
-            sub = f"{ip}  ·  {'reachable ✓' if online else 'unreachable ✗'}"
+            sub = f"{ip}  .  {'reachable' if online else 'unreachable'}"
         else:
             sub = ip
 
         themed_label(txt, sub, color_role="text_sec",
                      font=("Consolas", 7), bg_role=bg_role).pack(anchor="w")
 
-        # ✏ rename button (manual peers only)
+        # Rename button (manual peers only)
         if self.chat.is_manual_peer(ip):
-            pen = themed_label(row, "✏", color_role="text_sec",
-                               font=("Segoe UI", 9), bg_role=bg_role)
-            pen.config(cursor="hand2")
-            pen.bind("<Button-1>", lambda e, _ip=ip: self._rename_peer(_ip))
+            pen = themed_label(row, "[ ]", color_role="text_sec",
+                               font=("Segoe UI", 8), bg_role=bg_role)
+            pen.config(cursor="hand2", text="edit")
+            pen.bind("<Button-1>", lambda e, _ip=ip: self._start_rename_peer(_ip))
             pen.pack(side="right", padx=(0, 6))
 
         unread = self._unread.get(ip, 0)
@@ -389,6 +416,57 @@ class ChatView(tk.Frame):
             row.bind("<Enter>", lambda e: self._hover_row(row, txt, True))
             row.bind("<Leave>", lambda e: self._hover_row(row, txt, False))
 
+    def _add_roster_edit_row(self, body, ip: str) -> None:
+        """Render an inline name-entry row for the given IP."""
+        row = tk.Frame(body, bg=theme.color("log_bg"))
+        theme.register(row, bg="log_bg")
+        row.pack(fill="x", pady=1)
+
+        make_avatar(row, self._peer_display_name(ip), size=32,
+                    bg_role="log_bg").pack(side="left", padx=6, pady=5)
+
+        var = tk.StringVar(value=self._aliases.get(ip) or self._names.get(ip, ip))
+        entry = tk.Entry(row, textvariable=var, font=("Segoe UI", 9),
+                         relief="flat", bd=4, bg=theme.color("panel2"),
+                         fg=theme.color("text_pri"),
+                         insertbackground=theme.color("text_pri"), width=10)
+        entry.pack(side="left", fill="x", expand=True, padx=4, pady=6)
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+        def _save():
+            alias = var.get().strip()[:32]
+            if alias and alias != ip:
+                self._aliases[ip] = alias
+            elif ip in self._aliases:
+                del self._aliases[ip]
+            self._roster_edit_ip = None
+            self._save_peer_history(ip)
+            self.update_roster(self.chat.peers())
+            if self._active_ip == ip:
+                self._head_name.config(text=self._peer_display_name(ip))
+
+        def _cancel_edit():
+            self._roster_edit_ip = None
+            self.update_roster(self.chat.peers())
+
+        ok = tk.Label(row, text="OK", bg=theme.color("success"), fg="#ffffff",
+                      font=("Segoe UI", 7, "bold"), cursor="hand2", padx=4, pady=2)
+        ok.bind("<Button-1>", lambda e: _save())
+        ok.pack(side="left", padx=2)
+
+        x = tk.Label(row, text="X", bg=theme.color("danger"), fg="#ffffff",
+                     font=("Segoe UI", 7, "bold"), cursor="hand2", padx=4, pady=2)
+        x.bind("<Button-1>", lambda e: _cancel_edit())
+        x.pack(side="left", padx=(0, 4))
+
+        entry.bind("<Return>", lambda e: _save())
+        entry.bind("<Escape>", lambda e: _cancel_edit())
+
+    def _start_rename_peer(self, ip: str) -> None:
+        self._roster_edit_ip = ip
+        self.update_roster(self.chat.peers())
+
     def _hover_row(self, row, txt, entering) -> None:
         c = theme.color("hover" if entering else "log_bg")
         try:
@@ -398,6 +476,16 @@ class ChatView(tk.Frame):
                 child.config(bg=c)
         except tk.TclError:
             pass
+
+    # ── IP chat toggle ─────────────────────────────────────────────────────────
+    def _toggle_ip_chat(self) -> None:
+        self.chat.ip_chat_enabled = not self.chat.ip_chat_enabled
+        enabled = self.chat.ip_chat_enabled
+        config.save_ip_chat_enabled(enabled)
+        self._ip_chat_btn.config(
+            text="ON" if enabled else "OFF",
+            bg=theme.color("success") if enabled else "#888888")
+        self._log(f"External IP chat {'enabled' if enabled else 'disabled'}.")
 
     # ── conversation ──────────────────────────────────────────────────────────
     def select_peer(self, ip: str) -> None:
@@ -413,9 +501,9 @@ class ChatView(tk.Frame):
             sub_text = "demo peer"
         elif self.chat.is_manual_peer(ip):
             online = self.chat.is_peer_online(ip)
-            sub_text = f"{ip}  ·  manual  ({'reachable ✓' if online else 'unreachable ✗'})"
+            sub_text = f"{ip}  .  manual  ({'reachable' if online else 'unreachable'})"
         else:
-            sub_text = f"{ip}  ·  online"
+            sub_text = f"{ip}  .  online"
         self._head_sub.config(text=sub_text)
         self._set_composer_state(True)
         self._render(ip)
@@ -427,7 +515,7 @@ class ChatView(tk.Frame):
         wrap = tk.Frame(self._messages.body, bg=theme.color("log_bg"))
         theme.register(wrap, bg="log_bg")
         wrap.pack(expand=True, pady=60)
-        themed_label(wrap, "💬", color_role="text_sec", font=("Segoe UI", 34),
+        themed_label(wrap, "[chat]", color_role="text_sec", font=("Segoe UI", 18),
                      bg_role="log_bg", anchor="center").pack()
         themed_label(wrap, "Pick someone from the list to start chatting.",
                      color_role="text_sec", font=("Segoe UI", 9),
@@ -437,7 +525,7 @@ class ChatView(tk.Frame):
         self._messages.clear()
         msgs = self._conversations.get(ip, [])
         if not msgs:
-            themed_label(self._messages.body, "Say hi 👋", color_role="text_sec",
+            themed_label(self._messages.body, "Say hi!", color_role="text_sec",
                          font=("Segoe UI", 9), bg_role="log_bg",
                          anchor="center").pack(pady=30)
         else:
@@ -464,7 +552,7 @@ class ChatView(tk.Frame):
         stamp = time.strftime("%H:%M", time.localtime(ts))
 
         if kind == "sys":
-            themed_label(body, f"— {text} —", color_role="text_sec",
+            themed_label(body, f"-- {text} --", color_role="text_sec",
                          font=("Segoe UI", 8, "italic"), bg_role="log_bg",
                          anchor="center").pack(fill="x", pady=4)
             return
@@ -509,18 +597,16 @@ class ChatView(tk.Frame):
         theme.register(bubble, bg=bub_role)
         bubble.pack(anchor="e" if is_out else "w")
 
-        # Filename header — always use the bubble's own text colour
-        themed_label(bubble, f"📁  {meta['filename']}",
+        # Filename header
+        themed_label(bubble, meta['filename'],
                      color_role=tx_role, font=("Segoe UI", 9, "bold"),
                      bg_role=bub_role).pack(anchor="w", padx=10, pady=(8, 0))
-        # Size — slightly dimmed but still readable: use tx_role for outgoing (white on blue),
-        # text_sec for incoming (grey on light panel — fine contrast)
+        # Size
         size_color = tx_role if is_out else "text_sec"
         themed_label(bubble, _fmt_size(meta["size"]),
                      color_role=size_color, font=("Segoe UI", 8),
                      bg_role=bub_role).pack(anchor="w", padx=10)
 
-        # Progress label colour: same logic
         prog_fg = tx_role if is_out else "text_sec"
 
         if kind == "file_in_offer":
@@ -529,7 +615,7 @@ class ChatView(tk.Frame):
             expired = (time.time() - ts > 60) and state == "pending"
 
             if expired or state == "expired":
-                themed_label(bubble, "⏱ Offer expired",
+                themed_label(bubble, "Offer expired",
                              color_role=prog_fg, font=("Segoe UI", 8, "italic"),
                              bg_role=bub_role).pack(anchor="w", padx=10, pady=(4, 2))
             elif state == "pending":
@@ -537,14 +623,14 @@ class ChatView(tk.Frame):
                 theme.register(btn_row, bg=bub_role)
                 btn_row.pack(anchor="w", padx=10, pady=(6, 2))
                 tk.Button(
-                    btn_row, text="✓  Accept",
+                    btn_row, text="Accept",
                     bg=theme.color("success"), fg="#ffffff",
                     font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2",
                     command=lambda: self._accept_file(
                         tid, from_ip, meta["filename"], meta["size"])
                 ).pack(side="left", padx=(0, 6))
                 tk.Button(
-                    btn_row, text="✗  Reject",
+                    btn_row, text="Reject",
                     bg=theme.color("danger"), fg="#ffffff",
                     font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2",
                     command=lambda: self._reject_file(tid, from_ip)
@@ -557,9 +643,21 @@ class ChatView(tk.Frame):
                                     font=("Consolas", 8), justify="left")
                     theme.register(prog, bg=bub_role, fg=prog_fg)
                     prog.pack(anchor="w", padx=10, pady=(4, 2))
-
+                    done_path = self._transfer_paths.get(tid)
+                    if done_path is None:
+                        # In progress — show cancel button
+                        _tid = tid
+                        tk.Button(bubble, text="Cancel",
+                                  bg=theme.color("danger"), fg="#ffffff",
+                                  font=("Segoe UI", 7, "bold"), relief="flat",
+                                  cursor="hand2",
+                                  command=lambda: self._cancel_file(_tid)
+                                  ).pack(anchor="w", padx=10, pady=(0, 2))
+                    elif done_path:
+                        # Done with a saved file — show open buttons
+                        self._add_open_buttons(bubble, done_path, bub_role)
         else:
-            # file_out or file_in (after accepting)
+            # file_out (sender)
             var = self._progress_vars.get(tid)
             if var:
                 prog = tk.Label(bubble, textvariable=var,
@@ -567,10 +665,41 @@ class ChatView(tk.Frame):
                                 font=("Consolas", 8), justify="left")
                 theme.register(prog, bg=bub_role, fg=prog_fg)
                 prog.pack(anchor="w", padx=10, pady=(4, 2))
+                done_path = self._transfer_paths.get(tid)
+                if done_path is None:
+                    # In progress or waiting — show cancel button
+                    _tid = tid
+                    tk.Button(bubble, text="Cancel",
+                              bg=theme.color("danger"), fg="#ffffff",
+                              font=("Segoe UI", 7, "bold"), relief="flat",
+                              cursor="hand2",
+                              command=lambda: self._cancel_file(_tid)
+                              ).pack(anchor="w", padx=10, pady=(0, 2))
+                elif done_path:
+                    # Sender has the original file — show open buttons
+                    self._add_open_buttons(bubble, done_path, bub_role)
 
         themed_label(bubble, stamp, color_role=prog_fg,
                      font=("Segoe UI", 7), bg_role=bub_role).pack(
                          anchor="e", padx=10, pady=(2, 6))
+
+    def _add_open_buttons(self, parent: tk.Frame, path: str, bub_role: str) -> None:
+        """Add 'Open File' and 'Open Folder' buttons after a completed transfer."""
+        btn_row = tk.Frame(parent, bg=theme.color(bub_role))
+        theme.register(btn_row, bg=bub_role)
+        btn_row.pack(anchor="w", padx=10, pady=(2, 0))
+        _p = str(path)
+        tk.Button(btn_row, text="Open File",
+                  bg=theme.color("panel2"), fg=theme.color("text_pri"),
+                  font=("Segoe UI", 7), relief="flat", cursor="hand2",
+                  command=lambda: os.startfile(_p)
+                  ).pack(side="left", padx=(0, 4))
+        tk.Button(btn_row, text="Open Folder",
+                  bg=theme.color("panel2"), fg=theme.color("text_pri"),
+                  font=("Segoe UI", 7), relief="flat", cursor="hand2",
+                  command=lambda: subprocess.Popen(
+                      f'explorer /select,"{_p}"', shell=True)
+                  ).pack(side="left")
 
     def _add_chat_req_bubble(self, entry: tuple) -> None:
         _, ip, meta, ts = entry
@@ -582,7 +711,7 @@ class ChatView(tk.Frame):
         theme.register(card, bg="panel2")
         card.pack(fill="x", padx=8, pady=6)
 
-        themed_label(card, f"🔔  {meta['from_name']} ({ip}) wants to chat",
+        themed_label(card, f"{meta['from_name']} ({ip}) wants to chat",
                      color_role="text_pri", font=("Segoe UI", 9, "bold"),
                      bg_role="panel2").pack(anchor="w", padx=10, pady=(8, 2))
 
@@ -595,22 +724,22 @@ class ChatView(tk.Frame):
             btns = tk.Frame(card, bg=theme.color("panel2"))
             theme.register(btns, bg="panel2")
             btns.pack(anchor="w", padx=10, pady=(4, 8))
-            tk.Button(btns, text="✓  Accept",
+            tk.Button(btns, text="Accept",
                       bg=theme.color("success"), fg="#ffffff",
                       font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2",
                       command=lambda: self._accept_chat(ip)
                       ).pack(side="left", padx=(0, 6))
-            tk.Button(btns, text="✗  Block",
+            tk.Button(btns, text="Block",
                       bg=theme.color("danger"), fg="#ffffff",
                       font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2",
                       command=lambda: self._block_chat(ip)
                       ).pack(side="left")
         elif state == "accepted":
-            themed_label(card, "✓ Accepted — messages will now appear normally.",
+            themed_label(card, "Accepted — messages will now appear normally.",
                          color_role="success", font=("Segoe UI", 8),
                          bg_role="panel2").pack(anchor="w", padx=10, pady=(4, 8))
         else:
-            themed_label(card, "✗ Blocked — messages from this IP are discarded.",
+            themed_label(card, "Blocked — messages from this IP are discarded.",
                          color_role="danger", font=("Segoe UI", 8),
                          bg_role="panel2").pack(anchor="w", padx=10, pady=(4, 8))
 
@@ -654,7 +783,7 @@ class ChatView(tk.Frame):
         self._entry.delete(0, "end")
         self._conversations.setdefault(ip, []).append(("out", "You", text, time.time()))
         self._trim_history(ip)
-        self._save_history()
+        self._save_peer_history(ip)
         self._render(ip)
 
         def worker():
@@ -674,7 +803,7 @@ class ChatView(tk.Frame):
         self._names[ip] = name
         self._conversations.setdefault(ip, []).append(("in", name, text, ts))
         self._trim_history(ip)
-        self._save_history()
+        self._save_peer_history(ip)
         shown = (ip == self._active_ip and self._visible)
         if shown:
             self._add_bubble(("in", name, text, ts))
@@ -743,8 +872,38 @@ class ChatView(tk.Frame):
 
         threading.Thread(target=_probe, daemon=True).start()
 
-    # ── chat history persistence ─────────────────────────────────────────────
+    # ── chat history persistence (per-peer files) ─────────────────────────────
     def _load_history(self) -> None:
+        try:
+            chats_dir = config.get_peer_chat_dir()
+            loaded_any = False
+            for fname in os.listdir(chats_dir):
+                if not fname.endswith(".json"):
+                    continue
+                fpath = os.path.join(chats_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    ip = data.get("ip")
+                    if not ip:
+                        continue
+                    if data.get("name"):
+                        self._names[ip] = data["name"]
+                    if data.get("alias"):
+                        self._aliases[ip] = data["alias"]
+                    self._conversations[ip] = [
+                        tuple(m) for m in data.get("messages", [])[-_MAX_HISTORY_PER_PEER:]
+                    ]
+                    loaded_any = True
+                except Exception:
+                    pass
+            # One-time migration from legacy single file
+            if not loaded_any:
+                self._load_legacy_history()
+        except Exception:
+            pass
+
+    def _load_legacy_history(self) -> None:
         try:
             path = config.get_chat_history_path()
             if not os.path.exists(path):
@@ -765,25 +924,33 @@ class ChatView(tk.Frame):
         except Exception:
             pass
 
-    def _save_history(self) -> None:
+    def _save_peer_history(self, ip: str) -> None:
+        """Persist a single peer's chat history asynchronously."""
+        msgs = list(self._conversations.get(ip, []))
+        name = self._names.get(ip, ip)
+        alias = self._aliases.get(ip)
+
         def _write():
             try:
-                data = {}
-                for ip, msgs in self._conversations.items():
-                    kept = [m for m in msgs
-                            if not m[0].startswith("file_") and not m[0].startswith("chat_req")]
-                    data[ip] = [list(m) for m in kept[-_MAX_HISTORY_PER_PEER:]]
-                data["_names"] = dict(self._names)
-                data["_aliases"] = dict(self._aliases)
-                path = config.get_chat_history_path()
+                safe = ip.replace(".", "_").replace(":", "_")
+                path = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
+                kept = [m for m in msgs
+                        if not m[0].startswith("file_") and not m[0].startswith("chat_req")]
+                data: dict = {
+                    "ip": ip,
+                    "name": name,
+                    "messages": [list(m) for m in kept[-_MAX_HISTORY_PER_PEER:]],
+                }
+                if alias:
+                    data["alias"] = alias
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
             except Exception:
                 pass
+
         threading.Thread(target=_write, daemon=True).start()
 
     def _trim_history(self, ip: str) -> None:
-        """Keep at most _MAX_HISTORY_PER_PEER messages per peer."""
         msgs = self._conversations.get(ip)
         if msgs and len(msgs) > _MAX_HISTORY_PER_PEER:
             self._conversations[ip] = msgs[-_MAX_HISTORY_PER_PEER:]
@@ -798,30 +965,44 @@ class ChatView(tk.Frame):
             return
         filename = os.path.basename(path)
         size = os.path.getsize(path)
-        var = tk.StringVar(value=f"⏳ Waiting for {self._names.get(ip, ip)} to accept…")
+        var = tk.StringVar(value=f"Waiting for {self._names.get(ip, ip)} to accept...")
 
         def _do_offer():
             tid_holder: list[str | None] = [None]
 
             def _progress(done, total, speed, elapsed, eta):
-                tid = tid_holder[0]
-                if tid is None:
+                _tid = tid_holder[0]
+                if _tid is None:
                     return
                 pct = int(done * 100 / total) if total else 0
                 self.after(0, lambda: var.set(
-                    f"⬆ {pct}%  {_fmt_speed(speed)}"
+                    f"Sending {pct}%  {_fmt_speed(speed)}"
                     f"  elapsed {_fmt_eta(elapsed)}  ETA {_fmt_eta(eta)}"
                 ))
 
             def _done():
-                self.after(0, lambda: var.set(f"✓ Sent"))
+                _tid = tid_holder[0]
+                def _update():
+                    var.set("Sent!")
+                    if _tid:
+                        self._transfer_paths[_tid] = path  # original file for open buttons
+                        if self._active_ip == ip:
+                            self._render(self._active_ip)
+                self.after(0, _update)
 
             def _error(msg):
-                self.after(0, lambda: var.set(f"✗ {msg}"))
+                _tid = tid_holder[0]
+                def _update():
+                    var.set(f"Failed: {msg}")
+                    if _tid:
+                        self._transfer_paths[_tid] = ""  # mark done, no file
+                        if self._active_ip == ip:
+                            self._render(self._active_ip)
+                self.after(0, _update)
 
             try:
                 def _expire():
-                    self.after(0, lambda: var.set("⏱ No response — offer expired"))
+                    self.after(0, lambda: var.set("No response — offer expired"))
 
                 tid = self._ft.offer_file(ip, path,
                                           progress_cb=_progress,
@@ -865,34 +1046,57 @@ class ChatView(tk.Frame):
 
     def _accept_file(self, tid: str, from_ip: str, filename: str, size: int) -> None:
         self._offer_states[tid] = "accepted"
-        var = tk.StringVar(value="⬇ Connecting…")
+        var = tk.StringVar(value="Connecting...")
         self._progress_vars[tid] = var
         if self._active_ip:
             self._render(self._active_ip)
 
-        self._ft.send_accept(from_ip, tid)
-
         def _progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
             self.after(0, lambda: var.set(
-                f"⬇ {pct}%  {_fmt_speed(speed)}"
+                f"Receiving {pct}%  {_fmt_speed(speed)}"
                 f"  elapsed {_fmt_eta(elapsed)}  ETA {_fmt_eta(eta)}"
             ))
 
         def _done(save_path):
-            self.after(0, lambda: var.set(
-                f"✓ Saved → Documents/{FILE_SAVE_DIR}/{filename}"
-            ))
+            def _update():
+                var.set(f"Saved!")
+                self._transfer_paths[tid] = save_path
+                if self._active_ip:
+                    self._render(self._active_ip)
+            self.after(0, _update)
 
         def _error(msg):
-            self.after(0, lambda: var.set(f"✗ Transfer failed: {msg}"))
+            def _update():
+                var.set(f"Failed: {msg}")
+                self._transfer_paths[tid] = ""  # mark done
+                if self._active_ip:
+                    self._render(self._active_ip)
+            self.after(0, _update)
 
-        self._ft.receive_file(tid, from_ip,
-                              progress_cb=_progress, done_cb=_done, error_cb=_error)
+        def _do_accept():
+            # send_accept blocks up to 3 s — run it off the main thread
+            self._ft.send_accept(from_ip, tid)
+            self._ft.receive_file(tid, from_ip,
+                                  progress_cb=_progress, done_cb=_done, error_cb=_error)
+
+        threading.Thread(target=_do_accept, daemon=True).start()
 
     def _reject_file(self, tid: str, from_ip: str) -> None:
         self._offer_states[tid] = "rejected"
-        self._ft.send_reject(from_ip, tid)
+        if self._active_ip:
+            self._render(self._active_ip)
+        threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid),
+                         daemon=True).start()
+
+    def _cancel_file(self, tid: str) -> None:
+        """Cancel an outgoing offer or an active transfer (works for both sides)."""
+        var = self._progress_vars.get(tid)
+        self._ft.cancel_offer(tid)
+        self._ft.cancel_transfer(tid)
+        self._transfer_paths[tid] = ""  # mark done, no file to open
+        if var:
+            var.set("Cancelled")
         if self._active_ip:
             self._render(self._active_ip)
 
@@ -901,56 +1105,17 @@ class ChatView(tk.Frame):
         tid = msg["transfer_id"]
         var = self._progress_vars.get(tid)
         if var:
-            var.set(f"⬆ {name} accepted — sending…")
+            var.set(f"{name} accepted — sending...")
 
     def on_file_rejected(self, ip: str, name: str, msg: dict) -> None:
         tid = msg["transfer_id"]
         self._ft.cancel_offer(tid)
+        self._transfer_paths[tid] = ""  # mark done
         var = self._progress_vars.get(tid)
         if var:
-            var.set(f"✗ Rejected by {name}")
-
-    # ── file offer expiry (sender side) ──────────────────────────────────────
-    def _make_expire_cb(self, ip: str, var: tk.StringVar, filename: str):
-        def _expire():
-            self.after(0, lambda: var.set(f"⏱ No response — offer expired"))
-        return _expire
-
-    # ── rename manual peer ────────────────────────────────────────────────────
-    def _rename_peer(self, ip: str) -> None:
-        current = self._aliases.get(ip) or self._names.get(ip, ip)
-        win = tk.Toplevel(self)
-        win.title("Rename Peer")
-        win.configure(bg=theme.color("panel"))
-        win.resizable(False, False)
-        win.grab_set()
-        themed_label(win, f"Name for  {ip}", color_role="text_sec",
-                     font=("Segoe UI", 8)).pack(padx=16, pady=(12, 4), anchor="w")
-        var = tk.StringVar(value=current)
-        entry = tk.Entry(win, textvariable=var, font=("Segoe UI", 10),
-                         relief="flat", bd=6,
-                         bg=theme.color("panel2"), fg=theme.color("text_pri"),
-                         insertbackground=theme.color("text_pri"), width=22)
-        entry.pack(padx=16, pady=(0, 8))
-        entry.select_range(0, "end")
-        entry.focus_set()
-
-        def _save():
-            alias = var.get().strip()[:32]
-            if alias and alias != ip:
-                self._aliases[ip] = alias
-            elif ip in self._aliases:
-                del self._aliases[ip]
-            self._save_history()
-            self.update_roster(self.chat.peers())
-            if self._active_ip == ip:
-                display = self._peer_display_name(ip)
-                self._head_name.config(text=display)
-            win.destroy()
-
-        entry.bind("<Return>", lambda e: _save())
-        themed_button(win, "Save", _save, color_role="accent").pack(
-            padx=16, pady=(0, 12), fill="x")
+            var.set(f"Rejected by {name}")
+        if self._active_ip == ip:
+            self._render(self._active_ip)
 
     # ── clear chat ────────────────────────────────────────────────────────────
     def _clear_chat(self) -> None:
@@ -959,7 +1124,7 @@ class ChatView(tk.Frame):
             return
         self._conversations.pop(ip, None)
         self._unread.pop(ip, None)
-        self._save_history()
+        self._save_peer_history(ip)
         self._show_empty_state()
         self._log(f"Chat with {self._peer_display_name(ip)} cleared.")
 
@@ -967,7 +1132,6 @@ class ChatView(tk.Frame):
     def on_chat_request_received(self, ip: str, name: str, msg: dict) -> None:
         """Show an inline Accept/Block prompt for a first-contact external IP."""
         if ip in self._chat_req_states:
-            # Already decided — deliver normally if accepted
             if self._chat_req_states[ip] == "accepted":
                 self.chat.approve_ip(ip)
             return

@@ -127,11 +127,20 @@ def save_ip_chat_enabled(enabled: bool) -> bool:
 # ── Chat history path ────────────────────────────────────────────────────────
 
 def get_chat_history_path() -> str:
-    """Return the path to the JSON file that stores chat history.
-
-    Creates the parent directory if it doesn't already exist.
-    """
+    """Legacy single-file history path (kept for migration reads only)."""
     appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
     folder = os.path.join(appdata, "NetSplitTunnel")
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "chat_history.json")
+
+
+def get_peer_chat_dir() -> str:
+    """Return the directory where per-peer chat JSON files are stored.
+
+    Each peer is saved as ``{safe_ip}.json`` inside this directory.
+    Creates the directory if it doesn't already exist.
+    """
+    appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+    folder = os.path.join(appdata, "NetSplitTunnel", "chats")
+    os.makedirs(folder, exist_ok=True)
+    return folder

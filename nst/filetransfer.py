@@ -28,8 +28,10 @@ CHUNK = 65536
 class FileTransferService:
     def __init__(self, chat_service) -> None:
         self._chat = chat_service
-        # transfer_id -> (path, size, progress_cb, done_cb, error_cb)
+        # transfer_id -> (path, size, progress_cb, done_cb, error_cb, timer)
         self._pending_sends: dict[str, tuple] = {}
+        # transfer_id -> threading.Event  (set to cancel an active transfer)
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self.running = False
 
@@ -53,11 +55,13 @@ class FileTransferService:
         tid = uuid.uuid4().hex[:12]
         size = os.path.getsize(path)
         filename = os.path.basename(path)
+        cancel_event = threading.Event()
 
         def _on_expire():
             with self._lock:
                 if tid in self._pending_sends:
                     del self._pending_sends[tid]
+                self._cancel_events.pop(tid, None)
             if expire_cb:
                 expire_cb()
 
@@ -66,6 +70,7 @@ class FileTransferService:
 
         with self._lock:
             self._pending_sends[tid] = (path, size, progress_cb, done_cb, error_cb, timer)
+            self._cancel_events[tid] = cancel_event
         timer.start()
 
         payload = json.dumps({
@@ -83,13 +88,26 @@ class FileTransferService:
             timer.cancel()
             with self._lock:
                 self._pending_sends.pop(tid, None)
+                self._cancel_events.pop(tid, None)
             raise
         return tid
 
     def cancel_offer(self, tid: str) -> None:
-        """Cancel a pending outgoing offer (e.g. receiver rejected it)."""
+        """Cancel a pending outgoing offer (e.g. receiver rejected it or user cancelled)."""
         with self._lock:
             entry = self._pending_sends.pop(tid, None)
+            self._cancel_events.pop(tid, None)
+        if entry and len(entry) > 5 and entry[5]:
+            entry[5].cancel()
+
+    def cancel_transfer(self, tid: str) -> None:
+        """Signal an active in-progress transfer to stop."""
+        with self._lock:
+            event = self._cancel_events.get(tid)
+            # also pull from pending sends if still waiting
+            entry = self._pending_sends.pop(tid, None)
+        if event:
+            event.set()
         if entry and len(entry) > 5 and entry[5]:
             entry[5].cancel()
 
@@ -115,6 +133,7 @@ class FileTransferService:
 
     def _serve_one(self, conn: socket.socket) -> None:
         tid = None
+        entry = None
         try:
             conn.settimeout(5.0)
             buf = b""
@@ -126,9 +145,11 @@ class FileTransferService:
             tid = buf.split(b"\n", 1)[0].decode().strip()
             with self._lock:
                 entry = self._pending_sends.get(tid)
+                cancel_event = self._cancel_events.get(tid)
             if not entry or not os.path.exists(entry[0]):
                 return
-            path, size, progress_cb, done_cb, error_cb = entry[0], entry[1], entry[2], entry[3], entry[4]
+            path, size, progress_cb, done_cb, error_cb = (
+                entry[0], entry[1], entry[2], entry[3], entry[4])
             timer = entry[5] if len(entry) > 5 else None
             if timer:
                 timer.cancel()
@@ -140,6 +161,8 @@ class FileTransferService:
             start = time.time()
             with open(path, "rb") as f:
                 while True:
+                    if cancel_event and cancel_event.is_set():
+                        raise InterruptedError("Cancelled")
                     chunk = f.read(CHUNK)
                     if not chunk:
                         break
@@ -152,17 +175,26 @@ class FileTransferService:
                         progress_cb(sent, size, speed, elapsed, eta)
             with self._lock:
                 self._pending_sends.pop(tid, None)
+                self._cancel_events.pop(tid, None)
             if done_cb:
                 done_cb()
+        except InterruptedError as e:
+            if tid:
+                with self._lock:
+                    self._pending_sends.pop(tid, None)
+                    self._cancel_events.pop(tid, None)
+            if entry and entry[4]:
+                entry[4](str(e))
         except Exception as e:
             if tid:
                 with self._lock:
-                    entry = self._pending_sends.pop(tid, None)
-                if entry:
-                    if len(entry) > 5 and entry[5]:
-                        entry[5].cancel()
-                    if entry[4]:
-                        entry[4](str(e))
+                    _entry = self._pending_sends.pop(tid, None)
+                    self._cancel_events.pop(tid, None)
+                if _entry:
+                    if len(_entry) > 5 and _entry[5]:
+                        _entry[5].cancel()
+                    if _entry[4]:
+                        _entry[4](str(e))
         finally:
             try:
                 conn.close()
@@ -171,6 +203,7 @@ class FileTransferService:
 
     # ── receiver ──────────────────────────────────────────────────────────────
     def send_accept(self, sender_ip: str, transfer_id: str) -> None:
+        """Send file_accept control message. MUST be called from a background thread."""
         self._send_ctrl(sender_ip, {
             "type": "file_accept",
             "transfer_id": transfer_id,
@@ -179,6 +212,7 @@ class FileTransferService:
         })
 
     def send_reject(self, sender_ip: str, transfer_id: str) -> None:
+        """Send file_reject control message. MUST be called from a background thread."""
         self._send_ctrl(sender_ip, {
             "type": "file_reject",
             "transfer_id": transfer_id,
@@ -188,16 +222,22 @@ class FileTransferService:
 
     def receive_file(self, transfer_id: str, sender_ip: str,
                      progress_cb=None, done_cb=None, error_cb=None) -> None:
+        cancel_event = threading.Event()
+        with self._lock:
+            self._cancel_events[transfer_id] = cancel_event
         threading.Thread(
             target=self._receive_one,
-            args=(transfer_id, sender_ip, progress_cb, done_cb, error_cb),
+            args=(transfer_id, sender_ip, progress_cb, done_cb, error_cb, cancel_event),
             daemon=True,
         ).start()
 
     def _receive_one(self, tid: str, sender_ip: str,
-                     progress_cb, done_cb, error_cb) -> None:
+                     progress_cb, done_cb, error_cb, cancel_event=None) -> None:
+        save_path = None
         try:
             time.sleep(0.3)
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Cancelled")
             with socket.create_connection((sender_ip, FILE_TCP_PORT), timeout=6.0) as s:
                 s.sendall((tid + "\n").encode())
                 buf = b""
@@ -217,6 +257,8 @@ class FileTransferService:
                     if rest:
                         f.write(rest)
                     while received < total:
+                        if cancel_event and cancel_event.is_set():
+                            raise InterruptedError("Cancelled")
                         chunk = s.recv(CHUNK)
                         if not chunk:
                             break
@@ -229,9 +271,20 @@ class FileTransferService:
                             progress_cb(received, total, speed, elapsed, eta)
             if done_cb:
                 done_cb(str(save_path))
+        except InterruptedError as e:
+            if save_path:
+                try:
+                    os.remove(str(save_path))
+                except Exception:
+                    pass
+            if error_cb:
+                error_cb(str(e))
         except Exception as e:
             if error_cb:
                 error_cb(str(e))
+        finally:
+            with self._lock:
+                self._cancel_events.pop(tid, None)
 
     def _unique_path(self, filename: str) -> Path:
         base = Path.home() / "Documents" / FILE_SAVE_DIR
