@@ -399,7 +399,8 @@ class ChatView(tk.Frame):
                       | set(self._names)
                       | set(self._aliases))
         candidates.discard(self.chat.my_ip)
-        return [ip for ip in candidates if self._is_online(ip, live_ips)]
+        return [ip for ip in candidates
+                if self._is_online(ip, live_ips) or self.chat.is_manual_peer(ip)]
 
     def _roster_tick(self) -> None:
         """Re-check online status on a timer. No presence event fires when a
@@ -436,8 +437,9 @@ class ChatView(tk.Frame):
                          bg_role="log_bg", anchor="center").pack(pady=(6, 0))
             return
 
+        live_set = {p.ip for p in peers}
         for ip in sorted(online, key=lambda x: self._peer_display_name(x).lower()):
-            self._add_roster_row(body, ip, True)
+            self._add_roster_row(body, ip, self._is_online(ip, live_set))
 
         # Update active peer subtext if one is selected
         if self._active_ip:
@@ -1192,7 +1194,6 @@ class ChatView(tk.Frame):
     def _cancel_file(self, tid: str) -> None:
         """Cancel an outgoing offer or an active transfer (works for both sides)."""
         var = self._progress_vars.get(tid)
-        self._ft.cancel_offer(tid)
         self._ft.cancel_transfer(tid)
         self._transfer_paths[tid] = ""  # mark done, no file to open
         if var:

@@ -93,10 +93,13 @@ class FileTransferService:
         return tid
 
     def cancel_offer(self, tid: str) -> None:
-        """Cancel a pending outgoing offer (e.g. receiver rejected it or user cancelled)."""
+        """Cancel a pending outgoing offer (e.g. receiver rejected it or user cancelled).
+
+        Does NOT remove the cancel event — cancel_transfer (or the transfer thread's
+        finally block) owns that cleanup, so callers can call cancel_transfer after this.
+        """
         with self._lock:
             entry = self._pending_sends.pop(tid, None)
-            self._cancel_events.pop(tid, None)
         if entry and len(entry) > 5 and entry[5]:
             entry[5].cancel()
 
