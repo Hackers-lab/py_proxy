@@ -36,6 +36,41 @@ If your computer needs internet access from the Host PC:
 
 ---
 
+## LAN Chat
+
+A built-in **LAN Chat** tab lets every PC running the app talk to the others on the same
+local network — no server, no internet required.
+
+1. Open the application and select the **LAN Chat** tab.
+2. Each PC automatically announces itself, so the **Online Peers** list fills in on its own
+   within a few seconds. *(Only computers running this app appear — discovery uses a small
+   UDP presence broadcast, not a raw ping scan.)*
+3. Set your own name in the **You:** box and click **Rename**. That name is what other PCs
+   see next to your messages. It defaults to your computer name.
+4. Click a peer in the list, type a message, and press **Enter** (or **Send**). You can keep
+   several conversations going at once — just click between peers.
+5. When a message arrives for a conversation you are not currently looking at, a
+   **notification pops up in the bottom-right corner** showing the sender's name and the
+   message text. Click it to jump straight to that conversation. A small unread badge also
+   appears next to the sender in the peer list.
+
+Chat history is kept only while the app is running and is never written to disk.
+
+> [!TIP]
+> Want to see how it works without a second PC? Click **✨ Try Demo Chat** in the LAN Chat
+> tab (or **Chat → Run Chat Demo**). A friendly **Demo Bot** appears in the peer list, greets
+> you with a pop-up notification, and replies to your messages so you can try the full
+> experience on one machine.
+
+## Light & Dark Theme
+
+The app ships in a dark theme, with a one-click **light theme** toggle:
+
+* Click the **☀ / 🌙** button in the top-right of the header, **or**
+* Use **Settings → Light theme**.
+
+Your choice is remembered between launches.
+
 ## Extra Features
 
 ### Real-Time Network Traffic Monitor
