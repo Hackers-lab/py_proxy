@@ -59,7 +59,8 @@ class ScrollFrame(tk.Frame):
     """A vertically scrollable container.
 
     Pack/grid children into ``.body``. The body always matches the canvas width
-    so content reflows instead of needing a horizontal scrollbar.
+    so content reflows instead of needing a horizontal scrollbar.  The scrollbar
+    auto-hides when all content fits within the visible area.
     """
 
     def __init__(self, parent, bg_role: str = "panel", **kw) -> None:
@@ -70,7 +71,7 @@ class ScrollFrame(tk.Frame):
         theme.register(self.canvas, bg=bg_role)
         self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vsb.set)
-        self.vsb.pack(side="right", fill="y")
+        self._vsb_visible = False
         self.canvas.pack(side="left", fill="both", expand=True)
 
         self.body = tk.Frame(self.canvas, bg=theme.color(bg_role))
@@ -84,12 +85,28 @@ class ScrollFrame(tk.Frame):
 
     def _on_body_configure(self, _e=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._check_scrollbar()
 
     def _on_canvas_configure(self, e) -> None:
         self.canvas.itemconfigure(self._win, width=e.width)
+        self._check_scrollbar()
+
+    def _check_scrollbar(self) -> None:
+        """Show the scrollbar only when the content overflows the canvas."""
+        self.update_idletasks()
+        body_h = self.body.winfo_reqheight()
+        canvas_h = self.canvas.winfo_height()
+        needs_scroll = body_h > canvas_h
+        if needs_scroll and not self._vsb_visible:
+            self.vsb.pack(side="right", fill="y")
+            self._vsb_visible = True
+        elif not needs_scroll and self._vsb_visible:
+            self.vsb.pack_forget()
+            self._vsb_visible = False
 
     def _on_wheel(self, e) -> None:
-        self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        if self._vsb_visible:
+            self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
 
     def scroll_to_bottom(self) -> None:
         self.update_idletasks()

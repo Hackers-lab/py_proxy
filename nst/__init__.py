@@ -16,4 +16,4 @@ Package layout:
     ui.*            — tkinter UI (app window, widgets, tray, toasts, chat view)
 """
 
-__version__ = "3.2"
+__version__ = "4.0"

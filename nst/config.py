@@ -114,3 +114,15 @@ def save_display_name(name: str) -> bool:
     if not name:
         return False
     return _write_value("DisplayName", winreg.REG_SZ, name)
+
+# ── Chat history path ────────────────────────────────────────────────────────
+
+def get_chat_history_path() -> str:
+    """Return the path to the JSON file that stores chat history.
+
+    Creates the parent directory if it doesn't already exist.
+    """
+    appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+    folder = os.path.join(appdata, "NetSplitTunnel")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "chat_history.json")

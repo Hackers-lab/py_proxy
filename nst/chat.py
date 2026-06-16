@@ -25,7 +25,7 @@ from .constants import (
     CHAT_PRESENCE_PORT,
     CHAT_TCP_PORT,
 )
-from .netinfo import get_local_ip
+from .netinfo import get_local_ip, get_subnet_broadcasts
 
 
 @dataclass
@@ -52,6 +52,7 @@ class ChatService:
 
         self._peers: dict[str, Peer] = {}
         self._virtual: dict[str, "DemoBot"] = {}   # ip -> bot (demo / loopback)
+        self._manual: set[str] = set()  # IPs added manually (never reaped)
         self._lock = threading.Lock()
         self.running = False
 
@@ -65,6 +66,7 @@ class ChatService:
         threading.Thread(target=self._presence_loop, daemon=True).start()
         threading.Thread(target=self._server_loop, daemon=True).start()
         threading.Thread(target=self._reaper_loop, daemon=True).start()
+        threading.Thread(target=self._manual_probe_loop, daemon=True).start()
 
     def stop(self) -> None:
         self.running = False
@@ -102,6 +104,59 @@ class ChatService:
     def has_demo(self) -> bool:
         return bool(self._virtual)
 
+    # ── manual peers (cross-subnet) ──────────────────────────────────────────
+    def add_manual_peer(self, ip: str) -> None:
+        """Register a peer by IP for cross-subnet chat.
+
+        The peer is added with its IP as the display name (updated once a
+        message is received), and is exempt from the reaper.
+        """
+        with self._lock:
+            self._manual.add(ip)
+            if ip not in self._peers:
+                # Set last_seen to 0.0 so they start as offline/checking
+                # until the first probe succeeds.
+                self._peers[ip] = Peer(ip=ip, name=ip, last_seen=0.0)
+        self._emit_roster()
+        # Trigger an immediate background probe for this IP
+        threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
+
+    def is_manual_peer(self, ip: str) -> bool:
+        """True if *ip* was added manually (not auto-discovered)."""
+        return ip in self._manual
+
+    def is_peer_online(self, ip: str) -> bool:
+        """True if the peer is within the timeout window of last being seen."""
+        if ip == DemoBot.IP:
+            return True
+        with self._lock:
+            p = self._peers.get(ip)
+            if p is None:
+                return False
+            return (time.time() - p.last_seen) <= CHAT_PEER_TIMEOUT
+
+    def _manual_probe_loop(self) -> None:
+        """Periodically check if manual peers are reachable."""
+        while self.running:
+            with self._lock:
+                ips = list(self._manual)
+            for ip in ips:
+                threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
+            time.sleep(5)
+
+    def _probe_one_manual(self, ip: str) -> None:
+        """Probes a manual IP to verify if the app's chat service is running."""
+        try:
+            # Try connecting to the peer's CHAT_TCP_PORT
+            with socket.create_connection((ip, CHAT_TCP_PORT), timeout=1.0):
+                with self._lock:
+                    peer = self._peers.get(ip)
+                    name = peer.name if peer else ip
+                self._touch_peer(ip, name)
+        except Exception:
+            # Connection failed. We don't touch their last_seen, so they will stay/become offline.
+            pass
+
     # ── presence: outgoing ────────────────────────────────────────────────────
     def _broadcast_loop(self) -> None:
         try:
@@ -112,7 +167,16 @@ class ChatService:
                 try:
                     payload = (CHAT_MAGIC + b"|" + self.my_name.encode("utf-8")
                                + b"|" + self.my_ip.encode("utf-8"))
-                    s.sendto(payload, ("<broadcast>", CHAT_PRESENCE_PORT))
+                    # Send to the generic broadcast *and* every subnet-specific
+                    # broadcast address.  This ensures peers see us even when
+                    # an extra 10.0.0.0/8 route alters default broadcast.
+                    targets = {"<broadcast>", "255.255.255.255"}
+                    targets.update(get_subnet_broadcasts())
+                    for addr in targets:
+                        try:
+                            s.sendto(payload, (addr, CHAT_PRESENCE_PORT))
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 time.sleep(CHAT_PRESENCE_EVERY)
@@ -150,9 +214,13 @@ class ChatService:
         changed = False
         with self._lock:
             existing = self._peers.get(ip)
-            if existing is None or existing.name != name:
+            now = time.time()
+            was_online = (existing is not None
+                          and (now - existing.last_seen) <= CHAT_PEER_TIMEOUT)
+            # Emit roster when peer is new, name changed, or was offline (coming online)
+            if existing is None or existing.name != name or not was_online:
                 changed = True
-            self._peers[ip] = Peer(ip=ip, name=name or ip, last_seen=time.time())
+            self._peers[ip] = Peer(ip=ip, name=name or ip, last_seen=now)
         if changed:
             self._emit_roster()
 
@@ -163,7 +231,8 @@ class ChatService:
             dropped = False
             with self._lock:
                 stale = [ip for ip, p in self._peers.items()
-                         if now - p.last_seen > CHAT_PEER_TIMEOUT]
+                         if now - p.last_seen > CHAT_PEER_TIMEOUT
+                         and ip not in self._manual]
                 for ip in stale:
                     del self._peers[ip]
                     dropped = True

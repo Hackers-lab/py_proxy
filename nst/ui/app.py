@@ -33,7 +33,7 @@ from ..theme import theme
 from ..win_utils import get_resource_path, set_app_user_model_id
 from .chat_view import ChatWindow
 from .toast import ToastManager
-from .tray import SpeedOverlay, get_tiny_font, make_tray_icon
+from .tray import SpeedOverlay, get_tiny_font, make_chat_tray_icon, make_tray_icon
 from .widgets import themed_button, themed_label
 
 try:
@@ -84,9 +84,11 @@ class App(tk.Tk):
         self._detected_ip: str | None = None
         self._detected_gw: str | None = None
         self._tray = None
+        self._chat_tray = None
         self._current_tab = "host"
         self._overlay = SpeedOverlay()
         self._tiny_font = get_tiny_font(9)
+        self._tray_notified = False   # balloon shown once on minimize
 
         self._last_net_bytes = psutil.net_io_counters()
         self._last_net_time = time.time()
@@ -170,7 +172,7 @@ class App(tk.Tk):
         hdr.pack(fill="x", padx=20, pady=10)
         themed_label(hdr, "⬡  NET SPLIT-TUNNELER", color_role="accent",
                      font=("Consolas", 13, "bold"), bg_role="bg").pack(side="left")
-        themed_label(hdr, "& Proxy Sharing Tool  v3", color_role="text_sec",
+        themed_label(hdr, "& Proxy Sharing Tool  v4", color_role="text_sec",
                      font=("Segoe UI", 9), bg_role="bg").pack(side="left", padx=8, pady=4)
 
         # Quick theme toggle button (☀/🌙)
@@ -357,7 +359,7 @@ class App(tk.Tk):
         self._footer.pack(fill="x", side="bottom", padx=20, pady=(2, 6))
         themed_label(self._footer, "Copyright © Pramod Verma", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="right")
-        themed_label(self._footer, "v3.2", color_role="text_sec",
+        themed_label(self._footer, "v4.0", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="left")
 
     # ── THEME ─────────────────────────────────────────────────────────────────
@@ -421,7 +423,7 @@ class App(tk.Tk):
         frame.pack(fill="both", expand=True, padx=15, pady=15)
         tk.Label(frame, text="⬡", bg=theme.color("panel"), fg=theme.color("accent"),
                  font=("Segoe UI", 32)).pack(pady=(10, 2))
-        tk.Label(frame, text="Net Split-Tunneler v3.2", bg=theme.color("panel"),
+        tk.Label(frame, text="Net Split-Tunneler v4.0", bg=theme.color("panel"),
                  fg=theme.color("text_pri"), font=("Segoe UI", 12, "bold")).pack()
         tk.Label(frame, text="Proxy Sharing Tool + LAN Chat", bg=theme.color("panel"),
                  fg=theme.color("text_sec"), font=("Segoe UI", 9, "italic")).pack(pady=(0, 10))
@@ -453,7 +455,7 @@ class App(tk.Tk):
                     self._start_tray()
                     if self._tray:
                         self._tray.icon = make_tray_icon()
-                        self._tray.title = f"Net Split-Tunneler\nUp: {up_fmt}\nDown: {down_fmt}"
+                        self._tray.title = f"Net Split-Tunneler  Proxy\nUp: {up_fmt}\nDown: {down_fmt}"
                 else:
                     self._overlay.hide()
                     self._sync_idle_tray()
@@ -469,7 +471,7 @@ class App(tk.Tk):
             self._tray = None
         elif not self.winfo_viewable() and self._tray:
             self._tray.icon = make_tray_icon()
-            self._tray.title = "Net Split-Tunneler\n(running in background)"
+            self._tray.title = "Net Split-Tunneler  Proxy\n(running in background)"
 
     # ── LOGGING ───────────────────────────────────────────────────────────────
     def _log_msg(self, msg: str) -> None:
@@ -703,6 +705,8 @@ class App(tk.Tk):
             if not shown:
                 preview = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(name, preview, ip)
+                # Auto-open the chat window so the user never misses a message.
+                self._open_chat_window(ip)
         try:
             self.after(0, _apply)
         except (RuntimeError, tk.TclError):
@@ -723,21 +727,63 @@ class App(tk.Tk):
             return
         self.withdraw()
         self._start_tray()
+        # Notify the user once that the app is still running.
+        if not self._tray_notified and self._tray:
+            self._tray_notified = True
+            try:
+                self._tray.notify(
+                    "Still running",
+                    "Net Split-Tunneler is running in the background.\n"
+                    "Use the tray icons to open Proxy or Chat.",
+                )
+            except Exception:
+                pass
 
     def _start_tray(self) -> None:
-        if self._tray is not None or not HAS_TRAY:
-            return
-        menu = pystray.Menu(
-            pystray.MenuItem("Show Window", self._restore_from_tray, default=True),
-            pystray.MenuItem("Quit", self._quit_app))
-        self._tray = pystray.Icon("NetSplitTunnel", make_tray_icon(),
-                                  "Net Split-Tunneler", menu)
-        threading.Thread(target=self._tray.run, daemon=True).start()
+        # ── Proxy tray icon (blue ring / app icon) ────────────────────────────
+        if self._tray is None and HAS_TRAY:
+            proxy_menu = pystray.Menu(
+                pystray.MenuItem("Open Proxy", self._open_proxy_from_tray, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self._quit_app),
+            )
+            self._tray = pystray.Icon("NetSplitTunnel_Proxy", make_tray_icon(),
+                                      "Net Split-Tunneler  Proxy", proxy_menu)
+            threading.Thread(target=self._tray.run, daemon=True).start()
+
+        # ── Chat tray icon (green speech bubble) ──────────────────────────────
+        if self._chat_tray is None and HAS_TRAY:
+            chat_menu = pystray.Menu(
+                pystray.MenuItem("Open Chat", self._open_chat_from_tray, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self._quit_app),
+            )
+            self._chat_tray = pystray.Icon("NetSplitTunnel_Chat",
+                                           make_chat_tray_icon(),
+                                           "LAN Chat", chat_menu)
+            threading.Thread(target=self._chat_tray.run, daemon=True).start()
+
+    def _open_proxy_from_tray(self, icon=None, item=None) -> None:
+        """Restore the main proxy window from the tray."""
+        if self._tray and not self._show_speed_in_taskbar_var.get():
+            self._tray.stop()
+            self._tray = None
+        if self._chat_tray and not self._show_speed_in_taskbar_var.get():
+            self._chat_tray.stop()
+            self._chat_tray = None
+        self.after(0, self.deiconify)
+
+    def _open_chat_from_tray(self, icon=None, item=None) -> None:
+        """Open the chat window directly from the tray."""
+        self.after(0, lambda: self._open_chat_window())
 
     def _restore_from_tray(self, icon=None, item=None) -> None:
         if self._tray and not self._show_speed_in_taskbar_var.get():
             self._tray.stop()
             self._tray = None
+        if self._chat_tray and not self._show_speed_in_taskbar_var.get():
+            self._chat_tray.stop()
+            self._chat_tray = None
         self.after(0, self.deiconify)
 
     def _quit_app(self, icon=None, item=None) -> None:
@@ -750,4 +796,6 @@ class App(tk.Tk):
         self._toasts.destroy_all()
         if self._tray:
             self._tray.stop()
+        if self._chat_tray:
+            self._chat_tray.stop()
         self.after(0, self.destroy)

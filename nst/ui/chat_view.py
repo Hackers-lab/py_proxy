@@ -8,13 +8,16 @@ once. Incoming messages for an inactive chat bump an unread badge; the app layer
 decides whether to also raise a bottom-right toast.
 """
 
+import json
 import os
 import threading
 import time
 import tkinter as tk
 
+from .. import config
 from ..chat import DemoBot
-from ..constants import LABEL_FONT, TITLE_FONT
+from ..constants import CHAT_TCP_PORT, LABEL_FONT, TITLE_FONT
+from ..netinfo import check_host_reachable, is_valid_ipv4
 from ..theme import theme
 from ..win_utils import get_resource_path
 from .widgets import (
@@ -25,6 +28,7 @@ from .widgets import (
 )
 
 _PLACEHOLDER = "Type a message…"
+_MAX_HISTORY_PER_PEER = 200
 
 
 class ChatWindow(tk.Toplevel):
@@ -104,6 +108,7 @@ class ChatView(tk.Frame):
         self._placeholder_on = True
 
         self._build()
+        self._load_history()
         theme.on_change(self._refresh_active)
 
     # ── construction ──────────────────────────────────────────────────────────
@@ -118,7 +123,7 @@ class ChatView(tk.Frame):
                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
         id_row = tk.Frame(left, bg=theme.color("panel2"))
         theme.register(id_row, bg="panel2")
-        id_row.pack(fill="x", pady=(4, 12))
+        id_row.pack(fill="x", pady=(4, 8))
         self._self_avatar_holder = tk.Frame(id_row, bg=theme.color("panel2"))
         theme.register(self._self_avatar_holder, bg="panel2")
         self._self_avatar_holder.pack(side="left", padx=6, pady=6)
@@ -137,6 +142,32 @@ class ChatView(tk.Frame):
         rename.config(cursor="hand2")
         rename.bind("<Button-1>", lambda e: self._rename())
         rename.pack(side="left", padx=6)
+
+        # ── Manual IP connect (cross-subnet chat) ───────────────────────────
+        themed_label(left, "CONNECT BY IP", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(4, 0))
+        ip_row = tk.Frame(left, bg=theme.color("panel2"))
+        theme.register(ip_row, bg="panel2")
+        ip_row.pack(fill="x", pady=(2, 8))
+        self._manual_ip_var = tk.StringVar()
+        self._manual_ip_entry = tk.Entry(
+            ip_row, textvariable=self._manual_ip_var, font=("Consolas", 9),
+            relief="flat", bd=4, bg=theme.color("panel2"),
+            fg=theme.color("text_pri"), insertbackground=theme.color("text_pri"),
+            width=14)
+        theme.register(self._manual_ip_entry, bg="panel2", fg="text_pri",
+                       insertbackground="text_pri")
+        self._manual_ip_entry.insert(0, "10.x.x.x")
+        self._manual_ip_entry.config(fg=theme.color("text_sec"))
+        self._manual_ip_entry.bind("<FocusIn>", self._clear_ip_hint)
+        self._manual_ip_entry.bind("<FocusOut>", self._restore_ip_hint)
+        self._manual_ip_entry.bind("<Return>", lambda e: self._connect_manual_ip())
+        self._manual_ip_entry.pack(side="left", fill="x", expand=True)
+        connect_lbl = themed_label(ip_row, "➤", color_role="accent",
+                                   font=("Segoe UI", 12, "bold"), bg_role="panel2")
+        connect_lbl.config(cursor="hand2")
+        connect_lbl.bind("<Button-1>", lambda e: self._connect_manual_ip())
+        connect_lbl.pack(side="left", padx=6)
 
         themed_label(left, "ONLINE PEERS", color_role="text_sec",
                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
@@ -240,6 +271,18 @@ class ChatView(tk.Frame):
         for p in sorted(peers, key=lambda x: x.name.lower()):
             self._add_roster_row(body, p.ip, p.name)
 
+        # Update active peer subtext if one is selected
+        if self._active_ip:
+            ip = self._active_ip
+            if ip == DemoBot.IP:
+                sub_text = "demo peer"
+            elif self.chat.is_manual_peer(ip):
+                online = self.chat.is_peer_online(ip)
+                sub_text = f"{ip}  ·  manual  ({'reachable ✓' if online else 'unreachable ✗'})"
+            else:
+                sub_text = f"{ip}  ·  online"
+            self._head_sub.config(text=sub_text)
+
     def _add_roster_row(self, body, ip: str, name: str) -> None:
         active = (ip == self._active_ip)
         bg_role = "select_bg" if active else "log_bg"
@@ -248,13 +291,21 @@ class ChatView(tk.Frame):
         row.pack(fill="x", pady=1)
 
         make_avatar(row, name, size=32, bg_role=bg_role).pack(side="left",
-                                                              padx=6, pady=5)
+                                                             padx=6, pady=5)
         txt = tk.Frame(row, bg=theme.color(bg_role))
         theme.register(txt, bg=bg_role)
         txt.pack(side="left", fill="x", expand=True)
         themed_label(txt, name, color_role="text_pri",
                      font=("Segoe UI", 9, "bold"), bg_role=bg_role).pack(anchor="w")
-        sub = "demo peer" if ip == DemoBot.IP else ip
+        
+        if ip == DemoBot.IP:
+            sub = "demo peer"
+        elif self.chat.is_manual_peer(ip):
+            online = self.chat.is_peer_online(ip)
+            sub = f"{ip}  ·  {'reachable ✓' if online else 'unreachable ✗'}"
+        else:
+            sub = ip
+            
         themed_label(txt, sub, color_role="text_sec",
                      font=("Consolas", 7), bg_role=bg_role).pack(anchor="w")
 
@@ -294,8 +345,14 @@ class ChatView(tk.Frame):
         make_avatar(self._head_avatar_holder, name, size=34,
                     bg_role="panel2").pack()
         self._head_name.config(text=name)
-        self._head_sub.config(text=("demo peer" if ip == DemoBot.IP
-                                    else f"{ip}  ·  online"))
+        if ip == DemoBot.IP:
+            sub_text = "demo peer"
+        elif self.chat.is_manual_peer(ip):
+            online = self.chat.is_peer_online(ip)
+            sub_text = f"{ip}  ·  manual  ({'reachable ✓' if online else 'unreachable ✗'})"
+        else:
+            sub_text = f"{ip}  ·  online"
+        self._head_sub.config(text=sub_text)
         self._set_composer_state(True)
         self._render(ip)
         self.update_roster(self.chat.peers())
@@ -392,6 +449,8 @@ class ChatView(tk.Frame):
             return
         self._entry.delete(0, "end")
         self._conversations.setdefault(ip, []).append(("out", "You", text, time.time()))
+        self._trim_history(ip)
+        self._save_history()
         self._render(ip)
 
         def worker():
@@ -410,6 +469,8 @@ class ChatView(tk.Frame):
         conversation (so no toast is needed)."""
         self._names[ip] = name
         self._conversations.setdefault(ip, []).append(("in", name, text, ts))
+        self._trim_history(ip)
+        self._save_history()
         shown = (ip == self._active_ip and self._visible)
         if shown:
             self._add_bubble(("in", name, text, ts))
@@ -435,3 +496,86 @@ class ChatView(tk.Frame):
 
     def is_active_conversation(self, ip: str) -> bool:
         return ip == self._active_ip
+
+    # ── manual IP connect ─────────────────────────────────────────────────────
+    def _clear_ip_hint(self, _e=None) -> None:
+        if self._manual_ip_var.get() == "10.x.x.x":
+            self._manual_ip_entry.delete(0, "end")
+            self._manual_ip_entry.config(fg=theme.color("text_pri"))
+
+    def _restore_ip_hint(self, _e=None) -> None:
+        if not self._manual_ip_var.get().strip():
+            self._manual_ip_entry.delete(0, "end")
+            self._manual_ip_entry.insert(0, "10.x.x.x")
+            self._manual_ip_entry.config(fg=theme.color("text_sec"))
+
+    def _connect_manual_ip(self) -> None:
+        ip = self._manual_ip_var.get().strip()
+        if not ip or ip == "10.x.x.x":
+            return
+        if not is_valid_ipv4(ip) or not ip.startswith("10."):
+            self._log(f"Invalid IP: {ip!r} — must be a valid 10.x.x.x address.")
+            return
+        if ip == self.chat.my_ip:
+            self._log("Cannot chat with yourself.")
+            return
+
+        self.chat.add_manual_peer(ip)
+        self._names.setdefault(ip, ip)
+        self._manual_ip_var.set("")
+        self._restore_ip_hint()
+        self.select_peer(ip)
+
+        def _probe():
+            ok = check_host_reachable(ip, CHAT_TCP_PORT)
+            if not ok:
+                def _show_err():
+                    self._conversations.setdefault(ip, []).append((
+                        "sys", "", "Not reachable — make sure the app is running on that PC.", time.time()
+                    ))
+                    if self._active_ip == ip:
+                        self._render(ip)
+                self.after(0, _show_err)
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    # ── chat history persistence ─────────────────────────────────────────────
+    def _load_history(self) -> None:
+        """Load saved conversations from disk."""
+        try:
+            path = config.get_chat_history_path()
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for ip, msgs in data.items():
+                if ip == "_names":
+                    self._names.update(msgs)
+                    continue
+                self._conversations[ip] = [
+                    tuple(m) for m in msgs[-_MAX_HISTORY_PER_PEER:]
+                ]
+            self._log("Chat history loaded.")
+        except Exception:
+            pass
+
+    def _save_history(self) -> None:
+        """Persist conversations to disk (debounced, non-blocking)."""
+        def _write():
+            try:
+                data = {}
+                for ip, msgs in self._conversations.items():
+                    data[ip] = [list(m) for m in msgs[-_MAX_HISTORY_PER_PEER:]]
+                data["_names"] = dict(self._names)
+                path = config.get_chat_history_path()
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except Exception:
+                pass
+        threading.Thread(target=_write, daemon=True).start()
+
+    def _trim_history(self, ip: str) -> None:
+        """Keep at most _MAX_HISTORY_PER_PEER messages per peer."""
+        msgs = self._conversations.get(ip)
+        if msgs and len(msgs) > _MAX_HISTORY_PER_PEER:
+            self._conversations[ip] = msgs[-_MAX_HISTORY_PER_PEER:]

@@ -42,6 +42,26 @@ def make_tray_icon():
     return img
 
 
+def make_chat_tray_icon():
+    """Draw a 64×64 speech-bubble icon for the LAN Chat tray entry."""
+    if not HAS_PIL:
+        return None
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    # Rounded-rectangle speech bubble
+    d.rounded_rectangle([4, 4, size - 4, size - 16], radius=12,
+                        fill=(16, 185, 129, 255))           # emerald
+    # Small triangle tail at the bottom-left
+    d.polygon([(14, size - 16), (24, size - 16), (10, size - 4)],
+              fill=(16, 185, 129, 255))
+    # Three dots inside
+    dot_y = (size - 16) // 2
+    for cx in (22, 32, 42):
+        d.ellipse([cx - 3, dot_y - 3, cx + 3, dot_y + 3], fill=(255, 255, 255, 220))
+    return img
+
+
 def draw_speed_icon(up_speed_str: str, down_speed_str: str, font):
     """A 32×32 tray icon showing up/down speed on two lines."""
     if not HAS_PIL:

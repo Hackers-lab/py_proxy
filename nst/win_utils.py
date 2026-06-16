@@ -70,7 +70,7 @@ def elevate() -> None:
     sys.exit(0)
 
 
-def set_app_user_model_id(appid: str = "hackerslab.netsplittunnel.v3") -> None:
+def set_app_user_model_id(appid: str = "hackerslab.netsplittunnel.v4") -> None:
     """Set the AppUserModelID so the taskbar uses the bundled icon."""
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)

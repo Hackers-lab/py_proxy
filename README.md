@@ -1,4 +1,4 @@
-# Net Split-Tunneler & Proxy Sharing Tool
+# Net Split-Tunneler & Proxy Sharing Tool  v4
 
 Net Split-Tunneler is a lightweight, easy-to-use Windows utility designed to share your internet connection (including VPNs or proxy connections) with other computers on your local home or office network (intranet), while making sure you can still access your local network folders and devices.
 
@@ -45,7 +45,7 @@ local network — no server, no internet required.
 2. Each PC automatically announces itself, so the **Online Peers** list fills in on its own
    within a few seconds. *(Only computers running this app appear — discovery uses a small
    UDP presence broadcast, not a raw ping scan.)*
-3. Set your own name in the **You:** box and click **Rename**. That name is what other PCs
+3. Set your own name in the **You:** box and click **✓**. That name is what other PCs
    see next to your messages. It defaults to your computer name.
 4. Click a peer in the list, type a message, and press **Enter** (or **Send**). You can keep
    several conversations going at once — just click between peers.
@@ -54,7 +54,19 @@ local network — no server, no internet required.
    message text. Click it to jump straight to that conversation. A small unread badge also
    appears next to the sender in the peer list.
 
-Chat history is kept only while the app is running and is never written to disk.
+Chat history is saved to disk and restored when you reopen the app.
+
+### Connect by IP (Cross-Subnet Chat)
+
+Automatic discovery only works when both PCs are on the **same subnet**. To chat with someone
+on a different `10.x.x.x` subnet:
+
+1. Ask the other person for their `10.x.x.x` IP address.
+2. Type it into the **Connect by IP** box in the LAN Chat tab and press ➤ (or Enter).
+3. The app immediately probes port 54323 on that IP to verify the other instance is running.
+   * If **reachable** — the chat opens and the peer appears in the roster as `reachable ✓`.
+   * If **not reachable** — a system message appears in the chat explaining the peer could not be reached. The probe retries every 5 seconds and the roster updates to `reachable ✓` the moment the other PC comes online.
+4. Once connected, messages work exactly like a local peer.
 
 > [!TIP]
 > Want to see how it works without a second PC? Click **✨ Try Demo Chat** in the LAN Chat

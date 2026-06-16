@@ -2,6 +2,7 @@
 connectivity checks and human-readable speed formatting."""
 
 import socket
+import struct
 import subprocess
 
 import psutil
@@ -26,6 +27,37 @@ def get_intranet_ip() -> str | None:
     except Exception:
         pass
     return None
+
+
+def get_subnet_broadcasts() -> list[str]:
+    """Return subnet broadcast addresses for every 10.x.x.x interface.
+
+    Uses the actual netmask from ``psutil`` so both /16 and /24 networks
+    are handled correctly.  Falls back to 255.255.255.255 on error.
+    """
+    results: list[str] = []
+    try:
+        for _iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family != socket.AF_INET:
+                    continue
+                if not addr.address.startswith("10."):
+                    continue
+                netmask = addr.netmask
+                if not netmask:
+                    continue
+                # ip | ~mask  →  broadcast
+                ip_int = struct.unpack("!I", socket.inet_aton(addr.address))[0]
+                mask_int = struct.unpack("!I", socket.inet_aton(netmask))[0]
+                bcast_int = ip_int | (~mask_int & 0xFFFFFFFF)
+                bcast = socket.inet_ntoa(struct.pack("!I", bcast_int))
+                if bcast not in results:
+                    results.append(bcast)
+    except Exception:
+        pass
+    if not results:
+        results.append("255.255.255.255")
+    return results
 
 
 def get_local_ip() -> str | None:
