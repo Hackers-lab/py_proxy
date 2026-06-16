@@ -73,7 +73,12 @@ class App(tk.Tk):
             config.load_display_name(),
             on_roster_change=self._on_roster_change,
             on_message=self._on_chat_message,
+            on_file_offer=self._on_file_offer,
+            on_file_accept=self._on_file_accept,
+            on_file_reject=self._on_file_reject,
+            on_chat_request=self._on_chat_request_received,
         )
+        self._chat.ip_chat_enabled = config.load_ip_chat_enabled()
 
         # Persisted state on startup.
         self._route_active = check_route_exists()
@@ -149,6 +154,11 @@ class App(tk.Tk):
             command=self._toggle_show_speed_in_taskbar)
 
         settings_menu.add_separator()
+        self._ip_chat_var = tk.BooleanVar(value=config.load_ip_chat_enabled())
+        settings_menu.add_checkbutton(
+            label="Allow chat from external IPs", variable=self._ip_chat_var,
+            command=self._toggle_ip_chat)
+
         self._theme_light_var = tk.BooleanVar(value=not theme.is_dark())
         settings_menu.add_checkbutton(
             label="Light theme", variable=self._theme_light_var,
@@ -359,7 +369,7 @@ class App(tk.Tk):
         self._footer.pack(fill="x", side="bottom", padx=20, pady=(2, 6))
         themed_label(self._footer, "Copyright © Pramod Verma", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="right")
-        themed_label(self._footer, "v4.0", color_role="text_sec",
+        themed_label(self._footer, "v4.1", color_role="text_sec",
                      font=("Segoe UI", 8), bg_role="bg").pack(side="left")
 
     # ── THEME ─────────────────────────────────────────────────────────────────
@@ -373,6 +383,22 @@ class App(tk.Tk):
                             bordercolor=theme.color("panel"),
                             arrowcolor=theme.color("text_sec"))
         except Exception:
+            pass
+
+    def _toggle_ip_chat(self) -> None:
+        enabled = self._ip_chat_var.get()
+        self._chat.ip_chat_enabled = enabled
+        config.save_ip_chat_enabled(enabled)
+        self._log_msg(f"Chat from external IPs {'enabled' if enabled else 'disabled'}.")
+
+    def _on_chat_request_received(self, ip: str, name: str, msg: dict) -> None:
+        def _apply():
+            self._chat_view.on_chat_request_received(ip, name, msg)
+            self._toasts.notify(name, "Wants to chat — tap to respond", ip)
+            self._open_chat_window(ip)
+        try:
+            self.after(0, _apply)
+        except (RuntimeError, tk.TclError):
             pass
 
     def _toggle_theme(self) -> None:
@@ -423,7 +449,7 @@ class App(tk.Tk):
         frame.pack(fill="both", expand=True, padx=15, pady=15)
         tk.Label(frame, text="⬡", bg=theme.color("panel"), fg=theme.color("accent"),
                  font=("Segoe UI", 32)).pack(pady=(10, 2))
-        tk.Label(frame, text="Net Split-Tunneler v4.0", bg=theme.color("panel"),
+        tk.Label(frame, text="Net Split-Tunneler v4.1", bg=theme.color("panel"),
                  fg=theme.color("text_pri"), font=("Segoe UI", 12, "bold")).pack()
         tk.Label(frame, text="Proxy Sharing Tool + LAN Chat", bg=theme.color("panel"),
                  fg=theme.color("text_sec"), font=("Segoe UI", 9, "italic")).pack(pady=(0, 10))
@@ -709,6 +735,30 @@ class App(tk.Tk):
                 self._open_chat_window(ip)
         try:
             self.after(0, _apply)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _on_file_offer(self, ip: str, name: str, msg: dict) -> None:
+        def _apply():
+            shown = self._chat_view.on_file_offer_received(ip, name, msg)
+            if not shown:
+                filename = msg.get("filename", "file")
+                self._toasts.notify(name, f"📎 Wants to send: {filename}", ip)
+                self._open_chat_window(ip)
+        try:
+            self.after(0, _apply)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _on_file_accept(self, ip: str, name: str, msg: dict) -> None:
+        try:
+            self.after(0, lambda: self._chat_view.on_file_accepted(ip, name, msg))
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _on_file_reject(self, ip: str, name: str, msg: dict) -> None:
+        try:
+            self.after(0, lambda: self._chat_view.on_file_rejected(ip, name, msg))
         except (RuntimeError, tk.TclError):
             pass
 

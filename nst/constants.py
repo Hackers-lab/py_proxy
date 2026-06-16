@@ -14,9 +14,11 @@ CONN_TIMEOUT  = 30
 # ── LAN chat ──────────────────────────────────────────────────────────────────
 CHAT_PRESENCE_PORT = 54322       # UDP broadcast port for chat peer presence
 CHAT_TCP_PORT      = 54323       # TCP port each peer listens on for messages
+FILE_TCP_PORT      = 54324       # TCP port for file transfer data streams
 CHAT_MAGIC         = b"NST_CHAT_V1"
 CHAT_PRESENCE_EVERY = 3          # seconds between presence broadcasts
 CHAT_PEER_TIMEOUT   = 10         # seconds of silence before a peer is dropped
+FILE_SAVE_DIR      = "NetSplitter"   # subfolder under Documents
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 BTN_FONT   = ("Consolas", 9, "bold")

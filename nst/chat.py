@@ -14,9 +14,12 @@ socket timeouts so shutdown is clean. History is kept by the UI, not here.
 
 import json
 import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass
+
+import psutil
 
 from .constants import (
     CHAT_MAGIC,
@@ -38,17 +41,34 @@ class Peer:
 class ChatService:
     def __init__(self, my_name: str,
                  on_roster_change=None,
-                 on_message=None) -> None:
+                 on_message=None,
+                 on_file_offer=None,
+                 on_file_accept=None,
+                 on_file_reject=None,
+                 on_chat_request=None) -> None:
         """
-        on_roster_change(peers: list[Peer]) -- called when the roster changes.
-        on_message(ip, name, text, ts)      -- called on an incoming message.
-        Both are invoked from background threads; the UI must marshal to the
-        main thread (e.g. via ``Tk.after``).
+        on_roster_change(peers: list[Peer])          -- roster changed.
+        on_message(ip, name, text, ts)               -- incoming chat message.
+        on_file_offer(ip, name, msg_dict)            -- incoming file offer.
+        on_file_accept(ip, name, msg_dict)           -- peer accepted our offer.
+        on_file_reject(ip, name, msg_dict)           -- peer rejected our offer.
+        on_chat_request(ip, name, msg_dict)          -- first message from unknown external IP.
+        All callbacks are invoked from background threads; marshal to main thread.
         """
         self.my_name = my_name
         self.my_ip: str = get_local_ip() or "127.0.0.1"
         self._on_roster_change = on_roster_change
         self._on_message = on_message
+        self._on_file_offer = on_file_offer
+        self._on_file_accept = on_file_accept
+        self._on_file_reject = on_file_reject
+        self._on_chat_request = on_chat_request
+
+        # IP chat access control
+        self.ip_chat_enabled: bool = True
+        self._approved_ips: set[str] = set()   # approved external IPs
+        self._blocked_ips: set[str] = set()    # permanently blocked IPs
+        self._pending_requests: dict[str, list[dict]] = {}  # buffered msgs awaiting approval
 
         self._peers: dict[str, Peer] = {}
         self._virtual: dict[str, "DemoBot"] = {}   # ip -> bot (demo / loopback)
@@ -110,16 +130,47 @@ class ChatService:
 
         The peer is added with its IP as the display name (updated once a
         message is received), and is exempt from the reaper.
+        We also auto-approve the IP since the user explicitly initiated contact.
         """
         with self._lock:
             self._manual.add(ip)
+            self._approved_ips.add(ip)   # user initiated — auto-approve their replies
             if ip not in self._peers:
-                # Set last_seen to 0.0 so they start as offline/checking
-                # until the first probe succeeds.
                 self._peers[ip] = Peer(ip=ip, name=ip, last_seen=0.0)
         self._emit_roster()
-        # Trigger an immediate background probe for this IP
         threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
+
+    def approve_ip(self, ip: str) -> None:
+        """Approve an external IP and deliver any buffered messages."""
+        with self._lock:
+            self._approved_ips.add(ip)
+            self._blocked_ips.discard(ip)
+            pending = self._pending_requests.pop(ip, [])
+        for msg in pending:
+            self._dispatch_msg(msg, ip, msg.get("from_name", ip))
+
+    def block_ip(self, ip: str) -> None:
+        """Block an external IP and discard buffered messages."""
+        with self._lock:
+            self._blocked_ips.add(ip)
+            self._approved_ips.discard(ip)
+            self._pending_requests.pop(ip, None)
+
+    def _is_same_subnet(self, remote_ip: str) -> bool:
+        """True if remote_ip shares a subnet with any local interface."""
+        try:
+            remote_int = struct.unpack("!I", socket.inet_aton(remote_ip))[0]
+            for _iface, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if addr.family != socket.AF_INET or not addr.netmask:
+                        continue
+                    ip_int = struct.unpack("!I", socket.inet_aton(addr.address))[0]
+                    mask_int = struct.unpack("!I", socket.inet_aton(addr.netmask))[0]
+                    if (ip_int & mask_int) == (remote_int & mask_int):
+                        return True
+        except Exception:
+            pass
+        return False
 
     def is_manual_peer(self, ip: str) -> bool:
         """True if *ip* was added manually (not auto-discovered)."""
@@ -281,14 +332,23 @@ class ChatService:
                 buf += chunk
             line = buf.split(b"\n", 1)[0]
             msg = json.loads(line.decode("utf-8", errors="replace"))
-            text = str(msg.get("text", ""))
             name = str(msg.get("from_name", "")) or addr[0]
             ip = str(msg.get("from_ip", "")) or addr[0]
-            ts = float(msg.get("ts", time.time()))
-            # Refresh roster from the sender even if no presence yet.
-            self._touch_peer(ip, name)
-            if text and self._on_message:
-                self._on_message(ip, name, text, ts)
+            msg_type = msg.get("type", "chat")
+
+            # file_accept / file_reject are responses to OUR offers — always trusted
+            if msg_type not in ("file_accept", "file_reject"):
+                if not self._is_same_subnet(ip) and ip not in self._approved_ips:
+                    if not self.ip_chat_enabled or ip in self._blocked_ips:
+                        return  # silently drop
+                    # First contact from external IP — buffer and request approval
+                    with self._lock:
+                        self._pending_requests.setdefault(ip, []).append(msg)
+                    if self._on_chat_request:
+                        self._on_chat_request(ip, name, msg)
+                    return
+
+            self._dispatch_msg(msg, ip, name)
         except Exception:
             pass
         finally:
@@ -296,6 +356,26 @@ class ChatService:
                 conn.close()
             except Exception:
                 pass
+
+    def _dispatch_msg(self, msg: dict, ip: str, name: str) -> None:
+        """Deliver a pre-approved message to the appropriate callback."""
+        msg_type = msg.get("type", "chat")
+        if msg_type == "file_offer":
+            self._touch_peer(ip, name)
+            if self._on_file_offer:
+                self._on_file_offer(ip, name, msg)
+        elif msg_type == "file_accept":
+            if self._on_file_accept:
+                self._on_file_accept(ip, name, msg)
+        elif msg_type == "file_reject":
+            if self._on_file_reject:
+                self._on_file_reject(ip, name, msg)
+        else:
+            text = str(msg.get("text", ""))
+            ts = float(msg.get("ts", time.time()))
+            self._touch_peer(ip, name)
+            if text and self._on_message:
+                self._on_message(ip, name, text, ts)
 
     # ── messaging: outgoing ───────────────────────────────────────────────────
     def send(self, ip: str, text: str) -> bool:

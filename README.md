@@ -1,4 +1,4 @@
-# Net Split-Tunneler & Proxy Sharing Tool  v4
+# Net Split-Tunneler & Proxy Sharing Tool  v4.1
 
 Net Split-Tunneler is a lightweight, easy-to-use Windows utility designed to share your internet connection (including VPNs or proxy connections) with other computers on your local home or office network (intranet), while making sure you can still access your local network folders and devices.
 

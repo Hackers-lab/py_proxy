@@ -91,8 +91,8 @@ def save_show_speed_in_taskbar(enabled: bool) -> bool:
 # ── Theme preference ──────────────────────────────────────────────────────────
 
 def load_theme() -> str:
-    """Return 'dark' or 'light' (default 'dark')."""
-    val = _read_value("Theme", "dark")
+    """Return 'dark' or 'light' (default 'light')."""
+    val = _read_value("Theme", "light")
     return "light" if str(val).lower() == "light" else "dark"
 
 
@@ -114,6 +114,15 @@ def save_display_name(name: str) -> bool:
     if not name:
         return False
     return _write_value("DisplayName", winreg.REG_SZ, name)
+
+# ── IP chat toggle ───────────────────────────────────────────────────────────
+
+def load_ip_chat_enabled() -> bool:
+    return bool(_read_value("IpChatEnabled", 1))
+
+
+def save_ip_chat_enabled(enabled: bool) -> bool:
+    return _write_value("IpChatEnabled", winreg.REG_DWORD, 1 if enabled else 0)
 
 # ── Chat history path ────────────────────────────────────────────────────────
 
