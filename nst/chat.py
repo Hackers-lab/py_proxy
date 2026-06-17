@@ -45,14 +45,16 @@ class ChatService:
                  on_file_offer=None,
                  on_file_accept=None,
                  on_file_reject=None,
-                 on_chat_request=None) -> None:
+                 on_chat_request=None,
+                 on_group_message=None) -> None:
         """
         on_roster_change(peers: list[Peer])          -- roster changed.
-        on_message(ip, name, text, ts)               -- incoming chat message.
+        on_message(ip, name, text, ts, reply)        -- incoming chat message.
         on_file_offer(ip, name, msg_dict)            -- incoming file offer.
         on_file_accept(ip, name, msg_dict)           -- peer accepted our offer.
         on_file_reject(ip, name, msg_dict)           -- peer rejected our offer.
         on_chat_request(ip, name, msg_dict)          -- first message from unknown external IP.
+        on_group_message(group, ip, name, text, ts, reply) -- message addressed to a group.
         All callbacks are invoked from background threads; marshal to main thread.
         """
         self.my_name = my_name
@@ -63,6 +65,11 @@ class ChatService:
         self._on_file_accept = on_file_accept
         self._on_file_reject = on_file_reject
         self._on_chat_request = on_chat_request
+        self._on_group_message = on_group_message
+
+        # Appear-online toggle: when False we stop advertising presence so other
+        # peers reap us, but we still receive and can reply to direct messages.
+        self.presence_online: bool = True
 
         # IP chat access control
         self.ip_chat_enabled: bool = True
@@ -232,18 +239,21 @@ class ChatService:
             s.settimeout(1.0)
             while self.running:
                 try:
-                    payload = (CHAT_MAGIC + b"|" + self.my_name.encode("utf-8")
-                               + b"|" + self.my_ip.encode("utf-8"))
-                    # Send to the generic broadcast *and* every subnet-specific
-                    # broadcast address.  This ensures peers see us even when
-                    # an extra 10.0.0.0/8 route alters default broadcast.
-                    targets = {"<broadcast>", "255.255.255.255"}
-                    targets.update(get_subnet_broadcasts())
-                    for addr in targets:
-                        try:
-                            s.sendto(payload, (addr, CHAT_PRESENCE_PORT))
-                        except Exception:
-                            pass
+                    # Honour the appear-offline toggle: skip advertising but keep
+                    # the loop alive so flipping back online resumes instantly.
+                    if self.presence_online:
+                        payload = (CHAT_MAGIC + b"|" + self.my_name.encode("utf-8")
+                                   + b"|" + self.my_ip.encode("utf-8"))
+                        # Send to the generic broadcast *and* every subnet-specific
+                        # broadcast address.  This ensures peers see us even when
+                        # an extra 10.0.0.0/8 route alters default broadcast.
+                        targets = {"<broadcast>", "255.255.255.255"}
+                        targets.update(get_subnet_broadcasts())
+                        for addr in targets:
+                            try:
+                                s.sendto(payload, (addr, CHAT_PRESENCE_PORT))
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 time.sleep(CHAT_PRESENCE_EVERY)
@@ -386,36 +396,76 @@ class ChatService:
         elif msg_type == "file_reject":
             if self._on_file_reject:
                 self._on_file_reject(ip, name, msg)
+        elif msg_type in ("group", "group_invite"):
+            # Synced group: every message carries the group identity + member
+            # list so the receiving app can register the thread and route the
+            # reply back to all members.
+            group = msg.get("group")
+            if not isinstance(group, dict) or not group.get("gid"):
+                return
+            self._touch_peer(ip, name)
+            text = str(msg.get("text", ""))
+            ts = float(msg.get("ts", time.time()))
+            reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
+            if self._on_group_message:
+                self._on_group_message(group, ip, name, text, ts, reply)
         else:
             text = str(msg.get("text", ""))
             ts = float(msg.get("ts", time.time()))
+            reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
             self._touch_peer(ip, name)
             if text and self._on_message:
-                self._on_message(ip, name, text, ts)
+                self._on_message(ip, name, text, ts, reply)
 
     # ── messaging: outgoing ───────────────────────────────────────────────────
-    def send(self, ip: str, text: str) -> bool:
+    def send(self, ip: str, text: str, reply: dict | None = None,
+             group: dict | None = None, msg_type: str = "chat") -> bool:
         """Deliver a message synchronously. Returns True on success.
 
-        Call from a worker thread to avoid blocking the UI.
+        ``reply`` is an optional ``{"sender", "text"}`` snippet of the message
+        being replied to. ``group`` carries the synced-group identity so the
+        peer can route the reply back to every member. Call from a worker
+        thread to avoid blocking the UI.
         """
         bot = self._virtual.get(ip)
         if bot is not None:
             bot.on_user_message(text)
             return True
 
-        payload = json.dumps({
+        msg: dict = {
             "from_name": self.my_name,
             "from_ip": self.my_ip,
             "text": text,
             "ts": time.time(),
-        }).encode("utf-8") + b"\n"
+        }
+        if reply:
+            msg["reply"] = reply
+        if group:
+            msg["group"] = group
+            msg["type"] = msg_type if msg_type in ("group", "group_invite") else "group"
+        payload = json.dumps(msg).encode("utf-8") + b"\n"
         try:
             with socket.create_connection((ip, CHAT_TCP_PORT), timeout=3.0) as s:
                 s.sendall(payload)
             return True
         except Exception:
             return False
+
+    def send_group(self, group: dict, text: str, reply: dict | None = None,
+                   msg_type: str = "group") -> dict[str, bool]:
+        """Fan a message out to every member of ``group`` except ourselves.
+
+        Returns ``{ip: delivered}`` so the UI can flag members that were
+        offline. Members are auto-approved for inbound replies.
+        """
+        members = [ip for ip in group.get("members", []) if ip and ip != self.my_ip]
+        with self._lock:
+            self._approved_ips.update(members)
+        results: dict[str, bool] = {}
+        for ip in members:
+            results[ip] = self.send(ip, text, reply=reply, group=group,
+                                    msg_type=msg_type)
+        return results
 
 
 class DemoBot:
@@ -442,7 +492,7 @@ class DemoBot:
     def _say(self, text: str, delay: float) -> None:
         def fire():
             if self.service._on_message and self.IP in self.service._virtual:
-                self.service._on_message(self.IP, self.NAME, text, time.time())
+                self.service._on_message(self.IP, self.NAME, text, time.time(), None)
         threading.Timer(delay, fire).start()
 
     def greet(self) -> None:

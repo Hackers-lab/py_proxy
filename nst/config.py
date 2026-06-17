@@ -124,6 +124,24 @@ def load_ip_chat_enabled() -> bool:
 def save_ip_chat_enabled(enabled: bool) -> bool:
     return _write_value("IpChatEnabled", winreg.REG_DWORD, 1 if enabled else 0)
 
+# ── Notifications (popup toasts) ──────────────────────────────────────────────
+
+def load_notifications_enabled() -> bool:
+    return bool(_read_value("NotificationsEnabled", 1))
+
+
+def save_notifications_enabled(enabled: bool) -> bool:
+    return _write_value("NotificationsEnabled", winreg.REG_DWORD, 1 if enabled else 0)
+
+# ── Presence (appear online / offline) ────────────────────────────────────────
+
+def load_presence_online() -> bool:
+    return bool(_read_value("PresenceOnline", 1))
+
+
+def save_presence_online(online: bool) -> bool:
+    return _write_value("PresenceOnline", winreg.REG_DWORD, 1 if online else 0)
+
 # ── Chat history path ────────────────────────────────────────────────────────
 
 def get_chat_history_path() -> str:

@@ -185,13 +185,23 @@ class ChatView(tk.Frame):
         self._log = log_fn
         self._on_name_change = on_name_change
 
-        # ip -> list[ (kind, ...) ]
+        # conv-key -> list[ (kind, ...) ].  A key is a peer IP for 1:1 chats or
+        # "group:<gid>" for synced group threads.
         self._conversations: dict[str, list[tuple]] = {}
         self._names: dict[str, str] = {}
         self._unread: dict[str, int] = {}
         self._active_ip: str | None = None
         self._visible = False
         self._placeholder_on = True
+
+        # gid -> {"name": str, "members": list[str]} for synced groups.
+        self._groups: dict[str, dict] = {}
+        # Roster search filter (lower-cased substring); "" = show all.
+        self._peer_filter: str = ""
+        # Pending reply context for the composer: {"sender", "text"} or None.
+        self._reply_to: dict | None = None
+        # Popup toasts on/off (read by the app before raising a notification).
+        self._notifications_enabled: bool = config.load_notifications_enabled()
         # Last set of online IPs rendered — lets the periodic tick skip rebuilds
         # when nothing changed.
         self._last_online_sig: frozenset = frozenset()
@@ -224,8 +234,23 @@ class ChatView(tk.Frame):
         left.pack(side="left", fill="y", padx=(12, 0), pady=12)
         left.pack_propagate(False)
 
-        themed_label(left, "YOU", color_role="text_sec",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        you_hdr = tk.Frame(left, bg=theme.color("panel"))
+        theme.register(you_hdr, bg="panel")
+        you_hdr.pack(fill="x")
+        themed_label(you_hdr, "YOU", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="panel").pack(side="left")
+        # Settings gear: appear online/offline + pause popups.
+        self._gear = themed_label(you_hdr, "⚙", color_role="text_sec",
+                                  font=("Segoe UI", 11), bg_role="panel")
+        self._gear.config(cursor="hand2")
+        self._gear.bind("<Button-1>", self._open_settings_menu)
+        self._gear.pack(side="right")
+        # Live dot showing our own advertised presence.
+        self._self_dot_holder = tk.Frame(you_hdr, bg=theme.color("panel"))
+        theme.register(self._self_dot_holder, bg="panel")
+        self._self_dot_holder.pack(side="right", padx=(0, 6))
+        self._render_self_dot()
+
         id_row = tk.Frame(left, bg=theme.color("panel2"))
         theme.register(id_row, bg="panel2")
         id_row.pack(fill="x", pady=(4, 8))
@@ -282,8 +307,33 @@ class ChatView(tk.Frame):
         connect_lbl.bind("<Button-1>", lambda e: self._connect_manual_ip())
         connect_lbl.pack(side="left", padx=6)
 
-        themed_label(left, "PEERS", color_role="text_sec",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        peers_hdr = tk.Frame(left, bg=theme.color("panel"))
+        theme.register(peers_hdr, bg="panel")
+        peers_hdr.pack(fill="x")
+        themed_label(peers_hdr, "PEERS", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="panel").pack(side="left")
+        new_grp = themed_label(peers_hdr, "+ Group", color_role="accent",
+                               font=("Segoe UI", 8, "bold"), bg_role="panel")
+        new_grp.config(cursor="hand2")
+        new_grp.bind("<Button-1>", lambda e: self._new_group_dialog())
+        new_grp.pack(side="right")
+
+        # Search box to filter the roster by name or IP.
+        search_row = tk.Frame(left, bg=theme.color("panel2"))
+        theme.register(search_row, bg="panel2")
+        search_row.pack(fill="x", pady=(2, 4))
+        themed_label(search_row, "🔍", color_role="text_sec",
+                     font=("Segoe UI", 8), bg_role="panel2").pack(side="left", padx=(4, 0))
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._on_search())
+        search_entry = tk.Entry(
+            search_row, textvariable=self._search_var, font=("Segoe UI", 9),
+            relief="flat", bd=4, bg=theme.color("panel2"),
+            fg=theme.color("text_pri"), insertbackground=theme.color("text_pri"))
+        theme.register(search_entry, bg="panel2", fg="text_pri",
+                       insertbackground="text_pri")
+        search_entry.pack(side="left", fill="x", expand=True)
+
         self._roster = ScrollFrame(left, bg_role="log_bg")
         self._roster.pack(fill="both", expand=True, pady=(4, 8))
 
@@ -325,9 +375,37 @@ class ChatView(tk.Frame):
         self._clear_btn = themed_button(head_btns, "Clear", self._clear_chat,
                                         color_role="text_sec", width=7)
         self._clear_btn.pack(side="right", pady=6)
+        # Save/edit a friendly name for the current peer (esp. a bare IP).
+        # Packed on demand by select_peer (peers only).
+        self._rename_btn = themed_button(head_btns, "✎ Save name", self._edit_alias,
+                                         color_role="text_sec", width=11)
+        # Add members — packed on demand by select_peer (groups only).
+        self._addmember_btn = themed_button(head_btns, "＋ Add", self._add_group_members,
+                                            color_role="accent", width=7)
 
         self._messages = ScrollFrame(right, bg_role="log_bg")
         self._messages.pack(fill="both", expand=True, pady=8)
+
+        # Reply context bar — shown above the composer while composing a reply.
+        self._reply_bar = tk.Frame(right, bg=theme.color("panel2"))
+        theme.register(self._reply_bar, bg="panel2")
+        self._reply_stripe = tk.Frame(self._reply_bar, bg=theme.color("accent"), width=3)
+        theme.register(self._reply_stripe, bg="accent")
+        self._reply_stripe.pack(side="left", fill="y", padx=(0, 6))
+        rb_text = tk.Frame(self._reply_bar, bg=theme.color("panel2"))
+        theme.register(rb_text, bg="panel2")
+        rb_text.pack(side="left", fill="x", expand=True, pady=3)
+        self._reply_to_lbl = themed_label(rb_text, "", color_role="accent",
+                                          font=("Segoe UI", 8, "bold"), bg_role="panel2")
+        self._reply_to_lbl.pack(anchor="w")
+        self._reply_preview_lbl = themed_label(rb_text, "", color_role="text_sec",
+                                               font=("Segoe UI", 8), bg_role="panel2")
+        self._reply_preview_lbl.pack(anchor="w")
+        rb_close = themed_label(self._reply_bar, "✕", color_role="text_sec",
+                                font=("Segoe UI", 10), bg_role="panel2")
+        rb_close.config(cursor="hand2")
+        rb_close.bind("<Button-1>", lambda e: self._cancel_reply())
+        rb_close.pack(side="right", padx=8)
 
         composer = tk.Frame(right, bg=theme.color("panel2"))
         theme.register(composer, bg="panel2")
@@ -356,7 +434,21 @@ class ChatView(tk.Frame):
 
     def _peer_display_name(self, ip: str) -> str:
         """Return alias > received name > ip, in priority order."""
+        if self._is_group(ip):
+            return self._groups.get(ip[6:], {}).get("name", "Group")
         return self._aliases.get(ip) or self._names.get(ip, ip)
+
+    @staticmethod
+    def _is_group(key: str) -> bool:
+        return key.startswith("group:")
+
+    def _group_meta(self, gid: str) -> dict:
+        """Build the wire group descriptor (members include ourselves)."""
+        g = self._groups.get(gid, {})
+        members = list(g.get("members", []))
+        if self.chat.my_ip not in members:
+            members = members + [self.chat.my_ip]
+        return {"gid": gid, "name": g.get("name", "Group"), "members": members}
 
     # ── self identity ─────────────────────────────────────────────────────────
     def _render_self_avatar(self) -> None:
@@ -375,6 +467,57 @@ class ChatView(tk.Frame):
         self._render_self_avatar()
         self._on_name_change(new)
         self._log(f"Chat display name set to '{new}'.")
+
+    def _render_self_dot(self) -> None:
+        for c in self._self_dot_holder.winfo_children():
+            c.destroy()
+        _status_dot(self._self_dot_holder, self.chat.presence_online,
+                    "panel").pack()
+
+    # ── settings gear (presence + popups) ──────────────────────────────────────
+    def _open_settings_menu(self, _e=None) -> None:
+        menu = tk.Menu(self, tearoff=0,
+                       bg=theme.color("panel2"), fg=theme.color("text_pri"),
+                       activebackground=theme.color("accent"),
+                       activeforeground=theme.color("text_pri"), bd=0)
+        if self.chat.presence_online:
+            menu.add_command(label="● Online — appear offline",
+                             command=lambda: self._toggle_presence(False))
+        else:
+            menu.add_command(label="○ Offline — appear online",
+                             command=lambda: self._toggle_presence(True))
+        menu.add_separator()
+        if self._notifications_enabled:
+            menu.add_command(label="🔔 Popups on — pause popups",
+                             command=lambda: self._toggle_notifications(False))
+        else:
+            menu.add_command(label="🔕 Popups paused — enable popups",
+                             command=lambda: self._toggle_notifications(True))
+        try:
+            menu.tk_popup(self._gear.winfo_rootx(),
+                          self._gear.winfo_rooty() + self._gear.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _toggle_presence(self, online: bool) -> None:
+        self.chat.presence_online = online
+        config.save_presence_online(online)
+        self._render_self_dot()
+        self._log(f"You now appear {'online' if online else 'offline'} to peers.")
+
+    def _toggle_notifications(self, enabled: bool) -> None:
+        self._notifications_enabled = enabled
+        config.save_notifications_enabled(enabled)
+        self._log(f"Message popups {'enabled' if enabled else 'paused'}.")
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self._notifications_enabled
+
+    # ── roster search ──────────────────────────────────────────────────────────
+    def _on_search(self) -> None:
+        self._peer_filter = self._search_var.get().strip().lower()
+        self.update_roster(self.chat.peers())
 
     # ── roster ────────────────────────────────────────────────────────────────
     def _is_online(self, ip: str, live_ips: set[str]) -> bool:
@@ -414,6 +557,25 @@ class ChatView(tk.Frame):
             return  # view torn down
         self.after(3000, self._roster_tick)
 
+    def _last_activity(self, key: str) -> float:
+        """Timestamp of the newest message in a conversation (0 if empty).
+
+        ``ts`` is the 4th element of every entry kind (chat, sys, file, req).
+        """
+        msgs = self._conversations.get(key)
+        if not msgs:
+            return 0.0
+        try:
+            return float(msgs[-1][3])
+        except (IndexError, TypeError, ValueError):
+            return 0.0
+
+    def _matches_filter(self, key: str) -> bool:
+        if not self._peer_filter:
+            return True
+        hay = f"{self._peer_display_name(key)} {key}".lower()
+        return self._peer_filter in hay
+
     def update_roster(self, peers) -> None:
         for p in peers:
             self._names[p.ip] = p.name
@@ -423,28 +585,52 @@ class ChatView(tk.Frame):
         online = self._online_ips(peers)
         self._last_online_sig = frozenset(online)
 
-        if not online:
+        # Groups are always listed (they have no presence of their own).
+        group_keys = [f"group:{gid}" for gid in self._groups]
+        shown_groups = [k for k in group_keys if self._matches_filter(k)]
+        shown_peers = [ip for ip in online if self._matches_filter(ip)]
+
+        if not shown_groups and not shown_peers:
             hint = tk.Frame(body, bg=theme.color("log_bg"))
             theme.register(hint, bg="log_bg")
             hint.pack(fill="x", pady=20, padx=10)
-            themed_label(hint, "...", color_role="text_sec",
-                         font=("Segoe UI", 18), bg_role="log_bg", anchor="center").pack()
-            themed_label(hint, "Looking for people on\nyour network...",
-                         color_role="text_sec", font=("Segoe UI", 8),
-                         bg_role="log_bg", anchor="center").pack()
-            themed_label(hint, "Open this app on another PC,\nor click Try Demo Chat.",
-                         color_role="text_sec", font=("Segoe UI", 8),
-                         bg_role="log_bg", anchor="center").pack(pady=(6, 0))
+            if self._peer_filter:
+                themed_label(hint, "🔍", color_role="text_sec",
+                             font=("Segoe UI", 18), bg_role="log_bg", anchor="center").pack()
+                themed_label(hint, f"No matches for\n\"{self._peer_filter}\"",
+                             color_role="text_sec", font=("Segoe UI", 8),
+                             bg_role="log_bg", anchor="center").pack()
+            else:
+                themed_label(hint, "...", color_role="text_sec",
+                             font=("Segoe UI", 18), bg_role="log_bg", anchor="center").pack()
+                themed_label(hint, "Looking for people on\nyour network...",
+                             color_role="text_sec", font=("Segoe UI", 8),
+                             bg_role="log_bg", anchor="center").pack()
+                themed_label(hint, "Open this app on another PC,\nor click Try Demo Chat.",
+                             color_role="text_sec", font=("Segoe UI", 8),
+                             bg_role="log_bg", anchor="center").pack(pady=(6, 0))
             return
 
         live_set = {p.ip for p in peers}
-        for ip in sorted(online, key=lambda x: self._peer_display_name(x).lower()):
+        # Groups first (most-recently-active on top), then peers ordered
+        # online-before-offline and, within each, latest chat on top.
+        for key in sorted(shown_groups,
+                          key=lambda x: (-self._last_activity(x),
+                                         self._peer_display_name(x).lower())):
+            self._add_group_row(body, key)
+        for ip in sorted(shown_peers,
+                         key=lambda x: (not self._is_online(x, live_set),
+                                        -self._last_activity(x),
+                                        self._peer_display_name(x).lower())):
             self._add_roster_row(body, ip, self._is_online(ip, live_set))
 
         # Update active peer subtext if one is selected
         if self._active_ip:
             ip = self._active_ip
-            if ip == DemoBot.IP:
+            if self._is_group(ip):
+                members = self._group_meta(ip[6:]).get("members", [])
+                sub_text = f"Group · {len(members)} members"
+            elif ip == DemoBot.IP:
                 sub_text = "demo peer"
             else:
                 is_on = self._is_online(ip, {p.ip for p in peers})
@@ -514,6 +700,274 @@ class ChatView(tk.Frame):
             row.bind("<Enter>", lambda e: self._hover_row(row, txt, True))
             row.bind("<Leave>", lambda e: self._hover_row(row, txt, False))
 
+    def _add_group_row(self, body, key: str) -> None:
+        """A roster row for a synced group (no presence dot — a 👥 badge)."""
+        gid = key[6:]
+        display = self._peer_display_name(key)
+        members = self._group_meta(gid).get("members", [])
+        active = (key == self._active_ip)
+        bg_role = "select_bg" if active else "log_bg"
+        row = tk.Frame(body, bg=theme.color(bg_role), cursor="hand2")
+        theme.register(row, bg=bg_role)
+        row.pack(fill="x", pady=1)
+
+        del_btn = tk.Button(
+            row, text="✕", bg=theme.color(bg_role), fg=theme.color("text_sec"),
+            font=("Segoe UI", 9), relief="flat", cursor="hand2", bd=0,
+            activebackground=theme.color(bg_role),
+            activeforeground=theme.color("danger"))
+        del_btn.pack(side="right", padx=(0, 6), pady=3)
+        del_btn.bind("<Button-1>", lambda e: "break")
+        del_btn.bind("<ButtonRelease-1>", lambda e, _k=key: (self._delete_group(_k), "break")[1])
+
+        unread = self._unread.get(key, 0)
+        if unread:
+            tk.Label(row, text=str(unread), bg=theme.color("danger"),
+                     fg="#ffffff", font=("Segoe UI", 8, "bold"),
+                     padx=5, pady=0).pack(side="right", padx=6)
+
+        make_avatar(row, "👥", size=32, bg_role=bg_role).pack(side="left", padx=6, pady=5)
+        txt = tk.Frame(row, bg=theme.color(bg_role))
+        theme.register(txt, bg=bg_role)
+        txt.pack(side="left", fill="x", expand=True)
+        themed_label(txt, display, color_role="text_pri",
+                     font=("Segoe UI", 9, "bold"), bg_role=bg_role).pack(anchor="w")
+        themed_label(txt, f"👥 {len(members)} members", color_role="text_sec",
+                     font=("Consolas", 7), bg_role=bg_role).pack(anchor="w")
+
+        for w in (row, txt):
+            w.bind("<Button-1>", lambda e, _k=key: self.select_peer(_k))
+        for child in txt.winfo_children():
+            child.bind("<Button-1>", lambda e, _k=key: self.select_peer(_k))
+        if not active:
+            row.bind("<Enter>", lambda e: self._hover_row(row, txt, True))
+            row.bind("<Leave>", lambda e: self._hover_row(row, txt, False))
+
+    # ── groups ──────────────────────────────────────────────────────────────────
+    def _new_group_dialog(self) -> None:
+        """Pick a name + members from known peers (and/or typed IPs)."""
+        candidates = sorted(
+            (set(self._names) | set(self._aliases) | set(self._conversations)
+             - {k for k in self._conversations if self._is_group(k)}),
+            key=lambda x: self._peer_display_name(x).lower())
+        candidates = [ip for ip in candidates
+                      if ip != self.chat.my_ip and ip != DemoBot.IP
+                      and not self._is_group(ip)]
+
+        win = tk.Toplevel(self)
+        win.title("New Group")
+        win.configure(bg=theme.color("bg"))
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, True)
+
+        pad = tk.Frame(win, bg=theme.color("bg"))
+        pad.pack(fill="both", expand=True, padx=14, pady=12)
+        themed_label(pad, "Group name", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="bg").pack(anchor="w")
+        name_var = tk.StringVar()
+        name_entry = tk.Entry(pad, textvariable=name_var, font=("Segoe UI", 10),
+                              relief="flat", bd=5, bg=theme.color("panel2"),
+                              fg=theme.color("text_pri"),
+                              insertbackground=theme.color("text_pri"))
+        theme.register(name_entry, bg="panel2", fg="text_pri", insertbackground="text_pri")
+        name_entry.pack(fill="x", pady=(2, 10))
+        name_entry.focus_set()
+
+        themed_label(pad, "Members", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="bg").pack(anchor="w")
+        list_box = ScrollFrame(pad, bg_role="log_bg", height=160)
+        list_box.pack(fill="both", expand=True, pady=(2, 8))
+        list_box.configure(height=160)
+
+        vars_by_ip: dict[str, tk.BooleanVar] = {}
+        for ip in candidates:
+            v = tk.BooleanVar(value=False)
+            vars_by_ip[ip] = v
+            cb = tk.Checkbutton(
+                list_box.body, text=f"  {self._peer_display_name(ip)}  ({ip})",
+                variable=v, bg=theme.color("log_bg"), fg=theme.color("text_pri"),
+                activebackground=theme.color("log_bg"),
+                activeforeground=theme.color("text_pri"),
+                selectcolor=theme.color("panel2"), font=("Segoe UI", 9),
+                bd=0, highlightthickness=0, anchor="w")
+            theme.register(cb, bg="log_bg", fg="text_pri", activebackground="log_bg",
+                           activeforeground="text_pri", selectcolor="panel2")
+            cb.pack(fill="x", anchor="w")
+
+        themed_label(pad, "Add an IP (optional)", color_role="text_sec",
+                     font=("Segoe UI", 8), bg_role="bg").pack(anchor="w")
+        extra_var = tk.StringVar()
+        extra_entry = tk.Entry(pad, textvariable=extra_var, font=("Consolas", 9),
+                               relief="flat", bd=5, bg=theme.color("panel2"),
+                               fg=theme.color("text_pri"),
+                               insertbackground=theme.color("text_pri"))
+        theme.register(extra_entry, bg="panel2", fg="text_pri", insertbackground="text_pri")
+        extra_entry.pack(fill="x", pady=(2, 10))
+
+        def _create():
+            name = name_var.get().strip()[:32]
+            members = [ip for ip, v in vars_by_ip.items() if v.get()]
+            extra = extra_var.get().strip()
+            if extra and is_valid_ipv4(extra) and extra != self.chat.my_ip:
+                members.append(extra)
+            members = list(dict.fromkeys(members))   # de-dup, keep order
+            if not name:
+                messagebox.showwarning("Name required", "Enter a group name.", parent=win)
+                return
+            if not members:
+                messagebox.showwarning("No members", "Select at least one member.", parent=win)
+                return
+            win.destroy()
+            self._create_group(name, members)
+
+        btn_row = tk.Frame(pad, bg=theme.color("bg"))
+        btn_row.pack(fill="x")
+        themed_button(btn_row, "Cancel", win.destroy, color_role="text_sec",
+                      width=8).pack(side="right", padx=(6, 0))
+        themed_button(btn_row, "Create", _create, color_role="accent",
+                      width=8).pack(side="right")
+
+    def _create_group(self, name: str, members: list[str]) -> None:
+        import uuid
+        gid = uuid.uuid4().hex[:12]
+        self._groups[gid] = {"name": name, "members": members}
+        key = f"group:{gid}"
+        self._conversations.setdefault(key, [])
+        # Manually-register external members so their replies are approved.
+        for ip in members:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        meta = self._group_meta(gid)
+        # Announce the group so members' apps register the thread immediately.
+        threading.Thread(
+            target=lambda: self.chat.send_group(
+                meta, f"{self.chat.my_name} created group \"{name}\"",
+                msg_type="group_invite"),
+            daemon=True).start()
+        self._save_group_history(gid)
+        self.update_roster(self.chat.peers())
+        self.select_peer(key)
+        self._log(f"Group \"{name}\" created with {len(members)} member(s).")
+
+    def _add_group_members(self) -> None:
+        """Add more members to the currently-selected group."""
+        key = self._active_ip
+        if not key or not self._is_group(key):
+            return
+        gid = key[6:]
+        existing = set(self._group_meta(gid).get("members", []))
+        candidates = [ip for ip in (set(self._names) | set(self._aliases)
+                                    | set(self._conversations))
+                      if ip not in existing and ip != self.chat.my_ip
+                      and ip != DemoBot.IP and not self._is_group(ip)]
+        candidates.sort(key=lambda x: self._peer_display_name(x).lower())
+
+        win = tk.Toplevel(self)
+        win.title(f"Add members — {self._peer_display_name(key)}")
+        win.configure(bg=theme.color("bg"))
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, True)
+        pad = tk.Frame(win, bg=theme.color("bg"))
+        pad.pack(fill="both", expand=True, padx=14, pady=12)
+
+        themed_label(pad, "Members to add", color_role="text_sec",
+                     font=("Segoe UI", 8, "bold"), bg_role="bg").pack(anchor="w")
+        list_box = ScrollFrame(pad, bg_role="log_bg", height=160)
+        list_box.pack(fill="both", expand=True, pady=(2, 8))
+        vars_by_ip: dict[str, tk.BooleanVar] = {}
+        for ip in candidates:
+            v = tk.BooleanVar(value=False)
+            vars_by_ip[ip] = v
+            cb = tk.Checkbutton(
+                list_box.body, text=f"  {self._peer_display_name(ip)}  ({ip})",
+                variable=v, bg=theme.color("log_bg"), fg=theme.color("text_pri"),
+                activebackground=theme.color("log_bg"),
+                activeforeground=theme.color("text_pri"),
+                selectcolor=theme.color("panel2"), font=("Segoe UI", 9),
+                bd=0, highlightthickness=0, anchor="w")
+            theme.register(cb, bg="log_bg", fg="text_pri", activebackground="log_bg",
+                           activeforeground="text_pri", selectcolor="panel2")
+            cb.pack(fill="x", anchor="w")
+
+        themed_label(pad, "Add an IP (optional)", color_role="text_sec",
+                     font=("Segoe UI", 8), bg_role="bg").pack(anchor="w")
+        extra_var = tk.StringVar()
+        extra_entry = tk.Entry(pad, textvariable=extra_var, font=("Consolas", 9),
+                               relief="flat", bd=5, bg=theme.color("panel2"),
+                               fg=theme.color("text_pri"),
+                               insertbackground=theme.color("text_pri"))
+        theme.register(extra_entry, bg="panel2", fg="text_pri", insertbackground="text_pri")
+        extra_entry.pack(fill="x", pady=(2, 10))
+
+        def _confirm():
+            chosen = [ip for ip, v in vars_by_ip.items() if v.get()]
+            extra = extra_var.get().strip()
+            if extra and is_valid_ipv4(extra) and extra != self.chat.my_ip \
+                    and extra not in existing:
+                chosen.append(extra)
+            chosen = [ip for ip in dict.fromkeys(chosen) if ip not in existing]
+            if not chosen:
+                win.destroy()
+                return
+            win.destroy()
+            self._apply_group_additions(gid, chosen)
+
+        btn_row = tk.Frame(pad, bg=theme.color("bg"))
+        btn_row.pack(fill="x")
+        themed_button(btn_row, "Cancel", win.destroy, color_role="text_sec",
+                      width=8).pack(side="right", padx=(6, 0))
+        themed_button(btn_row, "Add", _confirm, color_role="accent",
+                      width=8).pack(side="right")
+
+    def _apply_group_additions(self, gid: str, new_members: list[str]) -> None:
+        g = self._groups.get(gid)
+        if not g:
+            return
+        members = list(dict.fromkeys(list(g.get("members", [])) + new_members))
+        g["members"] = members
+        for ip in new_members:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        meta = self._group_meta(gid)
+        name = g.get("name", "Group")
+        # Broadcast updated membership to everyone so all rosters stay in sync.
+        threading.Thread(
+            target=lambda: self.chat.send_group(
+                meta, f"{self.chat.my_name} added {len(new_members)} member(s)",
+                msg_type="group_invite"),
+            daemon=True).start()
+        self._save_group_history(gid)
+        key = f"group:{gid}"
+        if self._active_ip == key:
+            self._head_sub.config(text=f"Group · {len(members)} members")
+        self.update_roster(self.chat.peers())
+        self._log(f"Added {len(new_members)} member(s) to \"{name}\".")
+
+    def _delete_group(self, key: str) -> None:
+        gid = key[6:]
+        name = self._peer_display_name(key)
+        if not messagebox.askyesno(
+                "Leave group",
+                f"Leave \"{name}\" and delete its history on this PC?",
+                parent=self):
+            return
+        self._groups.pop(gid, None)
+        self._conversations.pop(key, None)
+        self._unread.pop(key, None)
+        self._delete_peer_history(key)
+        if self._active_ip == key:
+            self._active_ip = None
+            self._head_name.config(text="LAN Chat")
+            self._head_sub.config(text="Select a peer on the left")
+            for c in self._head_avatar_holder.winfo_children():
+                c.destroy()
+            self._set_composer_state(False)
+            self._show_empty_state()
+        self.update_roster(self.chat.peers())
+        self._log(f"Left group \"{name}\".")
+
     def _delete_peer(self, ip: str) -> None:
         """Forget a peer: drop it from the roster, the chat service and disk."""
         name = self._peer_display_name(ip)
@@ -573,13 +1027,18 @@ class ChatView(tk.Frame):
     def select_peer(self, ip: str) -> None:
         self._active_ip = ip
         self._unread[ip] = 0
+        self._cancel_reply()
         name = self._peer_display_name(ip)
         for c in self._head_avatar_holder.winfo_children():
             c.destroy()
-        make_avatar(self._head_avatar_holder, name, size=34,
+        avatar_seed = "👥" if self._is_group(ip) else name
+        make_avatar(self._head_avatar_holder, avatar_seed, size=34,
                     bg_role="panel2").pack()
         self._head_name.config(text=name)
-        if ip == DemoBot.IP:
+        if self._is_group(ip):
+            members = self._group_meta(ip[6:]).get("members", [])
+            sub_text = f"Group · {len(members)} members"
+        elif ip == DemoBot.IP:
             sub_text = "demo peer"
         elif self.chat.is_manual_peer(ip):
             online = self.chat.is_peer_online(ip)
@@ -587,6 +1046,16 @@ class ChatView(tk.Frame):
         else:
             sub_text = f"{ip}  ·  Online"
         self._head_sub.config(text=sub_text)
+        # "Save name" is for 1:1 peers; "Add" members is for groups.
+        if self._is_group(ip):
+            self._rename_btn.pack_forget()
+            self._addmember_btn.pack(side="right", padx=(0, 6), pady=6)
+        elif ip == DemoBot.IP:
+            self._rename_btn.pack_forget()
+            self._addmember_btn.pack_forget()
+        else:
+            self._addmember_btn.pack_forget()
+            self._rename_btn.pack(side="right", padx=(0, 6), pady=6)
         self._set_composer_state(True)
         self._render(ip)
         self.update_roster(self.chat.peers())
@@ -630,7 +1099,10 @@ class ChatView(tk.Frame):
             return
 
         # ── regular chat bubbles ──────────────────────────────────────────────
-        _, sender, text, ts = entry
+        # Entries are 4-tuples (kind, sender, text, ts) with an optional 5th
+        # element carrying the {"sender","text"} this message replies to.
+        _, sender, text, ts = entry[0], entry[1], entry[2], entry[3]
+        reply = entry[4] if len(entry) > 4 else None
         stamp = time.strftime("%H:%M", time.localtime(ts))
 
         if kind == "sys":
@@ -654,14 +1126,45 @@ class ChatView(tk.Frame):
             themed_label(bubble, sender, color_role="accent",
                          font=("Segoe UI", 8, "bold"),
                          bg_role=bub_role).pack(anchor="w", padx=10, pady=(5, 0))
+
+        # Quoted reply snippet (if this message is a reply).
+        if isinstance(reply, dict) and reply.get("text"):
+            quote = tk.Frame(bubble, bg=theme.color(bub_role))
+            theme.register(quote, bg=bub_role)
+            quote.pack(fill="x", anchor="w", padx=10, pady=(4, 0))
+            tk.Frame(quote, bg=theme.color("accent"), width=2).pack(side="left", fill="y")
+            qt = tk.Frame(quote, bg=theme.color(bub_role))
+            theme.register(qt, bg=bub_role)
+            qt.pack(side="left", fill="x", padx=(5, 0))
+            themed_label(qt, reply.get("sender", ""), color_role="accent",
+                         font=("Segoe UI", 7, "bold"), bg_role=bub_role).pack(anchor="w")
+            snippet = reply["text"]
+            if len(snippet) > 60:
+                snippet = snippet[:57] + "…"
+            themed_label(qt, snippet, color_role=(tx_role if is_out else "text_sec"),
+                         font=("Segoe UI", 8), bg_role=bub_role).pack(anchor="w")
+
         msg = tk.Label(bubble, text=text, bg=theme.color(bub_role),
                        fg=theme.color(tx_role), font=("Segoe UI", 10),
                        justify="left", wraplength=240, anchor="w")
         theme.register(msg, bg=bub_role, fg=tx_role)
         msg.pack(anchor="w", padx=10, pady=(2, 1))
-        themed_label(bubble, stamp, color_role=(tx_role if is_out else "text_sec"),
-                     font=("Segoe UI", 7), bg_role=bub_role).pack(
-                         anchor="e", padx=10, pady=(0, 4))
+
+        foot = tk.Frame(bubble, bg=theme.color(bub_role))
+        theme.register(foot, bg=bub_role)
+        foot.pack(fill="x", padx=10, pady=(0, 4))
+        # Reply affordance — also wired to right-click on the whole bubble.
+        reply_btn = themed_label(foot, "↩ Reply", color_role="text_sec",
+                                 font=("Segoe UI", 7), bg_role=bub_role)
+        reply_btn.config(cursor="hand2")
+        reply_btn.pack(side="left")
+        themed_label(foot, stamp, color_role=(tx_role if is_out else "text_sec"),
+                     font=("Segoe UI", 7), bg_role=bub_role).pack(side="right")
+
+        _snd = "You" if is_out else sender
+        reply_btn.bind("<Button-1>", lambda e, s=_snd, t=text: self._set_reply(s, t))
+        for w in (bubble, msg):
+            w.bind("<Button-3>", lambda e, s=_snd, t=text: self._set_reply(s, t))
 
     def _add_file_bubble(self, entry: tuple) -> None:
         kind, tid, meta, ts = entry
@@ -844,6 +1347,50 @@ class ChatView(tk.Frame):
         else:
             self._composer.pack_forget()
             self._clear_btn.pack_forget()
+            self._cancel_reply()
+
+    # ── reply context ──────────────────────────────────────────────────────────
+    def _set_reply(self, sender: str, text: str) -> None:
+        self._reply_to = {"sender": sender, "text": text}
+        self._reply_to_lbl.config(text=f"↩ Replying to {sender}")
+        snippet = text if len(text) <= 70 else text[:67] + "…"
+        self._reply_preview_lbl.config(text=snippet)
+        self._reply_bar.pack(fill="x", before=self._composer)
+        self._clear_placeholder()
+        self._entry.focus_set()
+
+    def _cancel_reply(self) -> None:
+        self._reply_to = None
+        try:
+            self._reply_bar.pack_forget()
+        except tk.TclError:
+            pass
+
+    # ── alias / save IP with a name ────────────────────────────────────────────
+    def _edit_alias(self) -> None:
+        ip = self._active_ip
+        if not ip or self._is_group(ip) or ip == DemoBot.IP:
+            return
+        current = self._aliases.get(ip, "")
+        name = simpledialog.askstring(
+            "Save name",
+            f"Name for {ip}:",
+            initialvalue=current, parent=self)
+        if name is None:
+            return
+        name = name.strip()[:32]
+        if name:
+            self._aliases[ip] = name
+        else:
+            self._aliases.pop(ip, None)
+        self._save_peer_history(ip)
+        self._head_name.config(text=self._peer_display_name(ip))
+        for c in self._head_avatar_holder.winfo_children():
+            c.destroy()
+        make_avatar(self._head_avatar_holder, self._peer_display_name(ip),
+                    size=34, bg_role="panel2").pack()
+        self.update_roster(self.chat.peers())
+        self._log(f"Saved name for {ip}.")
 
     def _clear_placeholder(self, _e=None) -> None:
         if self._placeholder_on:
@@ -859,42 +1406,106 @@ class ChatView(tk.Frame):
             self._placeholder_on = True
 
     def _send(self) -> None:
-        ip = self._active_ip
-        if not ip or self._placeholder_on:
+        key = self._active_ip
+        if not key or self._placeholder_on:
             return
         text = self._entry.get().strip()
         if not text:
             return
         self._entry.delete(0, "end")
-        self._conversations.setdefault(ip, []).append(("out", "You", text, time.time()))
-        self._trim_history(ip)
-        self._save_peer_history(ip)
-        self._render(ip)
+        reply = self._reply_to
+        entry = ("out", "You", text, time.time(), reply) if reply \
+            else ("out", "You", text, time.time())
+        self._conversations.setdefault(key, []).append(entry)
+        self._trim_history(key)
+        self._cancel_reply()
+        if self._is_group(key):
+            self._save_group_history(key[6:])
+        else:
+            self._save_peer_history(key)
+        self._render(key)
+
+        if self._is_group(key):
+            meta = self._group_meta(key[6:])
+
+            def gworker():
+                results = self.chat.send_group(meta, text, reply=reply)
+                failed = [ip for ip, ok in results.items() if not ok]
+                if failed:
+                    def note():
+                        self._conversations.setdefault(key, []).append(
+                            ("sys", "", f"not delivered to {len(failed)} member(s) "
+                                        "(offline?)", time.time()))
+                        if key == self._active_ip:
+                            self._render(key)
+                    self.after(0, note)
+            threading.Thread(target=gworker, daemon=True).start()
+            return
 
         def worker():
-            ok = self.chat.send(ip, text)
+            ok = self.chat.send(key, text, reply=reply)
             if not ok:
                 def fail():
-                    self._conversations.setdefault(ip, []).append(
+                    self._conversations.setdefault(key, []).append(
                         ("sys", "", "not delivered (peer offline?)", time.time()))
-                    if ip == self._active_ip:
-                        self._render(ip)
+                    if key == self._active_ip:
+                        self._render(key)
                 self.after(0, fail)
         threading.Thread(target=worker, daemon=True).start()
 
-    def receive_message(self, ip: str, name: str, text: str, ts: float) -> bool:
+    def receive_message(self, ip: str, name: str, text: str, ts: float,
+                        reply: dict | None = None) -> bool:
         """Store an incoming message. Returns True if shown in the active+visible
         conversation (so no toast is needed)."""
         self._names[ip] = name
-        self._conversations.setdefault(ip, []).append(("in", name, text, ts))
+        entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
+        self._conversations.setdefault(ip, []).append(entry)
         self._trim_history(ip)
         self._save_peer_history(ip)
         shown = (ip == self._active_ip and self._visible)
         if shown:
-            self._add_bubble(("in", name, text, ts))
+            self._add_bubble(entry)
             self._messages.scroll_to_bottom()
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
+            self.update_roster(self.chat.peers())
+        return shown
+
+    def on_group_message(self, group: dict, ip: str, name: str, text: str,
+                         ts: float, reply: dict | None = None) -> bool:
+        """Store an incoming synced-group message. Returns True if shown in view."""
+        gid = group.get("gid")
+        if not gid:
+            return False
+        # Register / refresh the group from the wire descriptor.
+        members = [m for m in group.get("members", []) if m]
+        g = self._groups.setdefault(gid, {"name": group.get("name", "Group"),
+                                          "members": members})
+        g["name"] = group.get("name", g.get("name", "Group"))
+        if members:
+            g["members"] = members
+        for m in members:
+            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                self.chat.add_manual_peer(m)
+        self._names[ip] = name
+
+        key = f"group:{gid}"
+        # A group_invite with no body is just a registration ping.
+        new_group_announced = not text
+        if text:
+            entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
+            self._conversations.setdefault(key, []).append(entry)
+            self._trim_history(key)
+        self._save_group_history(gid)
+
+        shown = (key == self._active_ip and self._visible)
+        if shown and text:
+            self._add_bubble(entry)
+            self._messages.scroll_to_bottom()
+        elif text:
+            self._unread[key] = self._unread.get(key, 0) + 1
+            self.update_roster(self.chat.peers())
+        elif new_group_announced:
             self.update_roster(self.chat.peers())
         return shown
 
@@ -982,13 +1593,26 @@ class ChatView(tk.Frame):
                     ip = data.get("ip")
                     if not ip:
                         continue
+                    self._conversations[ip] = [
+                        tuple(m) for m in data.get("messages", [])[-_MAX_HISTORY_PER_PEER:]
+                    ]
+                    # Synced group thread.
+                    if self._is_group(ip) and isinstance(data.get("group"), dict):
+                        gid = ip[6:]
+                        g = data["group"]
+                        self._groups[gid] = {
+                            "name": g.get("name", "Group"),
+                            "members": [m for m in g.get("members", []) if m],
+                        }
+                        for m in self._groups[gid]["members"]:
+                            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                                self.chat.add_manual_peer(m)
+                        loaded_any = True
+                        continue
                     if data.get("name"):
                         self._names[ip] = data["name"]
                     if data.get("alias"):
                         self._aliases[ip] = data["alias"]
-                    self._conversations[ip] = [
-                        tuple(m) for m in data.get("messages", [])[-_MAX_HISTORY_PER_PEER:]
-                    ]
                     # Re-register manually-added (cross-subnet) peers so presence
                     # probing resumes and their online status stays accurate.
                     if data.get("manual"):
@@ -1052,6 +1676,30 @@ class ChatView(tk.Frame):
 
         threading.Thread(target=_write, daemon=True).start()
 
+    def _save_group_history(self, gid: str) -> None:
+        """Persist a group's thread + membership asynchronously."""
+        key = f"group:{gid}"
+        msgs = list(self._conversations.get(key, []))
+        group = dict(self._groups.get(gid, {}))
+
+        def _write():
+            try:
+                path = os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json")
+                kept = [m for m in msgs
+                        if not m[0].startswith("file_") and not m[0].startswith("chat_req")]
+                data = {
+                    "ip": key,
+                    "group": {"name": group.get("name", "Group"),
+                              "members": group.get("members", [])},
+                    "messages": [list(m) for m in kept[-_MAX_HISTORY_PER_PEER:]],
+                }
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except Exception:
+                pass
+
+        threading.Thread(target=_write, daemon=True).start()
+
     def _trim_history(self, ip: str) -> None:
         msgs = self._conversations.get(ip)
         if msgs and len(msgs) > _MAX_HISTORY_PER_PEER:
@@ -1061,6 +1709,11 @@ class ChatView(tk.Frame):
     def _attach_file(self) -> None:
         ip = self._active_ip
         if not ip:
+            return
+        if self._is_group(ip):
+            messagebox.showinfo("Not supported",
+                                "File sharing isn't available in group chats yet.",
+                                parent=self)
             return
         path = filedialog.askopenfilename(parent=self)
         if not path:
@@ -1223,9 +1876,14 @@ class ChatView(tk.Frame):
         ip = self._active_ip
         if not ip:
             return
-        self._conversations.pop(ip, None)
-        self._unread.pop(ip, None)
-        self._save_peer_history(ip)
+        if self._is_group(ip):
+            self._conversations[ip] = []
+            self._unread.pop(ip, None)
+            self._save_group_history(ip[6:])
+        else:
+            self._conversations.pop(ip, None)
+            self._unread.pop(ip, None)
+            self._save_peer_history(ip)
         self._show_empty_state()
         self._log(f"Chat with {self._peer_display_name(ip)} cleared.")
 

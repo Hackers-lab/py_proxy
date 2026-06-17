@@ -109,8 +109,24 @@ class ScrollFrame(tk.Frame):
             self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
 
     def scroll_to_bottom(self) -> None:
+        """Jump to the newest content.
+
+        The scrollregion is recomputed from the freshly-laid-out body *before*
+        moving, otherwise a yview_moveto runs against a stale region and the
+        view appears frozen at the previous conversation's offset (so a just-
+        switched chat looks empty until the user scrolls). A second pass is
+        queued on idle to catch wraplength reflow that finalises after this
+        call returns.
+        """
+        def _do() -> None:
+            try:
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                self.canvas.yview_moveto(1.0)
+            except tk.TclError:
+                pass
         self.update_idletasks()
-        self.canvas.yview_moveto(1.0)
+        _do()
+        self.after_idle(_do)
 
     def clear(self) -> None:
         for child in self.body.winfo_children():

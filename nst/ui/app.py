@@ -78,8 +78,10 @@ class App(tk.Tk):
             on_file_accept=self._on_file_accept,
             on_file_reject=self._on_file_reject,
             on_chat_request=self._on_chat_request_received,
+            on_group_message=self._on_group_message,
         )
         self._chat.ip_chat_enabled = config.load_ip_chat_enabled()
+        self._chat.presence_online = config.load_presence_online()
 
         # Persisted state on startup.
         self._route_active = check_route_exists()
@@ -725,10 +727,11 @@ class App(tk.Tk):
         except (RuntimeError, tk.TclError):
             pass  # window tearing down
 
-    def _on_chat_message(self, ip: str, name: str, text: str, ts: float) -> None:
+    def _on_chat_message(self, ip: str, name: str, text: str, ts: float,
+                         reply: dict | None = None) -> None:
         def _apply():
-            shown = self._chat_view.receive_message(ip, name, text, ts)
-            if not shown:
+            shown = self._chat_view.receive_message(ip, name, text, ts, reply)
+            if not shown and self._chat_view.notifications_enabled:
                 preview = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(name, preview, ip)
                 # Auto-open the chat window so the user never misses a message.
@@ -738,10 +741,25 @@ class App(tk.Tk):
         except (RuntimeError, tk.TclError):
             pass
 
+    def _on_group_message(self, group: dict, ip: str, name: str, text: str,
+                          ts: float, reply: dict | None = None) -> None:
+        def _apply():
+            shown = self._chat_view.on_group_message(group, ip, name, text, ts, reply)
+            if not shown and text and self._chat_view.notifications_enabled:
+                gname = group.get("name", "Group")
+                preview = text if len(text) <= 100 else text[:97] + "…"
+                key = f"group:{group.get('gid', '')}"
+                self._toasts.notify(f"{gname} (group)", f"{name}: {preview}", key)
+                self._open_chat_window(key)
+        try:
+            self.after(0, _apply)
+        except (RuntimeError, tk.TclError):
+            pass
+
     def _on_file_offer(self, ip: str, name: str, msg: dict) -> None:
         def _apply():
             shown = self._chat_view.on_file_offer_received(ip, name, msg)
-            if not shown:
+            if not shown and self._chat_view.notifications_enabled:
                 filename = msg.get("filename", "file")
                 self._toasts.notify(name, f"📎 Wants to send: {filename}", ip)
                 self._open_chat_window(ip)
