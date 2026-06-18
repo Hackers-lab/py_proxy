@@ -1806,7 +1806,7 @@ class ChatWindow(QWidget):
                 self._transfer_paths[tid] = path
                 def main_done():
                     self._set_progress(tid, "Sent!")
-                    self._rerender_if_active(ip)
+                    self._render(ip)  # Always render to show completion
                 QTimer.singleShot(0, main_done)
 
         def error(msg):
@@ -1815,7 +1815,7 @@ class ChatWindow(QWidget):
                 self._transfer_paths[tid] = ""
                 def main_error():
                     self._set_progress(tid, f"Failed: {msg}")
-                    self._rerender_if_active(ip)
+                    self._render(ip)  # Always render to show error
                 QTimer.singleShot(0, main_error)
 
         def expire():
@@ -1867,7 +1867,7 @@ class ChatWindow(QWidget):
         self._offer_states[tid] = "accepted"
         self._transfer_paths[tid] = None
         self._set_progress(tid, "Connecting…")
-        self._rerender_if_active(from_ip)
+        self._render(from_ip)  # Always render to show progress, even if peer not active
 
         def progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
@@ -1879,14 +1879,14 @@ class ChatWindow(QWidget):
             self._transfer_paths[tid] = save_path
             def main_fdone():
                 self._set_progress(tid, "Saved!")
-                self._rerender_if_active(from_ip)
+                self._render(from_ip)  # Always render to show completion
             QTimer.singleShot(0, main_fdone)
 
         def ferr(msg):
             self._transfer_paths[tid] = ""
             def main_ferr():
                 self._set_progress(tid, f"Failed: {msg}")
-                self._rerender_if_active(from_ip)
+                self._render(from_ip)  # Always render to show error
             QTimer.singleShot(0, main_ferr)
 
         def work():
@@ -1915,14 +1915,14 @@ class ChatWindow(QWidget):
 
     def on_file_accepted(self, ip, name, msg) -> None:
         self._set_progress(msg["transfer_id"], f"{name} accepted — sending…")
-        self._rerender_if_active(ip)
+        self._render(ip)  # Always render to show updated status
 
     def on_file_rejected(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
         self._ft.cancel_offer(tid)
         self._transfer_paths[tid] = ""
         self._set_progress(tid, f"Rejected by {name}")
-        self._rerender_if_active(ip)
+        self._render(ip)  # Always render to show rejection status
 
     # ── chat requests (external IP first contact) ─────────────────────────────
     def _make_req_bubble(self, entry: dict) -> QWidget:
