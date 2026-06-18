@@ -567,6 +567,7 @@ class ChatWindow(QWidget):
                 if self._unread.get(self._active):
                     self._unread[self._active] = 0
                     self.update_roster(self.chat.peers())
+                    self._render(self._active)
                 self._mark_read(self._active)
         super().changeEvent(e)
 
@@ -2151,41 +2152,50 @@ class ChatWindow(QWidget):
         def progress(done, total, speed, elapsed, eta):
             if holder["tid"]:
                 pct = int(done * 100 / total) if total else 0
-                QTimer.singleShot(0, lambda: self._set_progress(
-                    holder["tid"], f"Sending {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}"))
+                def main_prog():
+                    self._set_progress(holder["tid"], f"Sending {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}")
+                QTimer.singleShot(0, main_prog)
 
         def done():
             tid = holder["tid"]
             if tid:
                 self._transfer_paths[tid] = path
-                QTimer.singleShot(0, lambda: (self._set_progress(tid, "Sent!"),
-                                              self._rerender_if_active(ip)))
+                def main_done():
+                    self._set_progress(tid, "Sent!")
+                    self._rerender_if_active(ip)
+                QTimer.singleShot(0, main_done)
 
         def error(msg):
             tid = holder["tid"]
             if tid:
                 self._transfer_paths[tid] = ""
-                QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {msg}"),
-                                              self._rerender_if_active(ip)))
+                def main_error():
+                    self._set_progress(tid, f"Failed: {msg}")
+                    self._rerender_if_active(ip)
+                QTimer.singleShot(0, main_error)
 
         def expire():
             tid = holder["tid"]
             if tid:
-                QTimer.singleShot(0, lambda: self._set_progress(tid, "No response — expired"))
+                def main_expire():
+                    self._set_progress(tid, "No response — expired")
+                QTimer.singleShot(0, main_expire)
 
         try:
             self._ft.offer_file(ip, path, tid=tid, progress_cb=progress, done_cb=done,
                                 error_cb=error, expire_cb=expire)
         except Exception as e:
             self._transfer_paths[tid] = ""
-            QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {e}"),
-                                          self._rerender_if_active(ip)))
+            def main_exc():
+                self._set_progress(tid, f"Failed: {e}")
+                self._rerender_if_active(ip)
+            QTimer.singleShot(0, main_exc)
 
     def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
         entry = _mk_entry(kind, "", "", time.time(), tid=tid, filename=filename,
                           size=size, from_ip=from_ip)
         self._store(ip, entry)
-        if ip == self._active and self._visible:
+        if ip == self._active and (kind == "file_out" or self._visible):
             self._append(entry)
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
@@ -2205,6 +2215,9 @@ class ChatWindow(QWidget):
             self.activity.emit(ip)
 
     def _accept_file(self, tid, from_ip, filename, size) -> None:
+        from_ip = from_ip or self._active
+        if not from_ip:
+            return
         self._offer_states[tid] = "accepted"
         self._transfer_paths[tid] = None
         self._set_progress(tid, "Connecting…")
@@ -2212,18 +2225,23 @@ class ChatWindow(QWidget):
 
         def progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
-            QTimer.singleShot(0, lambda: self._set_progress(
-                tid, f"Receiving {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}"))
+            def main_prog():
+                self._set_progress(tid, f"Receiving {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}")
+            QTimer.singleShot(0, main_prog)
 
         def fdone(save_path):
             self._transfer_paths[tid] = save_path
-            QTimer.singleShot(0, lambda: (self._set_progress(tid, "Saved!"),
-                                          self._rerender_if_active(from_ip)))
+            def main_fdone():
+                self._set_progress(tid, "Saved!")
+                self._rerender_if_active(from_ip)
+            QTimer.singleShot(0, main_fdone)
 
         def ferr(msg):
             self._transfer_paths[tid] = ""
-            QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {msg}"),
-                                          self._rerender_if_active(from_ip)))
+            def main_ferr():
+                self._set_progress(tid, f"Failed: {msg}")
+                self._rerender_if_active(from_ip)
+            QTimer.singleShot(0, main_ferr)
 
         def work():
             self._ft.send_accept(from_ip, tid)
@@ -2232,6 +2250,9 @@ class ChatWindow(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _reject_file(self, tid, from_ip) -> None:
+        from_ip = from_ip or self._active
+        if not from_ip:
+            return
         self._offer_states[tid] = "rejected"
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Rejected")
