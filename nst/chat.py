@@ -31,7 +31,7 @@ from .constants import (
     CHAT_PRESENCE_PORT,
     CHAT_TCP_PORT,
 )
-from .netinfo import get_all_local_ips, get_local_ip, get_subnet_broadcasts
+from .netinfo import get_all_local_ips, get_local_ip, get_my_broadcast
 from .win_utils import get_idle_seconds
 
 
@@ -57,7 +57,8 @@ class ChatService:
                  on_group_message=None,
                  on_receipt=None,
                  on_delete=None,
-                 on_typing=None) -> None:
+                 on_typing=None,
+                 on_reaction=None) -> None:
         """
         on_roster_change(peers: list[Peer])          -- roster changed.
         on_message(ip, name, text, ts, reply, mid)   -- incoming chat message.
@@ -69,6 +70,7 @@ class ChatService:
         on_receipt(ip, mid, state)                   -- peer acked one of our messages.
         on_delete(from_ip, mid)                      -- peer deleted a message for everyone.
         on_typing(ip, name, gid, is_typing)          -- peer started/stopped typing.
+        on_reaction(from_ip, mid, emoji)             -- peer added/toggled a reaction.
         All callbacks are invoked from background threads; marshal to main thread.
         """
         self.my_name = my_name
@@ -85,6 +87,7 @@ class ChatService:
         self._on_receipt = on_receipt
         self._on_delete = on_delete
         self._on_typing = on_typing
+        self._on_reaction = on_reaction
 
         # Appear-online toggle: when False we stop advertising presence so other
         # peers reap us, but we still receive and can reply to direct messages.
@@ -202,7 +205,12 @@ class ChatService:
             self._pending_requests.pop(ip, None)
 
     def _is_same_subnet(self, remote_ip: str) -> bool:
-        """True if remote_ip shares a subnet with any local interface."""
+        """True if remote_ip shares a subnet with ANY local interface.
+
+        Used for the IP-chat external-IP approval gate (broad check so manual
+        peers added on the same physical LAN are auto-trusted regardless of
+        which adapter they arrive on).
+        """
         try:
             remote_int = struct.unpack("!I", socket.inet_aton(remote_ip))[0]
             for _iface, addrs in psutil.net_if_addrs().items():
@@ -213,6 +221,28 @@ class ChatService:
                     mask_int = struct.unpack("!I", socket.inet_aton(addr.netmask))[0]
                     if (ip_int & mask_int) == (remote_int & mask_int):
                         return True
+        except Exception:
+            pass
+        return False
+
+    def _on_my_subnet(self, remote_ip: str) -> bool:
+        """True only if *remote_ip* is on the same subnet as *self.my_ip*.
+
+        Stricter than _is_same_subnet: this checks only the primary LAN
+        interface, so a 192.168 hotspot adapter doesn't accidentally let
+        hotspot peers appear in the LAN roster.
+        """
+        try:
+            remote_int = struct.unpack("!I", socket.inet_aton(remote_ip))[0]
+            my_int = struct.unpack("!I", socket.inet_aton(self.my_ip))[0]
+            for _iface, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if (addr.family != socket.AF_INET
+                            or addr.address != self.my_ip
+                            or not addr.netmask):
+                        continue
+                    mask_int = struct.unpack("!I", socket.inet_aton(addr.netmask))[0]
+                    return (my_int & mask_int) == (remote_int & mask_int)
         except Exception:
             pass
         return False
@@ -274,12 +304,10 @@ class ChatService:
                             "ips": get_all_local_ips(),
                             "status": status,
                         }).encode("utf-8")
-                        # Send to the generic broadcast *and* every subnet-specific
-                        # broadcast address.  This ensures peers see us even when
-                        # an extra 10.0.0.0/8 route alters default broadcast.
-                        targets = {"<broadcast>", "255.255.255.255"}
-                        targets.update(get_subnet_broadcasts())
-                        for addr in targets:
+                        # Broadcast only on the primary LAN subnet so the
+                        # presence beacon doesn't leak onto hotspot/VPN adapters.
+                        bcast = get_my_broadcast(self.my_ip)
+                        for addr in {bcast, "255.255.255.255"}:
                             try:
                                 s.sendto(payload, (addr, CHAT_PRESENCE_PORT))
                             except Exception:
@@ -309,7 +337,11 @@ class ChatService:
                     name = str(info.get("name", "")).strip()
                     uid = str(info.get("uid", "")).strip()
                     if not ip or ip == self.my_ip or uid == self.my_uid:
-                        continue  # ignore self (by IP and by uid for multi-homed hosts)
+                        continue  # ignore self
+                    # Only accept peers on our primary LAN subnet; beacons from
+                    # hotspot/VPN adapters on other subnets are silently ignored.
+                    if not self._on_my_subnet(ip):
+                        continue
                     self._touch_peer(
                         ip, name,
                         uid=uid,
@@ -436,7 +468,7 @@ class ChatService:
             # Control messages reference something we already own (an offer we
             # made, a message id we sent, an ephemeral typing ping) so they're
             # always trusted and bypass the first-contact approval gate.
-            _trusted = ("file_accept", "file_reject", "receipt", "delete", "typing")
+            _trusted = ("file_accept", "file_reject", "receipt", "delete", "typing", "reaction")
             if msg_type not in _trusted:
                 if not self._is_same_subnet(ip) and ip not in self._approved_ips:
                     if not self.ip_chat_enabled or ip in self._blocked_ips:
@@ -481,6 +513,11 @@ class ChatService:
             gid = msg.get("gid") or None
             if self._on_typing:
                 self._on_typing(ip, name, gid, bool(msg.get("is_typing")))
+        elif msg_type == "reaction":
+            mid = str(msg.get("mid", ""))
+            emoji = str(msg.get("emoji", ""))
+            if mid and emoji and self._on_reaction:
+                self._on_reaction(ip, mid, emoji)
         elif msg_type in ("group", "group_invite"):
             # Synced group: every message carries the group identity + member
             # list so the receiving app can register the thread and route the
@@ -597,6 +634,15 @@ class ChatService:
             return False
         return self._send_json(ip, {
             "type": "typing", "is_typing": bool(is_typing), "gid": gid,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        })
+
+    def send_reaction(self, ip: str, mid: str, emoji: str, gid: str = "") -> bool:
+        """Toggle an emoji reaction on a message and notify *ip*."""
+        if not mid or not emoji or ip in self._virtual:
+            return False
+        return self._send_json(ip, {
+            "type": "reaction", "mid": mid, "emoji": emoji, "gid": gid,
             "from_name": self.my_name, "from_ip": self.my_ip,
         })
 

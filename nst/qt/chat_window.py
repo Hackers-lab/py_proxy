@@ -14,6 +14,7 @@ import time
 import uuid
 
 from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame,
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -268,9 +269,11 @@ class ChatWindow(QWidget):
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
 
-        # message-id bookkeeping (receipts, delete-for-everyone)
+        # message-id bookkeeping (receipts, delete-for-everyone, reactions)
         self._mid_index: dict[str, tuple[str, dict]] = {}   # mid -> (key, entry)
         self._status_lbls: dict[str, QLabel] = {}           # mid -> tick label
+        self._seen_lbls: dict[str, QPushButton] = {}        # mid -> "X/Y Seen" button (group out)
+        self._reaction_rows: dict[str, QWidget] = {}        # mid -> reaction pill container
         self._read_sent: set[str] = set()                   # mids we've acked "read"
 
         # typing indicators
@@ -782,6 +785,8 @@ class ChatWindow(QWidget):
         self._messages.clear()
         self._progress_lbls.clear()
         self._status_lbls.clear()
+        self._seen_lbls.clear()
+        self._reaction_rows.clear()
         msgs = self._conversations.get(key, [])
         if not msgs:
             w = QLabel("Say hi! 👋")
@@ -924,11 +929,43 @@ class ChatWindow(QWidget):
                 self._status_lbls[entry["mid"]] = tick
         bv.addLayout(foot)
 
+        # Group outgoing: show seen-by count below the timestamp row.
+        mid = entry.get("mid", "")
+        if is_out and mid:
+            key_now = self._active or ""
+            if self._is_group(key_now):
+                gid = key_now[6:]
+                total = len([m for m in self._group_meta(gid).get("members", [])
+                              if m != self.chat.my_ip])
+                seen = len(entry.get("seen_by", {}))
+                seen_btn = QPushButton(f"✓ {seen}/{total} Seen")
+                seen_btn.setFlat(True)
+                seen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                seen_btn.setStyleSheet(
+                    "QPushButton{font-size:10px; color:%s; padding:0; border:none;"
+                    " background:transparent;}" % txcol)
+                seen_btn.clicked.connect(
+                    lambda _=False, m=mid: self._seen_popup(m))
+                bv.addWidget(seen_btn, alignment=Qt.AlignmentFlag.AlignRight)
+                self._seen_lbls[mid] = seen_btn
+
+        # Reaction row lives outside/below the bubble frame so it doesn't stretch it.
+        reaction_row = self._make_reaction_row(entry)
+        if mid:
+            self._reaction_rows[mid] = reaction_row
+        v_wrap = QWidget()
+        v_wrap.setMaximumWidth(_BUBBLE_MAX)
+        vv = QVBoxLayout(v_wrap)
+        vv.setContentsMargins(0, 0, 0, 0)
+        vv.setSpacing(2)
+        vv.addWidget(bubble)
+        vv.addWidget(reaction_row)
+
         if is_out:
             h.addStretch(1)
-            h.addWidget(bubble)
+            h.addWidget(v_wrap)
         else:
-            h.addWidget(bubble)
+            h.addWidget(v_wrap)
             h.addStretch(1)
         return row
 
@@ -1020,7 +1057,7 @@ class ChatWindow(QWidget):
             self._save_group(gid)
             self.update_roster(self.chat.peers())
             return
-        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply)
+        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply, from_ip=ip)
         self._store(key, entry)
         self._save_group(gid)
         if key == self._active and self._visible:
@@ -1041,46 +1078,116 @@ class ChatWindow(QWidget):
         key, entry = loc
         if entry.get("kind") != "out":
             return
+
+        # Group: track per-member seen_by; still advance status for "delivered"
+        if self._is_group(key):
+            if state == "read":
+                entry.setdefault("seen_by", {})[ip] = time.time()
+                self._persist(key)
+                self._update_seen_lbl(mid, key)
+            elif state == "delivered":
+                order = {"sent": 0, "delivered": 1, "read": 2}
+                if order["delivered"] > order.get(entry.get("status", "sent"), 0):
+                    entry["status"] = "delivered"
+                    self._persist(key)
+                    lbl = self._status_lbls.get(mid)
+                    if lbl is not None:
+                        try:
+                            glyph, color = self._tick_parts("delivered", True)
+                            lbl.setText(glyph)
+                            lbl.setStyleSheet("font-size:11px; color:%s;" % color)
+                        except RuntimeError:
+                            self._status_lbls.pop(mid, None)
+            return
+
+        # 1:1: single status progression, never regress
         order = {"sent": 0, "delivered": 1, "read": 2}
         if order.get(state, 0) <= order.get(entry.get("status", "sent"), 0):
-            return   # never regress a status
+            return
         entry["status"] = state
         self._persist(key)
         lbl = self._status_lbls.get(mid)
-        if lbl is not None:
-            try:
-                glyph, color = self._tick_parts(state, True)
-                lbl.setText(glyph)
-                lbl.setStyleSheet("font-size:11px; color:%s;" % color)
-            except RuntimeError:
-                self._status_lbls.pop(mid, None)
+        if lbl is None:
+            return
+        try:
+            glyph, color = self._tick_parts(state, True)
+            lbl.setText(glyph)
+            lbl.setStyleSheet("font-size:11px; color:%s;" % color)
+        except RuntimeError:
+            self._status_lbls.pop(mid, None)
+
+    def _update_seen_lbl(self, mid: str, key: str) -> None:
+        """Refresh the 'X/Y Seen' button for a group outgoing message."""
+        btn = self._seen_lbls.get(mid)
+        if btn is None:
+            return
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        _, entry = loc
+        seen = len(entry.get("seen_by", {}))
+        gid = key[6:] if self._is_group(key) else ""
+        total = len([m for m in self._group_meta(gid).get("members", [])
+                     if m != self.chat.my_ip]) if gid else 0
+        try:
+            btn.setText(f"✓ {seen}/{total} Seen")
+        except RuntimeError:
+            self._seen_lbls.pop(mid, None)
 
     def _mark_read(self, key) -> None:
-        """Send 'read' receipts for incoming msgs once the chat is open+focused."""
-        if self._is_group(key) or key == DemoBot.IP:
+        """Send 'read' receipts once the chat is open+focused."""
+        if key == DemoBot.IP:
             return
         if not (self._visible and self.isActiveWindow() and key == self._active):
             return
-        pending = [e["mid"] for e in self._conversations.get(key, [])
-                   if e.get("kind") == "in" and not e.get("deleted")
-                   and e.get("mid") and e["mid"] not in self._read_sent]
-        if not pending:
-            return
-        self._read_sent.update(pending)
-        ip = key
 
-        def work():
-            for mid in pending:
-                self.chat.send_receipt(ip, mid, "read")
-        threading.Thread(target=work, daemon=True).start()
+        if self._is_group(key):
+            # For group messages, send receipt to each original sender's IP.
+            to_send: dict[str, list[str]] = {}   # from_ip -> [mid, ...]
+            for e in self._conversations.get(key, []):
+                if (e.get("kind") == "in" and not e.get("deleted")
+                        and e.get("mid") and e["mid"] not in self._read_sent
+                        and e.get("from_ip")):
+                    to_send.setdefault(e["from_ip"], []).append(e["mid"])
+            if not to_send:
+                return
+            for mids in to_send.values():
+                self._read_sent.update(mids)
+            snap = dict(to_send)
+
+            def work_grp():
+                for from_ip, mids in snap.items():
+                    for mid in mids:
+                        self.chat.send_receipt(from_ip, mid, "read")
+            threading.Thread(target=work_grp, daemon=True).start()
+        else:
+            pending = [e["mid"] for e in self._conversations.get(key, [])
+                       if e.get("kind") == "in" and not e.get("deleted")
+                       and e.get("mid") and e["mid"] not in self._read_sent]
+            if not pending:
+                return
+            self._read_sent.update(pending)
+            ip = key
+
+            def work():
+                for mid in pending:
+                    self.chat.send_receipt(ip, mid, "read")
+            threading.Thread(target=work, daemon=True).start()
 
     # ── delete ────────────────────────────────────────────────────────────────
+    _REACTION_EMOJIS = ("👍", "❤️", "😂", "😮", "😢", "🙏")
+
     def _msg_menu(self, entry: dict, gpos) -> None:
         m = QMenu(self)
         m.addAction("↩ Reply", lambda: self._set_reply(self._entry_sender(entry),
                                                        entry.get("text", "")))
         if entry.get("text"):
             m.addAction("➤ Forward", lambda: self._forward(entry))
+        react_menu = m.addMenu("React 😊")
+        mid = entry.get("mid", "")
+        for emoji in self._REACTION_EMOJIS:
+            react_menu.addAction(emoji,
+                                 lambda _=False, e=emoji, m_=mid: self._toggle_reaction(m_, e))
         m.addSeparator()
         if (entry.get("kind") == "out"
                 and time.time() - entry.get("ts", 0) <= _DELETE_WINDOW):
@@ -1171,6 +1278,143 @@ class ChatWindow(QWidget):
             self._render(key)
         else:
             self.update_roster(self.chat.peers())
+
+    # ── reactions ─────────────────────────────────────────────────────────────
+    def _make_reaction_row(self, entry: dict) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(4)
+        reactions = entry.get("reactions", {})
+        for emoji, ips in reactions.items():
+            lay.addWidget(self._reaction_pill(emoji, len(ips),
+                                              self.chat.my_ip in ips,
+                                              entry.get("mid", "")))
+        lay.addStretch(1)
+        if not reactions:
+            w.hide()
+        return w
+
+    def _reaction_pill(self, emoji: str, count: int, my_reacted: bool,
+                       mid: str) -> QPushButton:
+        btn = QPushButton(f"{emoji} {count}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        accent = theme.color("accent")
+        border = accent if my_reacted else theme.color("border")
+        bg = accent + "33" if my_reacted else "transparent"
+        btn.setStyleSheet(
+            f"QPushButton{{font-size:12px; padding:2px 7px; border-radius:10px;"
+            f" border:1px solid {border}; background:{bg};"
+            f" color:{theme.color('text_pri')};}}"
+            f"QPushButton:hover{{background:{accent}33;"
+            f" border-color:{accent};}}")
+        btn.clicked.connect(lambda _=False, e=emoji, m=mid: self._toggle_reaction(m, e))
+        return btn
+
+    def _rebuild_reaction_row(self, mid: str) -> None:
+        """Repopulate an existing reaction container after a toggle."""
+        w = self._reaction_rows.get(mid)
+        if w is None:
+            return
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        _, entry = loc
+        lay = w.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+        reactions = entry.get("reactions", {})
+        for emoji, ips in reactions.items():
+            lay.addWidget(self._reaction_pill(emoji, len(ips),
+                                              self.chat.my_ip in ips, mid))
+        lay.addStretch(1)
+        try:
+            w.setVisible(bool(reactions))
+        except RuntimeError:
+            self._reaction_rows.pop(mid, None)
+
+    def on_reaction(self, from_ip: str, mid: str, emoji: str) -> None:
+        """Incoming reaction from a peer — toggle their entry in the reactions map."""
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        reactions = entry.setdefault("reactions", {})
+        ips = reactions.setdefault(emoji, [])
+        if from_ip in ips:
+            ips.remove(from_ip)
+            if not ips:
+                del reactions[emoji]
+        else:
+            ips.append(from_ip)
+        self._persist(key)
+        self._rebuild_reaction_row(mid)
+
+    def _toggle_reaction(self, mid: str, emoji: str) -> None:
+        """Toggle our own reaction on a message, then notify peer(s)."""
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        reactions = entry.setdefault("reactions", {})
+        ips = reactions.setdefault(emoji, [])
+        my_ip = self.chat.my_ip
+        if my_ip in ips:
+            ips.remove(my_ip)
+            if not ips:
+                del reactions[emoji]
+        else:
+            ips.append(my_ip)
+        self._persist(key)
+        self._rebuild_reaction_row(mid)
+        if self._is_group(key):
+            gid = key[6:]
+            targets = [m for m in self._group_meta(gid).get("members", [])
+                       if m and m != self.chat.my_ip]
+            threading.Thread(
+                target=lambda: [self.chat.send_reaction(t, mid, emoji, gid=gid)
+                                for t in targets],
+                daemon=True).start()
+        else:
+            threading.Thread(
+                target=lambda: self.chat.send_reaction(key, mid, emoji),
+                daemon=True).start()
+
+    def _seen_popup(self, mid: str) -> None:
+        """Show who has/hasn't seen a group message."""
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        if not self._is_group(key):
+            return
+        gid = key[6:]
+        all_recipients = [m for m in self._group_meta(gid).get("members", [])
+                          if m != self.chat.my_ip]
+        seen_by = set(entry.get("seen_by", {}).keys())
+        not_seen = [m for m in all_recipients if m not in seen_by]
+
+        popup = QMenu(self)
+        hdr = popup.addAction("Seen by:")
+        hdr.setEnabled(False)
+        for ip in seen_by:
+            name = self._aliases.get(ip) or self._names.get(ip, ip)
+            popup.addAction(f"  ✓  {name}")
+        if not seen_by:
+            a = popup.addAction("  (none yet)")
+            a.setEnabled(False)
+        popup.addSeparator()
+        hdr2 = popup.addAction("Not yet seen:")
+        hdr2.setEnabled(False)
+        for ip in not_seen:
+            name = self._aliases.get(ip) or self._names.get(ip, ip)
+            popup.addAction(f"  {name}")
+        if not not_seen:
+            a = popup.addAction("  (everyone has seen it)")
+            a.setEnabled(False)
+        popup.exec(QCursor.pos())
 
     # ── typing indicators ─────────────────────────────────────────────────────
     def _on_typing_edit(self, _text: str) -> None:

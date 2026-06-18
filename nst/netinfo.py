@@ -105,23 +105,43 @@ def get_subnet_broadcasts() -> list[str]:
 
 
 def get_local_ip() -> str | None:
-    """Return the primary outbound IPv4 address (any subnet). Used by LAN chat.
+    """Return the primary LAN IPv4 address for chat.
 
-    Uses the OS routing table (the address chosen to reach an external host) so
-    that on a multi-homed PC we advertise the interface actually used for
-    traffic, rather than blindly preferring one private range.
+    Prefers 10.x (corporate/school LANs), then 172.16.x, then 192.168.x.
+    Does NOT use the connect-to-internet trick: on machines with both a LAN
+    adapter and a hotspot/VPN the OS routes internet traffic via the secondary
+    interface, so that trick returns the hotspot IP instead of the LAN IP.
+    """
+    privs = get_all_local_ips()
+    for ip in privs:
+        if ip.startswith("10."):
+            return ip
+    for ip in privs:
+        parts = ip.split(".")
+        if parts[0] == "172" and 16 <= int(parts[1]) <= 31:
+            return ip
+    return privs[0] if privs else None
+
+
+def get_my_broadcast(my_ip: str) -> str:
+    """Return the subnet broadcast address for the interface that holds *my_ip*.
+
+    Used so the chat broadcaster only advertises on the LAN the user is actually
+    on, not on every adapter (hotspot, VPN, etc.) that happens to be up.
     """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(0.2)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            if ip and not ip.startswith("127."):
-                return ip
+        my_int = struct.unpack("!I", socket.inet_aton(my_ip))[0]
+        for _iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family != socket.AF_INET or addr.address != my_ip:
+                    continue
+                netmask = addr.netmask or "255.255.255.0"
+                mask_int = struct.unpack("!I", socket.inet_aton(netmask))[0]
+                bcast_int = my_int | (~mask_int & 0xFFFFFFFF)
+                return socket.inet_ntoa(struct.pack("!I", bcast_int))
     except Exception:
         pass
-    privs = get_all_local_ips()
-    return privs[0] if privs else None
+    return "255.255.255.255"
 
 
 def calculate_gateway(ip: str) -> str:

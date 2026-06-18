@@ -20,6 +20,7 @@ class ChatSignals(QObject):
     receipt = pyqtSignal(str, str, str)        # ip, mid, state ("delivered"|"read")
     deleted = pyqtSignal(str, str)             # from_ip, mid (delete-for-everyone)
     typing = pyqtSignal(str, str, object, bool)  # ip, name, gid|None, is_typing
+    reaction = pyqtSignal(str, str, str)       # from_ip, mid, emoji
 
 
 class MainSignals(QObject):

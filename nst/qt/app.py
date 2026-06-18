@@ -49,6 +49,7 @@ def run() -> None:
         on_receipt=lambda ip, mid, state: sig.receipt.emit(ip, mid, state),
         on_delete=lambda ip, mid: sig.deleted.emit(ip, mid),
         on_typing=lambda ip, name, gid, typing: sig.typing.emit(ip, name, gid, typing),
+        on_reaction=lambda ip, mid, emoji: sig.reaction.emit(ip, mid, emoji),
     )
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
     chat.presence_online = config.load_presence_online()
@@ -68,6 +69,7 @@ def run() -> None:
     sig.receipt.connect(chat_window.on_receipt)
     sig.deleted.connect(chat_window.on_remote_delete)
     sig.typing.connect(chat_window.on_typing)
+    sig.reaction.connect(chat_window.on_reaction)
     chat_window.activity.connect(chat_window.open)
     toasts.clicked.connect(chat_window.open)
 
