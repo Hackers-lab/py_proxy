@@ -79,31 +79,6 @@ def get_intranet_ip() -> str | None:
     return privs[0] if privs else None
 
 
-def get_subnet_broadcasts() -> list[str]:
-    """Return subnet broadcast addresses for every private IPv4 interface.
-
-    Uses the actual netmask from ``psutil`` so /8, /16 and /24 networks are
-    all handled, on any private range. Falls back to 255.255.255.255 on error.
-    """
-    results: list[str] = []
-    try:
-        for _iface, ip, netmask in list_local_ipv4():
-            if not is_private_ipv4(ip) or not netmask:
-                continue
-            # ip | ~mask  →  broadcast
-            ip_int = struct.unpack("!I", socket.inet_aton(ip))[0]
-            mask_int = struct.unpack("!I", socket.inet_aton(netmask))[0]
-            bcast_int = ip_int | (~mask_int & 0xFFFFFFFF)
-            bcast = socket.inet_ntoa(struct.pack("!I", bcast_int))
-            if bcast not in results:
-                results.append(bcast)
-    except Exception:
-        pass
-    if not results:
-        results.append("255.255.255.255")
-    return results
-
-
 def get_local_ip() -> str | None:
     """Return the primary LAN IPv4 address for chat.
 
@@ -211,14 +186,3 @@ def format_speed(bps: float) -> str:
     if bps < 1024 * 1024:
         return f"{bps / 1024:.1f} KB/s"
     return f"{bps / (1024 * 1024):.1f} MB/s"
-
-
-def format_speed_short(bps: float) -> str:
-    """Compact label for the tray icon, e.g. '12K' / '1.2M'."""
-    if bps < 1024:
-        return f"{int(bps)}"
-    if bps < 1024 * 1024:
-        kb = bps / 1024
-        return f"{kb:.1f}K" if kb < 10 else f"{int(kb)}K"
-    mb = bps / (1024 * 1024)
-    return f"{mb:.1f}M" if mb < 10 else f"{int(mb)}M"
