@@ -1,0 +1,514 @@
+"""The dedicated, categorised Settings window (update.md "Settings Module").
+
+A lightweight left-nav + stacked-pages dialog covering General, Notifications,
+Storage, Network, Privacy & User Management, File Transfer and About. Every
+control reads/writes :mod:`nst.config` (so changes persist across restarts) and
+applies immediately where possible, calling back into the chat window only for
+things that need a live UI refresh.
+"""
+
+import os
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
+                             QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                             QListWidget, QMessageBox, QPushButton, QScrollArea,
+                             QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
+                             QWidget)
+
+from .. import __version__, config
+from ..constants import CHAT_PRESENCE_PORT, CHAT_TCP_PORT, FILE_TCP_PORT
+from ..netinfo import get_all_local_ips, get_local_ip, list_local_ipv4
+from . import sound
+from .theme import theme
+from .widgets import hline
+
+_RETENTION_LABELS = [("7 Days", 7), ("30 Days", 30), ("90 Days", 90),
+                     ("180 Days", 180), ("Forever", 0)]
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _fmt_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 ** 2:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 ** 3:
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{n / 1024 ** 3:.2f} GB"
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, chat_window, parent=None) -> None:
+        super().__init__(parent)
+        self.cw = chat_window
+        self.chat = chat_window.chat
+        self.setWindowTitle("Settings — LAN Chat")
+        self.resize(720, 560)
+        self.setMinimumSize(620, 460)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # left nav
+        nav = QWidget()
+        nav.setObjectName("card")
+        nav.setFixedWidth(190)
+        nv = QVBoxLayout(nav)
+        nv.setContentsMargins(10, 14, 10, 14)
+        nv.setSpacing(4)
+        title = QLabel("SETTINGS")
+        title.setObjectName("section")
+        nv.addWidget(title)
+        self._nav = QListWidget()
+        self._nav.setFrameShape(QFrame.Shape.NoFrame)
+        self._nav.addItems(["General", "Notifications", "Storage", "Network",
+                            "Privacy & Users", "File Transfer", "About"])
+        self._nav.currentRowChanged.connect(self._on_nav)
+        nv.addWidget(self._nav, 1)
+        root.addWidget(nav)
+
+        self._pages = QStackedWidget()
+        for builder in (self._page_general, self._page_notifications,
+                        self._page_storage, self._page_network,
+                        self._page_privacy, self._page_filetransfer,
+                        self._page_about):
+            self._pages.addWidget(self._scroll(builder()))
+        root.addWidget(self._pages, 1)
+        self._nav.setCurrentRow(0)
+
+    # ── layout helpers ─────────────────────────────────────────────────────────
+    def _scroll(self, inner: QWidget) -> QScrollArea:
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.Shape.NoFrame)
+        sa.setWidget(inner)
+        return sa
+
+    def _page(self, heading: str) -> tuple[QWidget, QVBoxLayout]:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(12)
+        h = QLabel(heading)
+        h.setObjectName("title")
+        v.addWidget(h)
+        v.addWidget(hline())
+        return w, v
+
+    def _hint(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("muted")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
+        return lbl
+
+    def _on_nav(self, row: int) -> None:
+        if row < 0:
+            return
+        self._pages.setCurrentIndex(row)
+        if row == 2:
+            self._refresh_storage_stats()
+        elif row == 3:
+            self._refresh_network()
+        elif row == 4:
+            self._refresh_blocked()
+
+    # ── General ─────────────────────────────────────────────────────────────────
+    def _page_general(self) -> QWidget:
+        w, v = self._page("General")
+
+        v.addWidget(QLabel("Display name"))
+        row = QHBoxLayout()
+        self._name_edit = QLineEdit(self.chat.my_name)
+        self._name_edit.setMaxLength(32)
+        save = QPushButton("Save")
+        save.setProperty("variant", "accent")
+        save.clicked.connect(self._save_name)
+        row.addWidget(self._name_edit, 1)
+        row.addWidget(save)
+        v.addLayout(row)
+        v.addWidget(self._hint(
+            f"Shown to peers as “{self.chat.my_name} | {self.chat.my_device} | {self.chat.my_ip}”."))
+
+        self._cb_invisible = QCheckBox("Invisible mode (appear offline but still receive messages)")
+        self._cb_invisible.setChecked(self.chat.my_status == "invisible")
+        self._cb_invisible.toggled.connect(self._toggle_invisible)
+        v.addWidget(self._cb_invisible)
+
+        self._cb_autostart = QCheckBox("Start application with Windows")
+        self._cb_autostart.setChecked(config.is_autostart_enabled())
+        self._cb_autostart.toggled.connect(self._toggle_autostart)
+        v.addWidget(self._cb_autostart)
+
+        self._cb_tray = QCheckBox("Minimise to system tray when closed")
+        self._cb_tray.setChecked(config.load_minimize_to_tray())
+        self._cb_tray.toggled.connect(
+            lambda on: config.save_minimize_to_tray(on))
+        v.addWidget(self._cb_tray)
+
+        self._cb_restore = QCheckBox("Restore previous conversation on startup")
+        self._cb_restore.setChecked(config.load_restore_session())
+        self._cb_restore.toggled.connect(
+            lambda on: config.save_restore_session(on))
+        v.addWidget(self._cb_restore)
+
+        v.addStretch(1)
+        return w
+
+    def _save_name(self) -> None:
+        name = self._name_edit.text().strip()[:32]
+        if name:
+            self.cw.apply_display_name(name)
+
+    def _toggle_invisible(self, on: bool) -> None:
+        self.cw.set_status("invisible" if on else "online")
+
+    def _toggle_autostart(self, on: bool) -> None:
+        ok, msg = config.set_autostart(on)
+        if not ok:
+            QMessageBox.warning(self, "Autostart", msg)
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+    def _page_notifications(self) -> QWidget:
+        w, v = self._page("Notifications")
+
+        v.addWidget(self._section_label("GLOBAL"))
+        self._cb_notif_all = QCheckBox("Enable all notifications")
+        self._cb_notif_all.setChecked(config.load_notifications_enabled())
+        self._cb_notif_all.toggled.connect(self._toggle_notif_all)
+        v.addWidget(self._cb_notif_all)
+
+        self._cb_mute = QCheckBox("Mute all notification sounds")
+        self._cb_mute.setChecked(config.load_mute_all())
+        self._cb_mute.toggled.connect(lambda on: config.save_mute_all(on))
+        v.addWidget(self._cb_mute)
+
+        self._cb_dnd = QCheckBox("Do Not Disturb (suppress popups, flashing & sound)")
+        self._cb_dnd.setChecked(config.load_do_not_disturb())
+        self._cb_dnd.toggled.connect(lambda on: config.save_do_not_disturb(on))
+        v.addWidget(self._cb_dnd)
+
+        volrow = QHBoxLayout()
+        volrow.addWidget(QLabel("Sound volume"))
+        self._vol = QSlider(Qt.Orientation.Horizontal)
+        self._vol.setRange(0, 100)
+        self._vol.setValue(config.load_sound_volume())
+        self._vol.valueChanged.connect(self._on_volume)
+        self._vol_lbl = QLabel(f"{self._vol.value()}%")
+        test = QPushButton("Test")
+        test.clicked.connect(lambda: sound.play_sound(self._vol.value()))
+        volrow.addWidget(self._vol, 1)
+        volrow.addWidget(self._vol_lbl)
+        volrow.addWidget(test)
+        v.addLayout(volrow)
+
+        v.addWidget(hline())
+        v.addWidget(self._section_label("PER CONVERSATION TYPE"))
+        v.addWidget(self._hint(
+            "Independently enable each alert type for private chats, groups and "
+            "broadcast channels."))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(8)
+        channels = [("Sound", "sound"), ("Desktop popup", "popup"),
+                    ("Taskbar flash", "taskbar"), ("Tray badge", "tray")]
+        for col, (label, _key) in enumerate(channels):
+            h = QLabel(label)
+            h.setStyleSheet("font-size:11px; font-weight:700;")
+            grid.addWidget(h, 0, col + 1)
+        prefs = config.load_notify_prefs()
+        self._notif_boxes: dict[tuple, QCheckBox] = {}
+        scopes = [("Private", "private"), ("Group", "group"), ("Broadcast", "broadcast")]
+        for r, (slabel, scope) in enumerate(scopes):
+            rl = QLabel(slabel)
+            rl.setStyleSheet("font-weight:700;")
+            grid.addWidget(rl, r + 1, 0)
+            for c, (_label, ch) in enumerate(channels):
+                cb = QCheckBox()
+                cb.setChecked(bool(prefs.get(scope, {}).get(ch, True)))
+                cb.toggled.connect(self._save_notif_prefs)
+                self._notif_boxes[(scope, ch)] = cb
+                grid.addWidget(cb, r + 1, c + 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        gw = QWidget()
+        gw.setLayout(grid)
+        v.addWidget(gw)
+        v.addStretch(1)
+        return w
+
+    def _section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("section")
+        return lbl
+
+    def _toggle_notif_all(self, on: bool) -> None:
+        config.save_notifications_enabled(on)
+        self.cw.on_settings_changed()
+
+    def _on_volume(self, val: int) -> None:
+        self._vol_lbl.setText(f"{val}%")
+        config.save_sound_volume(val)
+
+    def _save_notif_prefs(self, *_args) -> None:
+        prefs = config.load_notify_prefs()
+        for (scope, ch), cb in self._notif_boxes.items():
+            prefs.setdefault(scope, {})[ch] = cb.isChecked()
+        config.save_notify_prefs(prefs)
+
+    # ── Storage ─────────────────────────────────────────────────────────────────
+    def _page_storage(self) -> QWidget:
+        w, v = self._page("Storage & Retention")
+
+        v.addWidget(QLabel("Keep message history for"))
+        self._retention = QComboBox()
+        cur = config.load_retention_days()
+        for i, (label, days) in enumerate(_RETENTION_LABELS):
+            self._retention.addItem(label, days)
+            if days == cur:
+                self._retention.setCurrentIndex(i)
+        self._retention.currentIndexChanged.connect(self._save_retention)
+        v.addWidget(self._retention)
+        v.addWidget(self._hint(
+            "Older messages are pruned from local history on the next launch. "
+            "This never affects other users' copies."))
+
+        v.addWidget(QLabel("Download / save folder"))
+        drow = QHBoxLayout()
+        self._dl_edit = QLineEdit(config.load_download_dir())
+        self._dl_edit.setReadOnly(True)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_download)
+        drow.addWidget(self._dl_edit, 1)
+        drow.addWidget(browse)
+        v.addLayout(drow)
+
+        szrow = QHBoxLayout()
+        szrow.addWidget(QLabel("Maximum file transfer size (MB, 0 = unlimited)"))
+        self._maxmb = QSpinBox()
+        self._maxmb.setRange(0, 1024 * 50)
+        self._maxmb.setValue(config.load_max_file_mb())
+        self._maxmb.valueChanged.connect(lambda val: config.save_max_file_mb(val))
+        szrow.addStretch(1)
+        szrow.addWidget(self._maxmb)
+        v.addLayout(szrow)
+
+        v.addWidget(hline())
+        v.addWidget(self._section_label("STORAGE USAGE"))
+        self._stats_lbl = QLabel("…")
+        self._stats_lbl.setStyleSheet("font-family:'Consolas',monospace;")
+        v.addWidget(self._stats_lbl)
+
+        brow = QHBoxLayout()
+        clear = QPushButton("Clear all local chat history")
+        clear.setProperty("variant", "danger")
+        clear.clicked.connect(self._clear_history)
+        brow.addWidget(clear)
+        brow.addStretch(1)
+        v.addLayout(brow)
+        v.addStretch(1)
+        return w
+
+    def _save_retention(self, _idx: int) -> None:
+        config.save_retention_days(self._retention.currentData())
+
+    def _browse_download(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose download folder", config.load_download_dir())
+        if folder:
+            config.save_download_dir(folder)
+            self._dl_edit.setText(config.load_download_dir())
+
+    def _refresh_storage_stats(self) -> None:
+        hist = config.get_peer_chat_dir()
+        dl = config.load_download_dir()
+        convos = len([f for f in os.listdir(hist) if f.endswith(".json")]) \
+            if os.path.isdir(hist) else 0
+        self._stats_lbl.setText(
+            f"Conversations on disk : {convos}\n"
+            f"Chat history size     : {_fmt_bytes(_dir_size(hist))}\n"
+            f"Downloads folder size : {_fmt_bytes(_dir_size(dl))}")
+
+    def _clear_history(self) -> None:
+        if QMessageBox.question(
+                self, "Clear history",
+                "Delete ALL local chat history on this PC?\n"
+                "Other users keep their own copies.") \
+                == QMessageBox.StandardButton.Yes:
+            n = self.cw.clear_all_history()
+            self._refresh_storage_stats()
+            QMessageBox.information(self, "Cleared",
+                                    f"Cleared history for {n} conversation(s).")
+
+    # ── Network ─────────────────────────────────────────────────────────────────
+    def _page_network(self) -> QWidget:
+        w, v = self._page("Network")
+        self._net_lbl = QLabel("…")
+        self._net_lbl.setStyleSheet("font-family:'Consolas',monospace; font-size:12px;")
+        self._net_lbl.setWordWrap(True)
+        v.addWidget(self._net_lbl)
+        refresh = QPushButton("⟳ Refresh network info")
+        refresh.clicked.connect(self._refresh_network)
+        v.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignLeft)
+        v.addStretch(1)
+        return w
+
+    def _refresh_network(self) -> None:
+        lines = ["Detected interfaces:"]
+        for iface, ip, mask in list_local_ipv4():
+            lines.append(f"  • {iface}: {ip}  (mask {mask})")
+        if len(lines) == 1:
+            lines.append("  (none detected)")
+        primary = get_local_ip() or "—"
+        online = sum(1 for p in self.chat.peers() if self.chat.is_peer_online(p.ip))
+        lines += [
+            "",
+            f"Primary LAN IP   : {primary}",
+            f"All local IPs    : {', '.join(get_all_local_ips()) or '—'}",
+            f"Presence port    : {CHAT_PRESENCE_PORT} (UDP)",
+            f"Messaging port   : {CHAT_TCP_PORT} (TCP)",
+            f"File transfer    : {FILE_TCP_PORT} (TCP)",
+            f"Peers online now : {online}",
+            f"Queued messages  : {self.chat.pending_count()}",
+        ]
+        self._net_lbl.setText("\n".join(lines))
+
+    # ── Privacy & Users ──────────────────────────────────────────────────────
+    def _page_privacy(self) -> QWidget:
+        w, v = self._page("Privacy & User Management")
+        v.addWidget(self._section_label("BLOCKED USERS"))
+        v.addWidget(self._hint(
+            "Blocked users cannot send you messages or files, and are excluded "
+            "from new groups you create."))
+        self._blocked_list = QVBoxLayout()
+        self._blocked_list.setSpacing(6)
+        holder = QWidget()
+        holder.setLayout(self._blocked_list)
+        v.addWidget(holder)
+
+        v.addWidget(hline())
+        self._pending_lbl = QLabel("")
+        self._pending_lbl.setObjectName("muted")
+        v.addWidget(self._pending_lbl)
+        v.addStretch(1)
+        return w
+
+    def _refresh_blocked(self) -> None:
+        while self._blocked_list.count():
+            item = self._blocked_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        names = {u["ip"]: u.get("name", u["ip"]) for u in config.load_blocked_users()}
+        ips = sorted(set(self.chat.blocked_ips()) | set(names))
+        if not ips:
+            self._blocked_list.addWidget(self._hint("No blocked users."))
+        for ip in ips:
+            row = QHBoxLayout()
+            label = QLabel(f"{names.get(ip, ip)}  ·  {ip}")
+            unblock = QPushButton("Unblock")
+            unblock.clicked.connect(lambda _=False, x=ip: self._unblock(x))
+            row.addWidget(label, 1)
+            row.addWidget(unblock)
+            rw = QWidget()
+            rw.setLayout(row)
+            self._blocked_list.addWidget(rw)
+        pend = self.chat.pending_request_ips()
+        self._pending_lbl.setText(
+            f"Pending connection requests: {len(pend)}"
+            + (("  (" + ", ".join(pend) + ")") if pend else ""))
+
+    def _unblock(self, ip: str) -> None:
+        self.cw.unblock_user(ip)
+        self._refresh_blocked()
+
+    # ── File Transfer ─────────────────────────────────────────────────────────
+    def _page_filetransfer(self) -> QWidget:
+        w, v = self._page("File Transfer")
+
+        v.addWidget(QLabel("Default download folder"))
+        drow = QHBoxLayout()
+        self._ft_dl = QLineEdit(config.load_download_dir())
+        self._ft_dl.setReadOnly(True)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_ft_download)
+        drow.addWidget(self._ft_dl, 1)
+        drow.addWidget(browse)
+        v.addLayout(drow)
+
+        szrow = QHBoxLayout()
+        szrow.addWidget(QLabel("Maximum file size (MB, 0 = unlimited)"))
+        self._ft_maxmb = QSpinBox()
+        self._ft_maxmb.setRange(0, 1024 * 50)
+        self._ft_maxmb.setValue(config.load_max_file_mb())
+        self._ft_maxmb.valueChanged.connect(lambda val: config.save_max_file_mb(val))
+        szrow.addStretch(1)
+        szrow.addWidget(self._ft_maxmb)
+        v.addLayout(szrow)
+
+        exrow = QHBoxLayout()
+        exrow.addWidget(QLabel("Unanswered offer expires after (minutes)"))
+        self._ft_expiry = QSpinBox()
+        self._ft_expiry.setRange(1, 1440)
+        self._ft_expiry.setValue(config.load_file_expiry_min())
+        self._ft_expiry.valueChanged.connect(lambda val: config.save_file_expiry_min(val))
+        exrow.addStretch(1)
+        exrow.addWidget(self._ft_expiry)
+        v.addLayout(exrow)
+
+        v.addWidget(self._hint(
+            "Transfers are peer-to-peer: the sender hosts the file while online "
+            "and there is no central storage. Offline file transfer isn't supported."))
+        v.addStretch(1)
+        return w
+
+    def _browse_ft_download(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose download folder", config.load_download_dir())
+        if folder:
+            config.save_download_dir(folder)
+            self._ft_dl.setText(config.load_download_dir())
+            if hasattr(self, "_dl_edit"):
+                self._dl_edit.setText(config.load_download_dir())
+
+    # ── About ─────────────────────────────────────────────────────────────────
+    def _page_about(self) -> QWidget:
+        w, v = self._page("About")
+        info = QLabel(
+            f"<b>Net Split-Tunneler — LAN Chat</b><br>"
+            f"Version {__version__}<br><br>"
+            "A lightweight, serverless LAN chat with peer-to-peer file transfer, "
+            "groups, broadcast channels and offline message queuing.<br><br>"
+            "Developed by Pramod Verma.")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        v.addWidget(hline())
+        v.addWidget(self._section_label("DIAGNOSTICS"))
+        diag = QLabel(
+            f"Display name : {self.chat.my_name}\n"
+            f"Device name  : {self.chat.my_device}\n"
+            f"Internal ID  : {self.chat.my_uid}\n"
+            f"Primary IP   : {self.chat.my_ip}\n"
+            f"Python ports : presence {CHAT_PRESENCE_PORT} · chat {CHAT_TCP_PORT} · file {FILE_TCP_PORT}")
+        diag.setStyleSheet("font-family:'Consolas',monospace; font-size:12px;")
+        diag.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(diag)
+        v.addWidget(self._hint(
+            "Network troubleshooting: if peers don't appear, confirm all PCs are "
+            "on the same subnet and that the above ports aren't blocked by a "
+            "firewall. Use “Connect by IP” to reach other subnets manually."))
+        v.addStretch(1)
+        return w

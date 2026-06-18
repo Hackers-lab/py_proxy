@@ -20,9 +20,15 @@ import time
 import uuid
 from pathlib import Path
 
-from .constants import CHAT_TCP_PORT, FILE_SAVE_DIR, FILE_TCP_PORT
+from . import config
+from .constants import CHAT_TCP_PORT, FILE_TCP_PORT
 
 CHUNK = 65536
+
+
+def _save_dir() -> Path:
+    """The user-configured download folder (created if needed)."""
+    return Path(config.load_download_dir())
 
 
 class FileTransferService:
@@ -40,8 +46,7 @@ class FileTransferService:
         if self.running:
             return
         self.running = True
-        save_dir = Path.home() / "Documents" / FILE_SAVE_DIR
-        save_dir.mkdir(parents=True, exist_ok=True)
+        _save_dir().mkdir(parents=True, exist_ok=True)
         threading.Thread(target=self._server_loop, daemon=True).start()
 
     def stop(self) -> None:
@@ -50,8 +55,14 @@ class FileTransferService:
     # ── sender ────────────────────────────────────────────────────────────────
     def offer_file(self, ip: str, path: str, tid: str = None,
                    progress_cb=None, done_cb=None, error_cb=None,
-                   expire_cb=None, expire_after: int = 60) -> str:
-        """Register a pending send, notify peer. Returns transfer_id. Raises on network error."""
+                   expire_cb=None, expire_after: int | None = None) -> str:
+        """Register a pending send, notify peer. Returns transfer_id. Raises on network error.
+
+        ``expire_after`` defaults to the user-configured temporary-file expiry
+        (minutes) so an unanswered offer is dropped after that window.
+        """
+        if expire_after is None:
+            expire_after = max(60, config.load_file_expiry_min() * 60)
         if not tid:
             tid = uuid.uuid4().hex[:12]
         size = os.path.getsize(path)
@@ -298,7 +309,8 @@ class FileTransferService:
                 self._cancel_events.pop(tid, None)
 
     def _unique_path(self, filename: str) -> Path:
-        base = Path.home() / "Documents" / FILE_SAVE_DIR
+        base = _save_dir()
+        base.mkdir(parents=True, exist_ok=True)
         path = base / filename
         if not path.exists():
             return path

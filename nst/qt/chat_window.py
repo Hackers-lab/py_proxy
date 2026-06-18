@@ -13,19 +13,21 @@ import threading
 import time
 import uuid
 
-from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame,
-                             QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                             QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                             QPushButton, QScrollArea, QToolButton,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
+                             QFrame, QHBoxLayout, QInputDialog, QLabel,
+                             QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                             QMessageBox, QPlainTextEdit, QPushButton,
+                             QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from .. import config
 from ..chat import DemoBot
 from ..constants import CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
 from ..netinfo import check_host_reachable, is_valid_ipv4
+from . import sound
+from .settings_dialog import SettingsDialog
 from .theme import theme
 from .widgets import Avatar, Dot, ToggleSwitch, hline
 
@@ -210,17 +212,22 @@ class _Scroll(QScrollArea):
 class _RosterRow(QFrame):
     clicked = pyqtSignal(str)
     deleted = pyqtSignal(str)
+    menu = pyqtSignal(str, QPoint)
 
-    def __init__(self, key, title, subtitle, status, unread, is_group, deletable):
+    def __init__(self, key, title, subtitle, status, unread, kind, deletable):
         super().__init__()
         self.key = key
         self.setObjectName("rosterRow")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.menu.emit(self.key, self.mapToGlobal(pos)))
+        is_room = kind in ("group", "channel")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(9)
 
-        av = Avatar("👥" if is_group else title, 38)
+        av = Avatar(title, 38)
         lay.addWidget(av)
 
         mid = QVBoxLayout()
@@ -230,8 +237,9 @@ class _RosterRow(QFrame):
         mid.addWidget(name)
         sub = QHBoxLayout()
         sub.setSpacing(4)
-        if is_group:
-            g = QLabel("👥 " + subtitle)
+        if is_room:
+            emoji = "📢" if kind == "channel" else "👥"
+            g = QLabel(f"{emoji} {subtitle}")
             g.setObjectName("muted")
             g.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
             sub.addWidget(g)
@@ -275,16 +283,61 @@ class _RosterRow(QFrame):
         super().mousePressEvent(e)
 
 
+class _Composer(QPlainTextEdit):
+    """Multi-line message input: Enter sends, Shift+Enter inserts a newline.
+
+    Auto-grows from one line up to a few lines, then scrolls (update.md #9).
+    """
+
+    submit = pyqtSignal()
+
+    def __init__(self, max_lines: int = 6) -> None:
+        super().__init__()
+        self.setObjectName("composer")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTabChangesFocus(True)
+        self._max_lines = max_lines
+        self.textChanged.connect(self._auto_height)
+        self._auto_height()
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def clear(self) -> None:
+        super().clear()
+        self._auto_height()
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(e)        # Shift+Enter → newline
+            else:
+                self.submit.emit()              # Enter → send
+            return
+        super().keyPressEvent(e)
+
+    def _auto_height(self) -> None:
+        lh = self.fontMetrics().lineSpacing()
+        lines = min(self._max_lines, max(1, self.document().blockCount()))
+        self.setFixedHeight(int(lines * lh + 16))
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self.height())
+
+
 class ChatWindow(QWidget):
     """Standalone chat window. Closing hides it so conversations persist."""
 
     activity = pyqtSignal(str)     # background message arrived on this key
+    unread_total = pyqtSignal(int)  # total unread across all chats (drives tray badge)
     # File-transfer callbacks fire on worker threads; these signals marshal them
     # back onto the GUI thread (QTimer.singleShot from a worker thread never
     # fires — the worker has no Qt event loop).
     _xfer_progress = pyqtSignal(str, str)            # tid, status text
     _xfer_finished = pyqtSignal(str, str, str, str)  # tid, ip, path(""=failed), status text
     _sys_sig = pyqtSignal(str, str)                  # key, text — post a system line
+    _queued_sig = pyqtSignal(str)                    # mid — message held in offline queue
 
     def __init__(self, chat_service, toasts,
                  log_fn=lambda m: None) -> None:
@@ -304,6 +357,7 @@ class ChatWindow(QWidget):
         self._aliases: dict[str, str] = {}
         self._unread: dict[str, int] = {}
         self._groups: dict[str, dict] = {}
+        self._channels: dict[str, dict] = {}   # cid -> {name, admins, members}
         self._active: str | None = None
         self._visible = False
         self._peer_filter = ""
@@ -340,11 +394,18 @@ class ChatWindow(QWidget):
         self._xfer_progress.connect(self._on_xfer_progress)
         self._xfer_finished.connect(self._on_xfer_finished)
         self._sys_sig.connect(self._sys)
+        self._queued_sig.connect(self._on_queued)
 
         self._build()
         self._load_history()
         theme.changed.connect(self._on_theme)
         self.update_roster(self.chat.peers())
+        self._emit_unread_total()
+        # Restore the previously open conversation (update.md General settings).
+        if config.load_restore_session():
+            last = config.load_last_active_chat()
+            if last and last in self._conversations:
+                QTimer.singleShot(0, lambda k=last: self.select_peer(k))
         self._tick = QTimer(self)
         self._tick.timeout.connect(self._roster_tick)
         self._tick.start(3000)
@@ -426,10 +487,17 @@ class ChatWindow(QWidget):
         ph.setObjectName("section")
         phrow.addWidget(ph)
         phrow.addStretch(1)
-        newg = QPushButton("＋ Group")
-        newg.setProperty("variant", "ghost")
-        newg.setStyleSheet("color:%s; font-weight:700;" % theme.color("accent"))
-        newg.clicked.connect(self._new_group_dialog)
+        newg = QToolButton()
+        newg.setText("＋ New")
+        newg.setCursor(Qt.CursorShape.PointingHandCursor)
+        newg.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        newg.setStyleSheet("QToolButton{color:%s; font-weight:700;}"
+                           "QToolButton::menu-indicator{image:none;}"
+                           % theme.color("accent"))
+        newmenu = QMenu(newg)
+        newmenu.addAction("👥  New group", self._new_group_dialog)
+        newmenu.addAction("📢  New broadcast channel", self._new_channel_dialog)
+        newg.setMenu(newmenu)
         phrow.addWidget(newg)
         s.addLayout(phrow)
 
@@ -467,6 +535,15 @@ class ChatWindow(QWidget):
         htext.addWidget(self._head_sub)
         head.addLayout(htext)
         head.addStretch(1)
+        self._btn_search = QPushButton("🔍")
+        self._btn_search.setProperty("variant", "ghost")
+        self._btn_search.setFixedWidth(40)
+        self._btn_search.setToolTip("Search messages and files")
+        self._btn_search.clicked.connect(self._open_search)
+        head.addWidget(self._btn_search)
+        self._btn_manage = QPushButton("⚙ Manage")
+        self._btn_manage.clicked.connect(self._manage_active)
+        head.addWidget(self._btn_manage)
         self._btn_add = QPushButton("＋ Add")
         self._btn_add.setProperty("variant", "accent")
         self._btn_add.clicked.connect(self._add_group_members)
@@ -522,20 +599,29 @@ class ChatWindow(QWidget):
         self._reply_bar.hide()
         r.addWidget(self._reply_bar)
 
+        # read-only notice (broadcast channels where you're not an admin)
+        self._readonly_lbl = QLabel("📢  Only channel admins can post here.")
+        self._readonly_lbl.setObjectName("muted")
+        self._readonly_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._readonly_lbl.setStyleSheet(
+            "font-style:italic; padding:8px; color:%s;" % theme.color("text_sec"))
+        self._readonly_lbl.hide()
+        r.addWidget(self._readonly_lbl)
+
         comp = QHBoxLayout()
-        self._entry = QLineEdit()
-        self._entry.setPlaceholderText(_PLACEHOLDER)
-        self._entry.returnPressed.connect(self._send)
+        self._entry = _Composer()
+        self._entry.setPlaceholderText(_PLACEHOLDER + "   (Enter = send · Shift+Enter = new line)")
+        self._entry.submit.connect(self._send)
         self._entry.textChanged.connect(self._on_typing_edit)
         comp.addWidget(self._entry, 1)
         self._btn_file = QPushButton("📎")
         self._btn_file.setFixedWidth(44)
         self._btn_file.clicked.connect(self._attach_file)
-        comp.addWidget(self._btn_file)
+        comp.addWidget(self._btn_file, alignment=Qt.AlignmentFlag.AlignBottom)
         self._btn_send = QPushButton("Send")
         self._btn_send.setProperty("variant", "accent")
         self._btn_send.clicked.connect(self._send)
-        comp.addWidget(self._btn_send)
+        comp.addWidget(self._btn_send, alignment=Qt.AlignmentFlag.AlignBottom)
         self._composer = QWidget()
         self._composer.setLayout(comp)
         r.addWidget(self._composer)
@@ -549,9 +635,18 @@ class ChatWindow(QWidget):
     def _is_group(key: str) -> bool:
         return bool(key) and key.startswith("group:")
 
+    @staticmethod
+    def _is_channel(key: str) -> bool:
+        return bool(key) and key.startswith("channel:")
+
+    def _is_room(self, key: str) -> bool:
+        return self._is_group(key) or self._is_channel(key)
+
     def _display_name(self, key: str) -> str:
         if self._is_group(key):
             return self._groups.get(key[6:], {}).get("name", "Group")
+        if self._is_channel(key):
+            return self._channels.get(key[8:], {}).get("name", "Channel")
         return self._aliases.get(key) or self._names.get(key, key)
 
     def _group_meta(self, gid: str) -> dict:
@@ -559,7 +654,27 @@ class ChatWindow(QWidget):
         members = list(g.get("members", []))
         if self.chat.my_ip not in members:
             members = members + [self.chat.my_ip]
-        return {"gid": gid, "name": g.get("name", "Group"), "members": members}
+        # Groups must never be admin-less (update.md #7): fall back to ourselves.
+        admins = [a for a in g.get("admins", []) if a in members] or [self.chat.my_ip]
+        return {"gid": gid, "name": g.get("name", "Group"),
+                "members": members, "admins": admins}
+
+    def _channel_meta(self, cid: str) -> dict:
+        c = self._channels.get(cid, {})
+        members = list(c.get("members", []))
+        if self.chat.my_ip not in members:
+            members = members + [self.chat.my_ip]
+        admins = [a for a in c.get("admins", []) if a in members] or [self.chat.my_ip]
+        return {"cid": cid, "name": c.get("name", "Channel"),
+                "members": members, "admins": admins}
+
+    def _is_admin(self, key: str) -> bool:
+        """True if the local user may post / manage this conversation."""
+        if self._is_group(key):
+            return self.chat.my_ip in self._group_meta(key[6:])["admins"]
+        if self._is_channel(key):
+            return self.chat.my_ip in self._channel_meta(key[8:])["admins"]
+        return True   # private chats / demo: always postable
 
     def _last_activity(self, key: str) -> float:
         msgs = self._conversations.get(key)
@@ -603,6 +718,7 @@ class ChatWindow(QWidget):
             if self._visible and self._active:
                 if self._unread.get(self._active):
                     self._unread[self._active] = 0
+                    self._emit_unread_total()
                     self.update_roster(self.chat.peers())
                     self._render(self._active)
                 self._mark_read(self._active)
@@ -623,18 +739,23 @@ class ChatWindow(QWidget):
 
     def _open_settings(self) -> None:
         m = QMenu(self)
+        m.addAction("⚙  Settings…", self._open_full_settings)
+        m.addSeparator()
         status = self.chat.my_status
-        m.addAction("● Online" + (" ✓" if status == "online" else ""), lambda: self._set_status("online"))
-        m.addAction("🌙 Away" + (" ✓" if status == "away" else ""), lambda: self._set_status("away"))
-        m.addAction("○ Invisible (appear offline)" + (" ✓" if status == "invisible" else ""), lambda: self._set_status("invisible"))
+        m.addAction("● Online" + (" ✓" if status == "online" else ""), lambda: self.set_status("online"))
+        m.addAction("🌙 Away" + (" ✓" if status == "away" else ""), lambda: self.set_status("away"))
+        m.addAction("○ Invisible (appear offline)" + (" ✓" if status == "invisible" else ""), lambda: self.set_status("invisible"))
         m.addSeparator()
         if self._notifications_enabled:
-            m.addAction("🔔 Popups on — pause popups", lambda: self._set_notify(False))
+            m.addAction("🔔 Notifications on — pause", lambda: self._set_notify(False))
         else:
-            m.addAction("🔕 Popups paused — enable popups", lambda: self._set_notify(True))
+            m.addAction("🔕 Notifications paused — enable", lambda: self._set_notify(True))
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
-    def _set_status(self, status: str) -> None:
+    def _open_full_settings(self) -> None:
+        SettingsDialog(self, self).exec()
+
+    def set_status(self, status: str) -> None:
         self.chat.my_status = status
         config.save_my_status(status)
         self._self_dot.set_status(status)
@@ -643,7 +764,63 @@ class ChatWindow(QWidget):
     def _set_notify(self, enabled: bool) -> None:
         self._notifications_enabled = enabled
         config.save_notifications_enabled(enabled)
-        self._log(f"Message popups {'enabled' if enabled else 'paused'}.")
+        self._log(f"Notifications {'enabled' if enabled else 'paused'}.")
+
+    # ── settings-dialog callbacks ─────────────────────────────────────────────
+    def apply_display_name(self, name: str) -> None:
+        name = (name or "").strip()[:32]
+        if not name or name == self.chat.my_name:
+            return
+        self.chat.set_name(name)
+        config.save_display_name(name)
+        self._name_edit.setText(name)
+        self._self_avatar.set_name(name)
+        self._log(f"Chat display name set to '{name}'.")
+
+    def on_settings_changed(self) -> None:
+        """Re-read live-affecting settings after the Settings dialog changes them."""
+        self._notifications_enabled = config.load_notifications_enabled()
+        self._self_dot.set_status(self.chat.my_status)
+        self._emit_unread_total()
+
+    def clear_all_history(self) -> int:
+        """Clear every local conversation (keeps peers, drops messages). Returns count."""
+        keys = list(self._conversations.keys())
+        for key in keys:
+            self._drop_index(key)
+            if self._is_group(key):
+                self._conversations[key] = []
+                self._save_group(key[6:])
+            elif self._is_channel(key):
+                self._conversations[key] = []
+                self._save_channel(key[8:])
+            else:
+                self._conversations.pop(key, None)
+                self._save_peer(key)
+            self._unread.pop(key, None)
+        self._emit_unread_total()
+        if self._active:
+            self._render(self._active)
+        self.update_roster(self.chat.peers())
+        self._log(f"Cleared local history for {len(keys)} conversation(s).")
+        return len(keys)
+
+    def block_user(self, ip: str, name: str = "") -> None:
+        """Permanently block a peer (update.md #12) and persist to the block list."""
+        self.chat.block_ip(ip)
+        users = config.load_blocked_users()
+        if not any(u["ip"] == ip for u in users):
+            users.append({"ip": ip, "name": name or self._display_name(ip)})
+            config.save_blocked_users(users)
+        self._chat_req_states[ip] = "blocked"
+        self._log(f"Blocked {name or ip}.")
+
+    def unblock_user(self, ip: str) -> None:
+        self.chat.unblock_ip(ip)
+        users = [u for u in config.load_blocked_users() if u["ip"] != ip]
+        config.save_blocked_users(users)
+        self._chat_req_states.pop(ip, None)
+        self._log(f"Unblocked {self._display_name(ip)}.")
 
     @property
     def notifications_enabled(self) -> bool:
@@ -678,7 +855,7 @@ class ChatWindow(QWidget):
         with (shown offline with a last-seen) — never groups, ourselves, or
         peers the user deleted (hidden until they contact us again)."""
         cands = {p.ip for p in peers}
-        cands |= {c for c in self._conversations if not self._is_group(c)}
+        cands |= {c for c in self._conversations if not self._is_room(c)}
         cands.discard(self.chat.my_ip)
         cands -= self._hidden
         return cands
@@ -725,9 +902,10 @@ class ChatWindow(QWidget):
         self._rows = {}
 
         groups = [f"group:{g}" for g in self._groups if self._matches(f"group:{g}")]
+        channels = [f"channel:{c}" for c in self._channels if self._matches(f"channel:{c}")]
         peers_f = [ip for ip in self._visible_peers(peers) if self._matches(ip)]
 
-        if not groups and not peers_f:
+        if not groups and not channels and not peers_f:
             hint = QLabel("No matches." if self._peer_filter
                           else "Looking for people on your network…\nOpen the app on another PC, or Try Demo Chat.")
             hint.setObjectName("muted")
@@ -736,12 +914,19 @@ class ChatWindow(QWidget):
             self._roster.add(hint)
             return
 
+        for key in sorted(channels, key=lambda x: (-self._last_activity(x),
+                                                   self._display_name(x).lower())):
+            n = len(self._channel_meta(key[8:]).get("members", []))
+            badge = "read-only" if not self._is_admin(key) else f"{n} members"
+            self._add_row(key, self._display_name(key), badge,
+                          "online", self._unread.get(key, 0), "channel", True)
+
         for key in sorted(groups, key=lambda x: (-self._last_activity(x),
                                                  self._display_name(x).lower())):
             gid = key[6:]
             n = len(self._group_meta(gid).get("members", []))
             self._add_row(key, self._display_name(key), f"{n} members",
-                          "online", self._unread.get(key, 0), True, True)
+                          "online", self._unread.get(key, 0), "group", True)
 
         # Online/away first, then offline; within a group, most-recent first.
         _rank = {"online": 0, "away": 1, "offline": 2}
@@ -750,24 +935,37 @@ class ChatWindow(QWidget):
                                                  self._display_name(x).lower())):
             status = self._status_of(ip)
             self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
-                          status, self._unread.get(ip, 0), False, ip != DemoBot.IP)
+                          status, self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
 
         if self._active:
             self._update_header_sub(peers)
 
-    def _add_row(self, key, title, sub, status, unread, is_group, deletable) -> None:
-        row = _RosterRow(key, title, sub, status, unread, is_group, deletable)
+    def _add_row(self, key, title, sub, status, unread, kind, deletable) -> None:
+        row = _RosterRow(key, title, sub, status, unread, kind, deletable)
         row.set_active(key == self._active)
         row.clicked.connect(self.select_peer)
-        row.deleted.connect(self._delete_group if is_group else self._delete_peer)
+        if kind == "group":
+            row.deleted.connect(self._delete_group)
+        elif kind == "channel":
+            row.deleted.connect(self._delete_channel)
+        else:
+            row.deleted.connect(self._delete_peer)
+        row.menu.connect(self._roster_menu)
         self._roster.add(row)
         self._rows[key] = row
 
     def _update_header_sub(self, peers) -> None:
         key = self._active
         if self._is_group(key):
-            n = len(self._group_meta(key[6:]).get("members", []))
-            self._head_sub.setText(f"Group · {n} members")
+            meta = self._group_meta(key[6:])
+            n = len(meta.get("members", []))
+            role = " · admin" if self.chat.my_ip in meta["admins"] else ""
+            self._head_sub.setText(f"Group · {n} members{role}")
+        elif self._is_channel(key):
+            meta = self._channel_meta(key[8:])
+            n = len(meta.get("members", []))
+            role = "admin" if self.chat.my_ip in meta["admins"] else "read-only"
+            self._head_sub.setText(f"📢 Broadcast channel · {n} members · {role}")
         elif key == DemoBot.IP:
             self._head_sub.setText("demo peer")
         else:
@@ -784,21 +982,33 @@ class ChatWindow(QWidget):
         prev = self._active
         self._active = key
         self._unread[key] = 0
+        self._emit_unread_total()
         self._cancel_reply()
         for k, row in self._rows.items():
             row.set_active(k == key)
-        self._head_avatar.set_name("👥" if self._is_group(key) else self._display_name(key))
+        self._head_avatar.set_name(self._display_name(key))
         self._head_name.setText(self._display_name(key))
         self._update_header_sub(self.chat.peers())
         is_grp = self._is_group(key)
-        self._btn_add.setVisible(is_grp)
-        self._btn_save.setVisible(not is_grp and key != DemoBot.IP)
-        self._btn_file.setVisible(not is_grp)
+        is_chan = self._is_channel(key)
+        is_room = is_grp or is_chan
+        can_post = self._is_admin(key)
+        self._btn_add.setVisible(is_room and can_post)
+        self._btn_manage.setVisible(is_room)
+        self._btn_save.setVisible(not is_room and key != DemoBot.IP)
+        # File send: 1:1 peers only (channel/group file fan-out isn't supported).
+        self._btn_file.setVisible(not is_room)
         self._set_composer_visible(True)
+        # Broadcast channels are post-only for admins; members read.
+        read_only = is_chan and not can_post
+        self._composer.setVisible(not read_only)
+        self._readonly_lbl.setVisible(read_only)
         self._render(key)
         self._refresh_typing()
         self._mark_read(key)
-        self._entry.setFocus()
+        if not read_only:
+            self._entry.setFocus()
+        config.save_last_active_chat(key)
         if prev != key:
             self.update_roster(self.chat.peers())
 
@@ -808,6 +1018,8 @@ class ChatWindow(QWidget):
         if not on:
             self._btn_add.setVisible(False)
             self._btn_save.setVisible(False)
+            self._btn_manage.setVisible(False)
+            self._readonly_lbl.setVisible(False)
             self._cancel_reply()
 
     def _show_empty_state(self) -> None:
@@ -828,6 +1040,8 @@ class ChatWindow(QWidget):
     def _persist(self, key: str) -> None:
         if self._is_group(key):
             self._save_group(key[6:])
+        elif self._is_channel(key):
+            self._save_channel(key[8:])
         else:
             self._save_peer(key)
 
@@ -868,6 +1082,8 @@ class ChatWindow(QWidget):
             return "✓✓", "#a8e0ff" if is_out else theme.color("accent")
         if status == "delivered":
             return "✓✓", muted
+        if status == "queued":
+            return "🕓", muted   # held in offline queue, awaiting peer
         return "✓", muted   # sent
 
     def _make_bubble(self, entry: dict) -> QWidget:
@@ -1046,6 +1262,8 @@ class ChatWindow(QWidget):
         text = self._entry.text().strip()
         if not key or not text:
             return
+        if not self._is_admin(key):
+            return   # broadcast channel: only admins may post
         self._entry.clear()
         self._stop_typing()
         reply = self._reply_to
@@ -1060,6 +1278,10 @@ class ChatWindow(QWidget):
             meta = self._group_meta(key[6:])
             threading.Thread(target=self._send_group_worker,
                              args=(key, meta, text, reply, mid), daemon=True).start()
+        elif self._is_channel(key):
+            meta = self._channel_meta(key[8:])
+            threading.Thread(target=self._send_channel_worker,
+                             args=(key, meta, text, reply, mid), daemon=True).start()
         else:
             threading.Thread(target=self._send_worker,
                              args=(key, text, reply, mid), daemon=True).start()
@@ -1067,20 +1289,46 @@ class ChatWindow(QWidget):
     def _send_worker(self, ip, text, reply, mid) -> None:
         ok = self.chat.send(ip, text, reply=reply, mid=mid)
         if not ok:
-            self._sys_sig.emit(ip, "not delivered (peer offline?)")
+            # Held in the offline queue; mark the bubble as queued (🕓).
+            self._queued_sig.emit(mid)
 
     def _send_group_worker(self, key, meta, text, reply, mid) -> None:
         results = self.chat.send_group(meta, text, reply=reply, mid=mid)
         failed = [ip for ip, okk in results.items() if not okk]
         if failed:
-            self._sys_sig.emit(
-                key, f"not delivered to {len(failed)} member(s) (offline?)")
+            self._queued_sig.emit(mid)
+
+    def _send_channel_worker(self, key, meta, text, reply, mid) -> None:
+        results = self.chat.send_channel(meta, text, reply=reply, mid=mid)
+        failed = [ip for ip, okk in results.items() if not okk]
+        if failed:
+            self._queued_sig.emit(mid)
 
     def _sys(self, key, text) -> None:
         entry = _mk_entry("sys", "", text, time.time())
         self._store(key, entry)
         if key == self._active:
             self._append(entry)
+
+    def _notify_background(self, scope: str, key: str, title: str, body: str) -> None:
+        """Fire the allowed alert channels for a background message.
+
+        Honours the global master switch, DND, mute and per-scope toggles from
+        the Settings module: desktop popup, sound, taskbar flash and tray badge.
+        """
+        if sound.should_notify(scope, "popup"):
+            self._toasts.notify(title, body, key)
+        if sound.should_notify(scope, "sound"):
+            sound.play_sound()
+        if sound.should_notify(scope, "taskbar") and not self.isActiveWindow():
+            QApplication.alert(self, 3000)
+        self._emit_unread_total()
+
+    def _emit_unread_total(self) -> None:
+        """Push the total unread count (honouring tray toggles) to the tray badge."""
+        total = sum(n for k, n in self._unread.items()
+                    if n > 0 and sound.should_notify(sound.scope_of(k), "tray"))
+        self.unread_total.emit(total)
 
     def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
         self._unhide(ip)
@@ -1094,21 +1342,23 @@ class ChatWindow(QWidget):
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
-            if self._notifications_enabled:
-                self.activity.emit(ip)
-            else:
-                prev = text if len(text) <= 120 else text[:117] + "…"
-                self._toasts.notify(name, prev, ip)
+            prev = text if len(text) <= 120 else text[:117] + "…"
+            self._notify_background("private", ip, name, prev)
 
     def on_group_message(self, group, ip, name, text, ts, reply=None, mid="") -> None:
         gid = group.get("gid")
         if not gid:
             return
         members = [m for m in group.get("members", []) if m]
-        g = self._groups.setdefault(gid, {"name": group.get("name", "Group"), "members": members})
+        admins = [a for a in group.get("admins", []) if a]
+        g = self._groups.setdefault(gid, {"name": group.get("name", "Group"),
+                                          "members": members, "admins": admins})
         g["name"] = group.get("name", g.get("name", "Group"))
         if members:
             g["members"] = members
+        # Admin set is authoritative from the sender so promote/demote propagate.
+        if admins:
+            g["admins"] = admins
         for m in members:
             if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
                 self.chat.add_manual_peer(m)
@@ -1123,14 +1373,97 @@ class ChatWindow(QWidget):
         self._save_group(gid)
         if key == self._active and self._visible:
             self._append(entry)
+            self._mark_read(key)
         else:
             self._unread[key] = self._unread.get(key, 0) + 1
             self.update_roster(self.chat.peers())
-            if self._notifications_enabled:
-                self.activity.emit(key)
-            else:
-                prev = text if len(text) <= 100 else text[:97] + "…"
-                self._toasts.notify(f"{g['name']} (group)", f"{name}: {prev}", key)
+            prev = text if len(text) <= 100 else text[:97] + "…"
+            self._notify_background("group", key, f"{g['name']} (group)", f"{name}: {prev}")
+
+    def on_channel_message(self, channel, ip, name, text, ts, reply=None, mid="") -> None:
+        cid = channel.get("cid")
+        if not cid:
+            return
+        members = [m for m in channel.get("members", []) if m]
+        admins = [a for a in channel.get("admins", []) if a]
+        c = self._channels.setdefault(cid, {"name": channel.get("name", "Channel"),
+                                            "members": members, "admins": admins})
+        c["name"] = channel.get("name", c.get("name", "Channel"))
+        if members:
+            c["members"] = members
+        if admins:
+            c["admins"] = admins
+        for m in members:
+            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                self.chat.add_manual_peer(m)
+        self._names[ip] = name
+        key = f"channel:{cid}"
+        if not text:
+            self._save_channel(cid)
+            self.update_roster(self.chat.peers())
+            return
+        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply, from_ip=ip)
+        self._store(key, entry)
+        self._save_channel(cid)
+        if key == self._active and self._visible:
+            self._append(entry)
+        else:
+            self._unread[key] = self._unread.get(key, 0) + 1
+            self.update_roster(self.chat.peers())
+            prev = text if len(text) <= 100 else text[:97] + "…"
+            self._notify_background("broadcast", key, f"📢 {c['name']}", f"{name}: {prev}")
+
+    # ── offline queue + group removal callbacks ───────────────────────────────
+    def _refresh_tick(self, mid: str, status: str) -> None:
+        lbl = self._status_lbls.get(mid)
+        if lbl is None:
+            return
+        try:
+            glyph, color = self._tick_parts(status, True)
+            lbl.setText(glyph)
+            lbl.setStyleSheet("font-size:11px; color:%s;" % color)
+        except RuntimeError:
+            self._status_lbls.pop(mid, None)
+
+    def _on_queued(self, mid: str) -> None:
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        if entry.get("kind") != "out" or entry.get("status") in ("delivered", "read"):
+            return
+        entry["status"] = "queued"
+        self._persist(key)
+        self._refresh_tick(mid, "queued")
+
+    def on_queue_flush(self, ip, mids) -> None:
+        for mid in mids:
+            loc = self._mid_index.get(mid)
+            if not loc:
+                continue
+            key, entry = loc
+            if entry.get("kind") == "out" and entry.get("status") == "queued":
+                entry["status"] = "sent"
+                self._persist(key)
+                self._refresh_tick(mid, "sent")
+
+    def on_group_kicked(self, from_ip, gid) -> None:
+        key = f"group:{gid}"
+        if gid not in self._groups:
+            return
+        name = self._display_name(key)
+        self._drop_index(key)
+        self._groups.pop(gid, None)
+        self._conversations.pop(key, None)
+        self._unread.pop(key, None)
+        self._typers.pop(key, None)
+        self._delete_history_file(key)
+        if self._active == key:
+            self._reset_active()
+        self.update_roster(self.chat.peers())
+        self._emit_unread_total()
+        self._toasts.notify("Removed from group",
+                            f"You were removed from “{name}”.", "")
 
     # ── receipts / read tracking ──────────────────────────────────────────────
     def on_receipt(self, ip, mid, state) -> None:
@@ -1198,8 +1531,8 @@ class ChatWindow(QWidget):
 
     def _mark_read(self, key) -> None:
         """Send 'read' receipts once the chat is open+focused."""
-        if key == DemoBot.IP:
-            return
+        if key == DemoBot.IP or self._is_channel(key):
+            return   # broadcast channels are read-only; no receipts
         if not (self._visible and self.isActiveWindow() and key == self._active):
             return
 
@@ -1479,9 +1812,10 @@ class ChatWindow(QWidget):
         popup.exec(QCursor.pos())
 
     # ── typing indicators ─────────────────────────────────────────────────────
-    def _on_typing_edit(self, _text: str) -> None:
+    def _on_typing_edit(self) -> None:
         key = self._active
-        if not key or key == DemoBot.IP or not self._entry.text().strip():
+        if (not key or key == DemoBot.IP or self._is_channel(key)
+                or not self._entry.text().strip()):
             return
         now = time.time()
         if not self._typing_active or now - self._typing_last_sent > 2.0:
@@ -1632,9 +1966,11 @@ class ChatWindow(QWidget):
 
     # ── groups ────────────────────────────────────────────────────────────────
     def _member_dialog(self, title, exclude) -> list[str] | None:
+        # Blocked users can't be added to new groups/channels by the blocker (#12).
+        blocked = set(self.chat.blocked_ips())
         cands = [ip for ip in (set(self._names) | set(self._aliases) | set(self._conversations))
                  if ip not in exclude and ip != self.chat.my_ip
-                 and ip != DemoBot.IP and not self._is_group(ip)]
+                 and ip != DemoBot.IP and not self._is_room(ip) and ip not in blocked]
         cands.sort(key=lambda x: self._display_name(x).lower())
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
@@ -1680,7 +2016,9 @@ class ChatWindow(QWidget):
         if not members:
             return
         gid = uuid.uuid4().hex[:12]
-        self._groups[gid] = {"name": name.strip()[:32], "members": members}
+        # Creator is the first admin (update.md #7).
+        self._groups[gid] = {"name": name.strip()[:32], "members": members,
+                             "admins": [self.chat.my_ip]}
         self._conversations.setdefault(f"group:{gid}", [])
         for ip in members:
             if not self.chat.is_manual_peer(ip):
@@ -1696,10 +2034,15 @@ class ChatWindow(QWidget):
         self._log(f"Group \"{name.strip()}\" created with {len(members)} member(s).")
 
     def _add_group_members(self) -> None:
+        """Header ＋ Add — works for both groups and channels (admins only)."""
         key = self._active
+        if self._is_channel(key):
+            return self._add_channel_members(key[8:])
         if not key or not self._is_group(key):
             return
         gid = key[6:]
+        if not self._is_admin(key):
+            return
         existing = set(self._group_meta(gid).get("members", []))
         new = self._member_dialog("Add members", existing)
         if not new:
@@ -1712,15 +2055,163 @@ class ChatWindow(QWidget):
         for ip in new:
             if not self.chat.is_manual_peer(ip):
                 self.chat.add_manual_peer(ip)
-        meta = self._group_meta(gid)
-        threading.Thread(
-            target=lambda: self.chat.send_group(
-                meta, f"{self.chat.my_name} added {len(new)} member(s)",
-                msg_type="group_invite"), daemon=True).start()
+        self._broadcast_group_meta(gid, f"{self.chat.my_name} added {len(new)} member(s)")
         self._save_group(gid)
         self._update_header_sub(self.chat.peers())
         self.update_roster(self.chat.peers())
         self._log(f"Added {len(new)} member(s) to \"{g.get('name', 'Group')}\".")
+
+    # ── group admin (update.md #7) ────────────────────────────────────────────
+    def _broadcast_group_meta(self, gid, system_text="") -> None:
+        meta = self._group_meta(gid)
+        threading.Thread(
+            target=lambda: self.chat.send_group(meta, system_text,
+                                                msg_type="group_invite"),
+            daemon=True).start()
+
+    def _ensure_group_admin(self, gid) -> None:
+        """Guarantee the group always has at least one admin (#7)."""
+        g = self._groups.get(gid)
+        if not g:
+            return
+        admins = [a for a in g.get("admins", []) if a in g.get("members", [])]
+        if not admins and g.get("members"):
+            admins = [g["members"][0]]
+        g["admins"] = admins
+
+    def _manage_active(self) -> None:
+        key = self._active
+        if self._is_group(key):
+            self._manage_group_dialog(key[6:])
+        elif self._is_channel(key):
+            self._manage_channel_dialog(key[8:])
+
+    def _manage_group_dialog(self, gid) -> None:
+        if gid not in self._groups:
+            return
+        am_admin = self.chat.my_ip in self._group_meta(gid)["admins"]
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage group")
+        dlg.resize(420, 500)
+        v = QVBoxLayout(dlg)
+
+        nrow = QHBoxLayout()
+        nrow.addWidget(QLabel("Name:"))
+        name_edit = QLineEdit(self._groups[gid].get("name", "Group"))
+        name_edit.setEnabled(am_admin)
+        nrow.addWidget(name_edit, 1)
+        if am_admin:
+            rb = QPushButton("Rename")
+            rb.clicked.connect(lambda: self._group_rename(gid, name_edit.text()))
+            nrow.addWidget(rb)
+        v.addLayout(nrow)
+
+        v.addWidget(QLabel("Members"))
+        lst = QListWidget()
+        v.addWidget(lst, 1)
+
+        def refresh():
+            lst.clear()
+            meta = self._group_meta(gid)
+            for ip in meta["members"]:
+                tag = " · admin" if ip in meta["admins"] else ""
+                me = " (you)" if ip == self.chat.my_ip else ""
+                it = QListWidgetItem(f"{self._display_name(ip)}{me}{tag}")
+                it.setData(Qt.ItemDataRole.UserRole, ip)
+                lst.addItem(it)
+        refresh()
+
+        def selected_ip():
+            it = lst.currentItem()
+            return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+        if am_admin:
+            arow = QHBoxLayout()
+            add = QPushButton("＋ Add")
+            add.clicked.connect(lambda: (self._add_group_members_for(gid), refresh()))
+            promote = QPushButton("Promote")
+            promote.clicked.connect(lambda: (self._group_set_admin(gid, selected_ip(), True), refresh()))
+            demote = QPushButton("Demote")
+            demote.clicked.connect(lambda: (self._group_set_admin(gid, selected_ip(), False), refresh()))
+            remove = QPushButton("Remove")
+            remove.setProperty("variant", "danger")
+            remove.clicked.connect(lambda: (self._group_remove_member(gid, selected_ip()), refresh()))
+            for b in (add, promote, demote, remove):
+                arow.addWidget(b)
+            v.addLayout(arow)
+
+        brow = QHBoxLayout()
+        leave = QPushButton("Leave group")
+        leave.setProperty("variant", "danger")
+        leave.clicked.connect(lambda: (dlg.accept(), self._delete_group(f"group:{gid}")))
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        brow.addWidget(leave)
+        brow.addStretch(1)
+        brow.addWidget(close)
+        v.addLayout(brow)
+        dlg.exec()
+
+    def _add_group_members_for(self, gid) -> None:
+        existing = set(self._group_meta(gid).get("members", []))
+        new = self._member_dialog("Add members", existing)
+        if not new:
+            return
+        new = [ip for ip in new if ip not in existing]
+        if not new:
+            return
+        g = self._groups.get(gid)
+        g["members"] = list(dict.fromkeys(list(g.get("members", [])) + new))
+        for ip in new:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        self._broadcast_group_meta(gid, f"{self.chat.my_name} added {len(new)} member(s)")
+        self._save_group(gid)
+        self.update_roster(self.chat.peers())
+
+    def _group_rename(self, gid, name) -> None:
+        name = (name or "").strip()[:32]
+        if not name or gid not in self._groups:
+            return
+        self._groups[gid]["name"] = name
+        self._broadcast_group_meta(gid, f"{self.chat.my_name} renamed the group to \"{name}\"")
+        self._save_group(gid)
+        if self._active == f"group:{gid}":
+            self._head_name.setText(name)
+            self._head_avatar.set_name(name)
+        self.update_roster(self.chat.peers())
+
+    def _group_set_admin(self, gid, ip, make_admin: bool) -> None:
+        if not ip or gid not in self._groups:
+            return
+        g = self._groups[gid]
+        admins = [a for a in g.get("admins", [])]
+        if make_admin and ip not in admins:
+            admins.append(ip)
+        elif not make_admin and ip in admins:
+            admins.remove(ip)
+        g["admins"] = admins
+        self._ensure_group_admin(gid)   # never leave it admin-less
+        verb = "promoted" if make_admin else "demoted"
+        self._broadcast_group_meta(gid, f"{self._display_name(ip)} was {verb}")
+        self._save_group(gid)
+        self.update_roster(self.chat.peers())
+
+    def _group_remove_member(self, gid, ip) -> None:
+        if not ip or gid not in self._groups or ip == self.chat.my_ip:
+            return
+        g = self._groups[gid]
+        g["members"] = [m for m in g.get("members", []) if m != ip]
+        g["admins"] = [a for a in g.get("admins", []) if a != ip]
+        self._ensure_group_admin(gid)
+        # Tell the removed member (they lose the group + history, #7) …
+        threading.Thread(target=lambda: self.chat.send_group_kick(ip, gid),
+                         daemon=True).start()
+        # … and sync the smaller roster to everyone who remains.
+        self._broadcast_group_meta(gid, f"{self._display_name(ip)} was removed")
+        self._save_group(gid)
+        self._update_header_sub(self.chat.peers())
+        self.update_roster(self.chat.peers())
 
     def _delete_group(self, key) -> None:
         gid = key[6:]
@@ -1729,6 +2220,18 @@ class ChatWindow(QWidget):
                                 f"Leave \"{name}\" and delete its history here?") \
                 != QMessageBox.StandardButton.Yes:
             return
+        meta = self._group_meta(gid)
+        others = [m for m in meta["members"] if m != self.chat.my_ip]
+        admins = [a for a in meta["admins"] if a != self.chat.my_ip]
+        if others and not admins:
+            admins = [others[0]]   # ownership transfers automatically (#7)
+        if others:
+            new_meta = {"gid": gid, "name": meta["name"],
+                        "members": others, "admins": admins}
+            threading.Thread(
+                target=lambda: self.chat.send_group(
+                    new_meta, f"{self.chat.my_name} left the group",
+                    msg_type="group_invite"), daemon=True).start()
         self._drop_index(key)
         self._groups.pop(gid, None)
         self._conversations.pop(key, None)
@@ -1737,8 +2240,280 @@ class ChatWindow(QWidget):
         self._delete_history_file(key)
         if self._active == key:
             self._reset_active()
+        self._emit_unread_total()
         self.update_roster(self.chat.peers())
         self._log(f"Left group \"{name}\".")
+
+    # ── broadcast channels (update.md #8) ─────────────────────────────────────
+    def _new_channel_dialog(self) -> None:
+        name, ok = QInputDialog.getText(self, "New broadcast channel", "Channel name:")
+        if not ok or not name.strip():
+            return
+        members = self._member_dialog("Add channel members", {self.chat.my_ip})
+        if members is None:
+            return
+        cid = uuid.uuid4().hex[:12]
+        self._channels[cid] = {"name": name.strip()[:32], "members": members,
+                               "admins": [self.chat.my_ip]}
+        self._conversations.setdefault(f"channel:{cid}", [])
+        for ip in members:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        meta = self._channel_meta(cid)
+        threading.Thread(
+            target=lambda: self.chat.send_channel(
+                meta, f"{self.chat.my_name} created channel \"{name.strip()}\"",
+                msg_type="channel_meta"), daemon=True).start()
+        self._save_channel(cid)
+        self.update_roster(self.chat.peers())
+        self.select_peer(f"channel:{cid}")
+        self._log(f"Broadcast channel \"{name.strip()}\" created.")
+
+    def _broadcast_channel_meta(self, cid, system_text="") -> None:
+        meta = self._channel_meta(cid)
+        threading.Thread(
+            target=lambda: self.chat.send_channel(meta, system_text,
+                                                  msg_type="channel_meta"),
+            daemon=True).start()
+
+    def _add_channel_members(self, cid) -> None:
+        if cid not in self._channels or not self._is_admin(f"channel:{cid}"):
+            return
+        existing = set(self._channel_meta(cid).get("members", []))
+        new = self._member_dialog("Add channel members", existing)
+        if not new:
+            return
+        new = [ip for ip in new if ip not in existing]
+        if not new:
+            return
+        c = self._channels[cid]
+        c["members"] = list(dict.fromkeys(list(c.get("members", [])) + new))
+        for ip in new:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        self._broadcast_channel_meta(cid, f"{self.chat.my_name} added {len(new)} member(s)")
+        self._save_channel(cid)
+        self._update_header_sub(self.chat.peers())
+        self.update_roster(self.chat.peers())
+
+    def _manage_channel_dialog(self, cid) -> None:
+        if cid not in self._channels:
+            return
+        am_admin = self.chat.my_ip in self._channel_meta(cid)["admins"]
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage channel")
+        dlg.resize(420, 500)
+        v = QVBoxLayout(dlg)
+
+        nrow = QHBoxLayout()
+        nrow.addWidget(QLabel("Name:"))
+        name_edit = QLineEdit(self._channels[cid].get("name", "Channel"))
+        name_edit.setEnabled(am_admin)
+        nrow.addWidget(name_edit, 1)
+        if am_admin:
+            rb = QPushButton("Rename")
+            rb.clicked.connect(lambda: self._channel_rename(cid, name_edit.text()))
+            nrow.addWidget(rb)
+        v.addLayout(nrow)
+
+        v.addWidget(QLabel("Members (admins can post)"))
+        lst = QListWidget()
+        v.addWidget(lst, 1)
+
+        def refresh():
+            lst.clear()
+            meta = self._channel_meta(cid)
+            for ip in meta["members"]:
+                tag = " · admin" if ip in meta["admins"] else ""
+                me = " (you)" if ip == self.chat.my_ip else ""
+                it = QListWidgetItem(f"{self._display_name(ip)}{me}{tag}")
+                it.setData(Qt.ItemDataRole.UserRole, ip)
+                lst.addItem(it)
+        refresh()
+
+        def selected_ip():
+            it = lst.currentItem()
+            return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+        if am_admin:
+            arow = QHBoxLayout()
+            add = QPushButton("＋ Add")
+            add.clicked.connect(lambda: (self._add_channel_members(cid), refresh()))
+            promote = QPushButton("Make admin")
+            promote.clicked.connect(lambda: (self._channel_set_admin(cid, selected_ip(), True), refresh()))
+            demote = QPushButton("Remove admin")
+            demote.clicked.connect(lambda: (self._channel_set_admin(cid, selected_ip(), False), refresh()))
+            remove = QPushButton("Remove")
+            remove.setProperty("variant", "danger")
+            remove.clicked.connect(lambda: (self._channel_remove_member(cid, selected_ip()), refresh()))
+            for b in (add, promote, demote, remove):
+                arow.addWidget(b)
+            v.addLayout(arow)
+
+        brow = QHBoxLayout()
+        leave = QPushButton("Delete/leave channel")
+        leave.setProperty("variant", "danger")
+        leave.clicked.connect(lambda: (dlg.accept(), self._delete_channel(f"channel:{cid}")))
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        brow.addWidget(leave)
+        brow.addStretch(1)
+        brow.addWidget(close)
+        v.addLayout(brow)
+        dlg.exec()
+
+    def _channel_rename(self, cid, name) -> None:
+        name = (name or "").strip()[:32]
+        if not name or cid not in self._channels:
+            return
+        self._channels[cid]["name"] = name
+        self._broadcast_channel_meta(cid, f"Channel renamed to \"{name}\"")
+        self._save_channel(cid)
+        if self._active == f"channel:{cid}":
+            self._head_name.setText(name)
+            self._head_avatar.set_name(name)
+        self.update_roster(self.chat.peers())
+
+    def _channel_set_admin(self, cid, ip, make_admin: bool) -> None:
+        if not ip or cid not in self._channels:
+            return
+        c = self._channels[cid]
+        admins = [a for a in c.get("admins", [])]
+        if make_admin and ip not in admins:
+            admins.append(ip)
+        elif not make_admin and ip in admins:
+            admins.remove(ip)
+        if not admins:
+            admins = [self.chat.my_ip]
+        c["admins"] = admins
+        self._broadcast_channel_meta(cid)
+        self._save_channel(cid)
+        self.update_roster(self.chat.peers())
+
+    def _channel_remove_member(self, cid, ip) -> None:
+        if not ip or cid not in self._channels or ip == self.chat.my_ip:
+            return
+        c = self._channels[cid]
+        c["members"] = [m for m in c.get("members", []) if m != ip]
+        c["admins"] = [a for a in c.get("admins", []) if a != ip]
+        self._broadcast_channel_meta(cid)
+        self._save_channel(cid)
+        self._update_header_sub(self.chat.peers())
+        self.update_roster(self.chat.peers())
+
+    def _delete_channel(self, key) -> None:
+        cid = key[8:]
+        name = self._display_name(key)
+        verb = "Delete" if self._is_admin(key) else "Leave"
+        if QMessageBox.question(self, f"{verb} channel",
+                                f"{verb} \"{name}\" and remove it here?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._drop_index(key)
+        self._channels.pop(cid, None)
+        self._conversations.pop(key, None)
+        self._unread.pop(key, None)
+        self._typers.pop(key, None)
+        self._delete_history_file(key)
+        if self._active == key:
+            self._reset_active()
+        self._emit_unread_total()
+        self.update_roster(self.chat.peers())
+        self._log(f"{verb}d channel \"{name}\".")
+
+    # ── roster context menu / blocking / search ───────────────────────────────
+    def _roster_menu(self, key, gpos) -> None:
+        m = QMenu(self)
+        m.addAction("Open", lambda: self.select_peer(key))
+        if self._is_group(key):
+            m.addAction("⚙ Manage group", lambda: self._manage_group_dialog(key[6:]))
+            m.addAction("Leave group", lambda: self._delete_group(key))
+        elif self._is_channel(key):
+            if self._is_admin(key):
+                m.addAction("⚙ Manage channel", lambda: self._manage_channel_dialog(key[8:]))
+            m.addAction("Delete/leave channel", lambda: self._delete_channel(key))
+        elif key != DemoBot.IP:
+            m.addAction("✎ Save name", lambda: (self.select_peer(key), self._edit_alias()))
+            m.addSeparator()
+            if key in self.chat.blocked_ips():
+                m.addAction("Unblock", lambda: (self.unblock_user(key),
+                                                self.update_roster(self.chat.peers())))
+            else:
+                m.addAction("🚫 Block user", lambda: self._block_peer(key))
+            m.addAction("Remove", lambda: self._delete_peer(key))
+        m.exec(gpos)
+
+    def _block_peer(self, ip) -> None:
+        name = self._display_name(ip)
+        if QMessageBox.question(self, "Block user",
+                                f"Block {name}? They won't be able to message "
+                                "you or send files.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.block_user(ip, name)
+        if self._active == ip:
+            self._rerender_if_active(ip)
+        self.update_roster(self.chat.peers())
+
+    def _open_search(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Search messages & files")
+        dlg.resize(540, 500)
+        v = QVBoxLayout(dlg)
+        field = QLineEdit()
+        field.setPlaceholderText("🔍  Search message text and file names…")
+        v.addWidget(field)
+        results = QListWidget()
+        v.addWidget(results, 1)
+        info = QLabel("")
+        info.setObjectName("muted")
+        v.addWidget(info)
+
+        def run(text):
+            results.clear()
+            q = text.strip().lower()
+            if len(q) < 2:
+                info.setText("Type at least 2 characters.")
+                return
+            count = 0
+            for key, msgs in self._conversations.items():
+                cname = self._display_name(key)
+                for e in msgs:
+                    if not isinstance(e, dict) or e.get("deleted"):
+                        continue
+                    kind = e.get("kind", "")
+                    if kind in ("out", "in"):
+                        hay = e.get("text", "")
+                    elif kind in ("file_out", "file_in_offer"):
+                        hay = e.get("filename", "")
+                    else:
+                        continue
+                    if q not in hay.lower():
+                        continue
+                    who = "You" if kind == "out" else e.get("sender", cname)
+                    ts = time.strftime("%b %d %H:%M", time.localtime(e.get("ts", 0)))
+                    icon = "📎" if kind.startswith("file") else "💬"
+                    snip = hay if len(hay) <= 64 else hay[:61] + "…"
+                    it = QListWidgetItem(f"{icon}  {cname} — {who}: {snip}\n        {ts}")
+                    it.setData(Qt.ItemDataRole.UserRole, key)
+                    results.addItem(it)
+                    count += 1
+                    if count >= 200:
+                        break
+                if count >= 200:
+                    break
+            info.setText(f"{count} match(es)" + (" (showing first 200)" if count >= 200 else ""))
+
+        def open_result(it):
+            key = it.data(Qt.ItemDataRole.UserRole)
+            dlg.accept()
+            self.open(key)
+
+        field.textChanged.connect(run)
+        results.itemActivated.connect(open_result)
+        results.itemDoubleClicked.connect(open_result)
+        field.setFocus()
+        dlg.exec()
 
     # ── clear ─────────────────────────────────────────────────────────────────
     def _clear_chat(self) -> None:
@@ -1750,6 +2525,10 @@ class ChatWindow(QWidget):
             self._conversations[key] = []
             self._unread.pop(key, None)
             self._save_group(key[6:])
+        elif self._is_channel(key):
+            self._conversations[key] = []
+            self._unread.pop(key, None)
+            self._save_channel(key[8:])
         else:
             self._conversations.pop(key, None)
             self._unread.pop(key, None)
@@ -1858,13 +2637,21 @@ class ChatWindow(QWidget):
 
     def _attach_file(self) -> None:
         ip = self._active
-        if not ip or self._is_group(ip):
+        if not ip or self._is_room(ip):
             return
         path, _ = QFileDialog.getOpenFileName(self, "Send file")
         if not path:
             return
         filename = os.path.basename(path)
         size = os.path.getsize(path)
+
+        max_mb = config.load_max_file_mb()
+        if max_mb and size > max_mb * 1024 * 1024:
+            QMessageBox.warning(
+                self, "File too large",
+                f"“{filename}” is {_fmt_size(size)}, over the {max_mb} MB limit set "
+                "in Settings → File Transfer.")
+            return
 
         tid = uuid.uuid4().hex[:12]
         self._transfer_paths[tid] = None
@@ -1936,10 +2723,8 @@ class ChatWindow(QWidget):
         self._offer_states[tid] = "pending"
         self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
         if not (ip == self._active and self._visible):
-            if self._notifications_enabled:
-                self.activity.emit(ip)
-            else:
-                self._toasts.notify(name, f"📎 Wants to send: {msg['filename']}", ip)
+            self._notify_background("private", ip, name,
+                                    f"📎 Wants to send: {msg['filename']}")
 
     def _accept_file(self, tid, from_ip, filename, size) -> None:
         from_ip = from_ip or self._active
@@ -2058,10 +2843,7 @@ class ChatWindow(QWidget):
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
-        if self._notifications_enabled:
-            self.activity.emit(ip)
-        else:
-            self._toasts.notify(name, "Wants to chat — tap to respond", ip)
+        self._notify_background("private", ip, name, "Wants to chat — tap to respond")
 
     def _accept_chat(self, ip) -> None:
         self._chat_req_states[ip] = "accepted"
@@ -2089,6 +2871,15 @@ class ChatWindow(QWidget):
             if isinstance(e, dict) and e.get("mid"):
                 self._mid_index[e["mid"]] = (key, e)
 
+    def _apply_retention(self, msgs: list) -> list:
+        """Drop messages older than the configured retention window (#17)."""
+        days = config.load_retention_days()
+        if not days:
+            return msgs   # "Forever"
+        cutoff = time.time() - days * 86400
+        return [m for m in msgs
+                if not isinstance(m, dict) or float(m.get("ts", 0) or 0) >= cutoff]
+
     def _load_history(self) -> None:
         try:
             d = config.get_peer_chat_dir()
@@ -2101,16 +2892,30 @@ class ChatWindow(QWidget):
                     ip = data.get("ip")
                     if not ip:
                         continue
-                    self._conversations[ip] = [_migrate_entry(m) for m in
-                                               data.get("messages", [])[-_MAX_HISTORY:]]
+                    msgs = [_migrate_entry(m) for m in
+                            data.get("messages", [])[-_MAX_HISTORY:]]
+                    self._conversations[ip] = self._apply_retention(msgs)
                     self._index_conversation(ip)
                     self._seed_transfer_state(ip)
                     if self._is_group(ip) and isinstance(data.get("group"), dict):
                         gid = ip[6:]
                         g = data["group"]
-                        self._groups[gid] = {"name": g.get("name", "Group"),
-                                             "members": [m for m in g.get("members", []) if m]}
+                        self._groups[gid] = {
+                            "name": g.get("name", "Group"),
+                            "members": [m for m in g.get("members", []) if m],
+                            "admins": [a for a in g.get("admins", []) if a]}
                         for m in self._groups[gid]["members"]:
+                            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                                self.chat.add_manual_peer(m)
+                        continue
+                    if self._is_channel(ip) and isinstance(data.get("channel"), dict):
+                        cid = ip[8:]
+                        c = data["channel"]
+                        self._channels[cid] = {
+                            "name": c.get("name", "Channel"),
+                            "members": [m for m in c.get("members", []) if m],
+                            "admins": [a for a in c.get("admins", []) if a]}
+                        for m in self._channels[cid]["members"]:
                             if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
                                 self.chat.add_manual_peer(m)
                         continue
@@ -2221,9 +3026,31 @@ class ChatWindow(QWidget):
                         if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
                 data = {"ip": key,
                         "group": {"name": group.get("name", "Group"),
-                                  "members": group.get("members", [])},
+                                  "members": group.get("members", []),
+                                  "admins": group.get("admins", [])},
                         "messages": kept[-_MAX_HISTORY:]}
                 with open(os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json"),
+                          "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except Exception:
+                pass
+        threading.Thread(target=write, daemon=True).start()
+
+    def _save_channel(self, cid) -> None:
+        key = f"channel:{cid}"
+        msgs = list(self._conversations.get(key, []))
+        channel = dict(self._channels.get(cid, {}))
+
+        def write():
+            try:
+                kept = [m for m in msgs
+                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
+                data = {"ip": key,
+                        "channel": {"name": channel.get("name", "Channel"),
+                                    "members": channel.get("members", []),
+                                    "admins": channel.get("admins", [])},
+                        "messages": kept[-_MAX_HISTORY:]}
+                with open(os.path.join(config.get_peer_chat_dir(), f"channel_{cid}.json"),
                           "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
             except Exception:

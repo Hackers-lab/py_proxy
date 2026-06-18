@@ -45,6 +45,29 @@ def chat_icon() -> QIcon:
     return QIcon(pm)
 
 
+def chat_icon_badged(count: int) -> QIcon:
+    """The chat tray icon with a red unread-count badge in the corner."""
+    pm = QPixmap(64, 64)
+    pm.fill(Qt.GlobalColor.transparent)
+    pr = QPainter(pm)
+    pr.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pr.setPen(Qt.PenStyle.NoPen)
+    pr.setBrush(QColor("#10b981"))
+    pr.drawRoundedRect(QRectF(4, 4, 56, 44), 12, 12)
+    for cx in (22, 32, 42):
+        pr.setBrush(QColor(255, 255, 255, 230))
+        pr.drawEllipse(QRectF(cx - 3, 22, 6, 6))
+    if count > 0:
+        label = "99+" if count > 99 else str(count)
+        pr.setBrush(QColor("#ef4444"))
+        pr.drawEllipse(QRectF(34, 0, 30, 30))
+        pr.setPen(QColor("#ffffff"))
+        pr.setFont(QFont("Segoe UI", 12 if len(label) < 3 else 9, QFont.Weight.Bold))
+        pr.drawText(QRectF(34, 0, 30, 30), Qt.AlignmentFlag.AlignCenter, label)
+    pr.end()
+    return QIcon(pm)
+
+
 def speed_icon(up: str, down: str) -> QIcon:
     pm = QPixmap(32, 32)
     pm.fill(Qt.GlobalColor.transparent)
@@ -81,7 +104,9 @@ class TrayManager:
             lambda r: on_open_proxy() if r == QSystemTrayIcon.ActivationReason.Trigger else None)
         self._proxy_menu = pm
 
-        self.chat = QSystemTrayIcon(chat_icon())
+        self._chat_icon = chat_icon()
+        self._chat_unread = 0
+        self.chat = QSystemTrayIcon(self._chat_icon)
         self.chat.setToolTip("LAN Chat")
         cm = QMenu()
         act_c = QAction("Open Chat", cm)
@@ -111,6 +136,16 @@ class TrayManager:
     def set_idle(self) -> None:
         self.proxy.setIcon(self._app_icon)
         self.proxy.setToolTip("Net Split-Tunneler  Proxy")
+
+    def set_chat_unread(self, count: int) -> None:
+        """Show the total unread message count as a badge on the chat tray icon."""
+        count = max(0, int(count))
+        if count == self._chat_unread:
+            return
+        self._chat_unread = count
+        self.chat.setIcon(chat_icon_badged(count) if count else self._chat_icon)
+        self.chat.setToolTip(
+            f"LAN Chat — {count} unread" if count else "LAN Chat")
 
     def notify(self, title: str, body: str) -> None:
         try:

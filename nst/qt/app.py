@@ -46,10 +46,14 @@ def run() -> None:
         on_chat_request=lambda ip, name, msg: sig.chat_request.emit(ip, name, msg),
         on_group_message=lambda group, ip, name, text, ts, reply, mid:
             sig.group_message.emit(group, ip, name, text, ts, reply, mid),
+        on_channel_message=lambda channel, ip, name, text, ts, reply, mid:
+            sig.channel_message.emit(channel, ip, name, text, ts, reply, mid),
         on_receipt=lambda ip, mid, state: sig.receipt.emit(ip, mid, state),
         on_delete=lambda ip, mid: sig.deleted.emit(ip, mid),
         on_typing=lambda ip, name, gid, typing: sig.typing.emit(ip, name, gid, typing),
         on_reaction=lambda ip, mid, emoji: sig.reaction.emit(ip, mid, emoji),
+        on_queue_flush=lambda ip, mids: sig.queue_flush.emit(ip, mids),
+        on_group_kick=lambda ip, gid: sig.group_kick.emit(ip, gid),
     )
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
     chat.my_status = config.load_my_status()
@@ -66,10 +70,13 @@ def run() -> None:
     sig.file_reject.connect(chat_window.on_file_rejected)
     sig.chat_request.connect(chat_window.on_chat_request_received)
     sig.group_message.connect(chat_window.on_group_message)
+    sig.channel_message.connect(chat_window.on_channel_message)
     sig.receipt.connect(chat_window.on_receipt)
     sig.deleted.connect(chat_window.on_remote_delete)
     sig.typing.connect(chat_window.on_typing)
     sig.reaction.connect(chat_window.on_reaction)
+    sig.queue_flush.connect(chat_window.on_queue_flush)
+    sig.group_kick.connect(chat_window.on_group_kicked)
 
     chat_window.activity.connect(chat_window.open)
     toasts.clicked.connect(chat_window.open)
@@ -104,6 +111,7 @@ def run() -> None:
     overlay = SpeedOverlay()
     main.set_tray(tray)
     main.set_overlay(overlay)
+    chat_window.unread_total.connect(tray.set_chat_unread)
     tray.show()
 
     chat.start()

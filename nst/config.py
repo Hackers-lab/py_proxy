@@ -4,6 +4,7 @@ Autostart lives under the standard ``...\\CurrentVersion\\Run`` key; everything
 else lives under ``HKCU\\Software\\NetSplitTunnel``.
 """
 
+import json
 import os
 import socket
 import sys
@@ -77,6 +78,24 @@ def _write_value(name: str, regtype: int, value) -> bool:
         winreg.SetValueEx(key, name, 0, regtype, value)
         winreg.CloseKey(key)
         return True
+    except Exception:
+        return False
+
+
+def _read_json(name: str, default):
+    """Read a JSON-encoded value from the app key, falling back to *default*."""
+    raw = _read_value(name, None)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def _write_json(name: str, value) -> bool:
+    try:
+        return _write_value(name, winreg.REG_SZ, json.dumps(value))
     except Exception:
         return False
 
@@ -209,5 +228,177 @@ def get_peer_chat_dir() -> str:
     folder = os.path.join(appdata, "NetSplitTunnel", "chats")
     os.makedirs(folder, exist_ok=True)
     return folder
+
+
+# ── Storage & retention (update.md #17) ───────────────────────────────────────
+
+# Allowed retention windows in days; 0 means "Forever".
+RETENTION_CHOICES = (7, 30, 90, 180, 0)
+
+
+def load_retention_days() -> int:
+    """Days of chat history to keep (0 = forever). Defaults to forever."""
+    try:
+        val = int(_read_value("RetentionDays", 0))
+    except (TypeError, ValueError):
+        val = 0
+    return val if val in RETENTION_CHOICES else 0
+
+
+def save_retention_days(days: int) -> bool:
+    days = days if days in RETENTION_CHOICES else 0
+    return _write_value("RetentionDays", winreg.REG_DWORD, days)
+
+
+def default_download_dir() -> str:
+    """The built-in download/save folder (Documents\\NetSplitter)."""
+    return os.path.join(os.path.expanduser("~"), "Documents", "NetSplitter")
+
+
+def load_download_dir() -> str:
+    """Folder received files are saved to (configurable)."""
+    val = str(_read_value("DownloadDir", "")).strip()
+    folder = val or default_download_dir()
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        folder = default_download_dir()
+        os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def save_download_dir(path: str) -> bool:
+    path = (path or "").strip()
+    return _write_value("DownloadDir", winreg.REG_SZ, path)
+
+
+def load_max_file_mb() -> int:
+    """Maximum allowed file-transfer size in MB (0 = unlimited)."""
+    try:
+        return max(0, int(_read_value("MaxFileMB", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def save_max_file_mb(mb: int) -> bool:
+    return _write_value("MaxFileMB", winreg.REG_DWORD, max(0, int(mb)))
+
+
+def load_file_expiry_min() -> int:
+    """Minutes a sender keeps an unanswered file offer alive (default 1)."""
+    try:
+        return max(1, int(_read_value("FileExpiryMin", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def save_file_expiry_min(minutes: int) -> bool:
+    return _write_value("FileExpiryMin", winreg.REG_DWORD, max(1, int(minutes)))
+
+# ── General behaviour ──────────────────────────────────────────────────────────
+
+def load_minimize_to_tray() -> bool:
+    """Minimise to the system tray when a window is closed (default on)."""
+    return bool(_read_value("MinimizeToTray", 1))
+
+
+def save_minimize_to_tray(enabled: bool) -> bool:
+    return _write_value("MinimizeToTray", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_restore_session() -> bool:
+    """Re-open the last conversation when chat starts (default on)."""
+    return bool(_read_value("RestoreSession", 1))
+
+
+def save_restore_session(enabled: bool) -> bool:
+    return _write_value("RestoreSession", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_last_active_chat() -> str:
+    return str(_read_value("LastActiveChat", "")).strip()
+
+
+def save_last_active_chat(key: str) -> bool:
+    return _write_value("LastActiveChat", winreg.REG_SZ, str(key or ""))
+
+# ── Notification preferences (update.md #16, settings module) ──────────────────
+
+# Notification "channels" that can be toggled per conversation scope.
+NOTIFY_CHANNELS = ("sound", "popup", "taskbar", "tray")
+# Conversation scopes that carry independent notification settings.
+NOTIFY_SCOPES = ("private", "group", "broadcast")
+
+
+def _default_notify_prefs() -> dict:
+    return {scope: {ch: True for ch in NOTIFY_CHANNELS} for scope in NOTIFY_SCOPES}
+
+
+def load_notify_prefs() -> dict:
+    """Per-scope notification channel toggles. Missing keys default to on."""
+    prefs = _default_notify_prefs()
+    saved = _read_json("NotifyPrefs", {})
+    if isinstance(saved, dict):
+        for scope in NOTIFY_SCOPES:
+            sd = saved.get(scope)
+            if isinstance(sd, dict):
+                for ch in NOTIFY_CHANNELS:
+                    if ch in sd:
+                        prefs[scope][ch] = bool(sd[ch])
+    return prefs
+
+
+def save_notify_prefs(prefs: dict) -> bool:
+    return _write_json("NotifyPrefs", prefs)
+
+
+def load_sound_volume() -> int:
+    """Notification sound volume, 0–100 (default 80)."""
+    try:
+        return max(0, min(100, int(_read_value("SoundVolume", 80))))
+    except (TypeError, ValueError):
+        return 80
+
+
+def save_sound_volume(vol: int) -> bool:
+    return _write_value("SoundVolume", winreg.REG_DWORD, max(0, min(100, int(vol))))
+
+
+def load_mute_all() -> bool:
+    return bool(_read_value("MuteAll", 0))
+
+
+def save_mute_all(enabled: bool) -> bool:
+    return _write_value("MuteAll", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_do_not_disturb() -> bool:
+    return bool(_read_value("DoNotDisturb", 0))
+
+
+def save_do_not_disturb(enabled: bool) -> bool:
+    return _write_value("DoNotDisturb", winreg.REG_DWORD, 1 if enabled else 0)
+
+# ── Blocked users (update.md #12) ──────────────────────────────────────────────
+
+def load_blocked_users() -> list[dict]:
+    """Return ``[{"ip": .., "name": ..}, …]`` of permanently blocked users."""
+    val = _read_json("BlockedUsers", [])
+    out = []
+    if isinstance(val, list):
+        for item in val:
+            if isinstance(item, dict) and item.get("ip"):
+                out.append({"ip": str(item["ip"]), "name": str(item.get("name", item["ip"]))})
+    return out
+
+
+def save_blocked_users(users: list[dict]) -> bool:
+    clean, seen = [], set()
+    for u in users:
+        ip = str(u.get("ip", "")).strip()
+        if ip and ip not in seen:
+            seen.add(ip)
+            clean.append({"ip": ip, "name": str(u.get("name", ip))})
+    return _write_json("BlockedUsers", clean)
 
 
