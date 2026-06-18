@@ -141,6 +141,7 @@ if(!clientId){
 var savedName=localStorage.getItem('nst_name')||'';
 if(savedName){
   document.getElementById('ni').value=savedName;
+  join();
 }
 function st(t){document.getElementById('st').textContent=t;}
 function join(){
@@ -179,6 +180,16 @@ function join(){
       addSys(m.text);
     }else if(m.type==='file_offer'){
       addFileOffer(m.transfer_id, m.filename, m.size);
+    }else if(m.type==='file_cancel'){
+      var el = document.getElementById('offer_'+m.transfer_id);
+      if(el) {
+          el.innerHTML = '📎 <strong>' + el.getAttribute('data-filename') + '</strong><br><br><span style="color:#ef4444">Cancelled by desktop</span>';
+      }
+    }else if(m.type==='file_accept'){
+      var file = (window.pendingUploads||{})[m.transfer_id];
+      if(file) doUpload(file, m.transfer_id);
+    }else if(m.type==='file_reject'){
+      addSys('Desktop rejected ' + ((window.pendingUploads||{})[m.transfer_id]||{}).name);
     }
   };
   ws.onclose=function(){
@@ -219,6 +230,8 @@ function addFileOffer(tid, filename, size) {
   n.textContent = 'File Offer';
   d.appendChild(n);
   var t = document.createElement('div');
+  t.id = 'offer_' + tid;
+  t.setAttribute('data-filename', filename);
   t.innerHTML = '📎 <strong>' + filename + '</strong> (' + formatSize(size) + ')<br><br>' +
     '<a href="/download?tid=' + tid + '&sid=' + clientId + '" target="_blank" style="display:inline-block;background:#3b82f6;color:#fff;text-decoration:none;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:700">Download</a>';
   d.appendChild(t);
@@ -229,11 +242,20 @@ function uploadFile() {
   var fi = document.getElementById('fi');
   if (!fi.files || fi.files.length === 0) return;
   var file = fi.files[0];
+  var tid = 'tid_' + Math.random().toString(36).substring(2,15);
+  window.pendingUploads = window.pendingUploads || {};
+  window.pendingUploads[tid] = file;
+  if(ws && ws.readyState===1) {
+    ws.send(JSON.stringify({type:'file_offer', transfer_id:tid, filename:file.name, size:file.size}));
+    addSys('Offered ' + file.name + ' to desktop...');
+  }
+}
+function doUpload(file, tid) {
   var fd = new FormData();
   fd.append('file', file);
   var statusMsg = addSys('Uploading ' + file.name + ' (0%)');
   var xhr = new XMLHttpRequest();
-  xhr.open('POST', '/upload?sid=' + clientId, true);
+  xhr.open('POST', '/upload?sid=' + clientId + '&tid=' + tid, true);
   xhr.upload.onprogress = function(e) {
     if (e.lengthComputable) {
       var pct = Math.round((e.loaded / e.total) * 100);
@@ -286,11 +308,14 @@ class MobileServer:
 
     def __init__(self, port: int = 8765,
                  on_join=None, on_leave=None, on_message=None,
+                 on_file_offer=None, on_file_progress=None,
                  on_file=None, on_file_downloaded=None) -> None:
         self._port = port
         self._on_join = on_join
         self._on_leave = on_leave
         self._on_message = on_message
+        self._on_file_offer = on_file_offer
+        self._on_file_progress = on_file_progress
         self._on_file = on_file
         self._on_file_downloaded = on_file_downloaded
 
@@ -376,6 +401,7 @@ class MobileServer:
 
     async def _http_upload(self, request):
         sid = request.query.get("sid")
+        tid = request.query.get("tid", "")
         with self._lock:
             session = self._sessions.get(sid)
         if not session or session.state != "approved":
@@ -405,9 +431,14 @@ class MobileServer:
                     break
                 f.write(chunk)
                 size += len(chunk)
+                if self._on_file_progress:
+                    try:
+                        self._on_file_progress(session, tid, size)
+                    except Exception:
+                        pass
         if self._on_file:
             try:
-                self._on_file(session, filename, str(path), size)
+                self._on_file(session, tid, filename, str(path), size)
             except Exception:
                 pass
         return _aio_web.Response(text="OK")
@@ -444,7 +475,8 @@ class MobileServer:
                     break
         finally:
             with self._lock:
-                self._sessions.pop(session.sid, None)
+                if self._sessions.get(session.sid) is session:
+                    self._sessions.pop(session.sid, None)
             if self._on_leave:
                 try:
                     self._on_leave(session)
@@ -479,6 +511,12 @@ class MobileServer:
             text = str(msg.get("text", "")).strip()
             if text and self._on_message:
                 self._on_message(session, text)
+        elif mtype == "file_offer" and session.state == "approved":
+            tid = msg.get("transfer_id")
+            filename = msg.get("filename")
+            size = msg.get("size")
+            if tid and filename and self._on_file_offer:
+                self._on_file_offer(session, tid, filename, size)
 
     # ── control (safe to call from any thread) ────────────────────────────────
 
@@ -513,6 +551,25 @@ class MobileServer:
         session.state = "blocked"
         self._blocked_ips.add(session.ip)
         self._send_nowait(session, {"type": "blocked"})
+
+    def accept_file(self, sid: str, tid: str) -> None:
+        with self._lock:
+            session = self._sessions.get(sid)
+        if session and session.state == "approved":
+            self._send_nowait(session, {"type": "file_accept", "transfer_id": tid})
+
+    def reject_file(self, sid: str, tid: str) -> None:
+        with self._lock:
+            session = self._sessions.get(sid)
+        if session and session.state == "approved":
+            self._send_nowait(session, {"type": "file_reject", "transfer_id": tid})
+
+    def cancel_file_offer(self, sid: str, tid: str) -> None:
+        with self._lock:
+            self._pending_files.pop(tid, None)
+            session = self._sessions.get(sid)
+        if session and session.state == "approved":
+            self._send_nowait(session, {"type": "file_cancel", "transfer_id": tid})
 
     def unblock_ip(self, ip: str) -> None:
         self._blocked_ips.discard(ip)

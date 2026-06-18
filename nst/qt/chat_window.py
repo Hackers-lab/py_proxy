@@ -1083,6 +1083,8 @@ class ChatWindow(QWidget):
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
             if self._notifications_enabled:
+                self.activity.emit(ip)
+            else:
                 prev = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(name, prev, ip)
 
@@ -1113,6 +1115,8 @@ class ChatWindow(QWidget):
             self._unread[key] = self._unread.get(key, 0) + 1
             self.update_roster(self.chat.peers())
             if self._notifications_enabled:
+                self.activity.emit(key)
+            else:
                 prev = text if len(text) <= 100 else text[:97] + "…"
                 self._toasts.notify(f"{g['name']} (group)", f"{name}: {prev}", key)
 
@@ -1511,23 +1515,29 @@ class ChatWindow(QWidget):
             self._unread[key] = self._unread.get(key, 0) + 1
             self.update_roster(self.chat.peers())
             if self._notifications_enabled:
+                self.activity.emit(key)
+            else:
                 prev = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(f"{session.name} 📱", prev, key)
 
-    def on_mobile_file(self, session, filename: str, save_path: str, size: int) -> None:
-        """Approved mobile user uploaded a file."""
+    def on_mobile_file(self, session, tid: str, filename: str, save_path: str, size: int) -> None:
         key = f"mobile:{session.sid}"
-        tid = uuid.uuid4().hex[:12]
         self._transfer_paths[tid] = save_path
-        self._progress_text[tid] = "Saved!"
-        self._add_file_entry(key, "file_in_offer", tid, filename, size, from_ip=session.ip)
-        self._offer_states[tid] = "accepted"
+        self._set_progress(tid, "Saved!")
         self._rerender_if_active(key)
-        if key != self._active or not self._visible:
-            self._unread[key] = self._unread.get(key, 0) + 1
-            self.update_roster(self.chat.peers())
+
+    def on_mobile_file_offer(self, session, tid: str, filename: str, size: int) -> None:
+        key = f"mobile:{session.sid}"
+        self._offer_states[tid] = "pending"
+        self._add_file_entry(key, "file_in_offer", tid, filename, size, from_ip=session.ip)
+        if not (key == self._active and self._visible):
             if self._notifications_enabled:
-                self._toasts.notify(f"{session.name} 📱", f"📎 Sent a file: {filename}", key)
+                self.activity.emit(key)
+            else:
+                self._toasts.notify(f"{session.name} 📱", f"📎 Wants to send: {filename}", key)
+
+    def on_mobile_file_progress(self, session, tid: str, received: int) -> None:
+        self._set_progress(tid, f"Receiving... {_fmt_size(received)}")
 
     def on_mobile_download(self, sid: str, tid: str) -> None:
         """Mobile user started/finished downloading a file offered by desktop."""
@@ -2124,8 +2134,8 @@ class ChatWindow(QWidget):
 
         tid = uuid.uuid4().hex[:12]
         if self._is_mobile(ip):
-            self._transfer_paths[tid] = path
-            self._progress_text[tid] = "Serving to mobile..."
+            self._transfer_paths[tid] = None
+            self._progress_text[tid] = "Waiting for mobile to download..."
         else:
             self._transfer_paths[tid] = None
             self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
@@ -2205,8 +2215,11 @@ class ChatWindow(QWidget):
         self._names[ip] = name
         self._offer_states[tid] = "pending"
         self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
-        if not (ip == self._active and self._visible) and self._notifications_enabled:
-            self._toasts.notify(name, f"📎 Wants to send: {msg['filename']}", ip)
+        if not (ip == self._active and self._visible):
+            if self._notifications_enabled:
+                self.activity.emit(ip)
+            else:
+                self._toasts.notify(name, f"📎 Wants to send: {msg['filename']}", ip)
 
     def _accept_file(self, tid, from_ip, filename, size) -> None:
         from_ip = from_ip or self._active
@@ -2216,6 +2229,11 @@ class ChatWindow(QWidget):
         self._transfer_paths[tid] = None
         self._set_progress(tid, "Connecting…")
         self._rerender_if_active(from_ip)
+
+        if self._is_mobile(from_ip) and self._mobile:
+            sid = from_ip[7:]
+            self._mobile.accept_file(sid, tid)
+            return
 
         def progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
@@ -2251,10 +2269,20 @@ class ChatWindow(QWidget):
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Rejected")
         self._rerender_if_active(from_ip)
+        
+        if self._is_mobile(from_ip) and self._mobile:
+            sid = from_ip[7:]
+            self._mobile.reject_file(sid, tid)
+            return
+
         threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
 
     def _cancel_file(self, tid) -> None:
         self._ft.cancel_transfer(tid)
+        ip = self._active
+        if ip and self._is_mobile(ip) and self._mobile:
+            sid = ip[7:]
+            self._mobile.cancel_file_offer(sid, tid)
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Cancelled")
         if self._active:
@@ -2321,6 +2349,8 @@ class ChatWindow(QWidget):
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
         if self._notifications_enabled:
+            self.activity.emit(ip)
+        else:
             self._toasts.notify(name, "Wants to chat — tap to respond", ip)
 
     def _accept_chat(self, ip) -> None:

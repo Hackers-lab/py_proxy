@@ -61,7 +61,9 @@ def run() -> None:
         on_join=lambda s: sig.mobile_join.emit(s),
         on_leave=lambda s: sig.mobile_leave.emit(s),
         on_message=lambda s, t: sig.mobile_message.emit(s, t),
-        on_file=lambda s, fn, p, sz: sig.mobile_file.emit(s, fn, p, sz),
+        on_file_offer=lambda s, tid, fn, sz: sig.mobile_file_offer.emit(s, tid, fn, sz),
+        on_file_progress=lambda s, tid, recv: sig.mobile_file_progress.emit(s, tid, recv),
+        on_file=lambda s, tid, fn, p, sz: sig.mobile_file.emit(s, tid, fn, p, sz),
         on_file_downloaded=lambda sid, tid: sig.mobile_download.emit(sid, tid),
     )
     if config.load_mobile_enabled():
@@ -87,6 +89,8 @@ def run() -> None:
     sig.mobile_join.connect(chat_window.on_mobile_join)
     sig.mobile_leave.connect(chat_window.on_mobile_leave)
     sig.mobile_message.connect(chat_window.on_mobile_message)
+    sig.mobile_file_offer.connect(chat_window.on_mobile_file_offer)
+    sig.mobile_file_progress.connect(chat_window.on_mobile_file_progress)
     sig.mobile_file.connect(chat_window.on_mobile_file)
     sig.mobile_download.connect(chat_window.on_mobile_download)
 
