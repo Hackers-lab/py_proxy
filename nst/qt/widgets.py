@@ -32,7 +32,17 @@ def avatar_pixmap(name: str, size: int = 36) -> QPixmap:
     return pm
 
 
-def dot_pixmap(online: bool, size: int = 10) -> QPixmap:
+_DOT_COLORS = {"online": "#22c55e", "away": "#f59e0b",
+               "offline": "#94a3b8", "invisible": "#94a3b8"}
+
+
+def _dot_color(status) -> str:
+    if isinstance(status, bool):
+        status = "online" if status else "offline"
+    return _DOT_COLORS.get(status, "#94a3b8")
+
+
+def dot_pixmap(status, size: int = 10) -> QPixmap:
     dpr = 2
     pm = QPixmap(size * dpr, size * dpr)
     pm.setDevicePixelRatio(dpr)
@@ -40,7 +50,7 @@ def dot_pixmap(online: bool, size: int = 10) -> QPixmap:
     pr = QPainter(pm)
     pr.setRenderHint(QPainter.RenderHint.Antialiasing)
     pr.setPen(Qt.PenStyle.NoPen)
-    pr.setBrush(QBrush(QColor("#22c55e" if online else "#ef4444")))
+    pr.setBrush(QBrush(QColor(_dot_color(status))))
     pr.drawEllipse(QRectF(1, 1, size - 2, size - 2))
     pr.end()
     return pm
@@ -58,14 +68,19 @@ class Avatar(QLabel):
 
 
 class Dot(QLabel):
-    def __init__(self, online: bool = False, size: int = 10, parent=None) -> None:
+    def __init__(self, status=False, size: int = 10, parent=None) -> None:
         super().__init__(parent)
         self._size = size
         self.setFixedSize(size, size)
-        self.set_online(online)
+        self.set_status(status)
 
+    def set_status(self, status) -> None:
+        """Accepts 'online'/'away'/'offline'/'invisible' or a bool."""
+        self.setPixmap(dot_pixmap(status, self._size))
+
+    # Backwards-compatible alias.
     def set_online(self, online: bool) -> None:
-        self.setPixmap(dot_pixmap(online, self._size))
+        self.set_status(online)
 
 
 def hline() -> QFrame:

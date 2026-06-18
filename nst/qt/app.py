@@ -38,13 +38,17 @@ def run() -> None:
     chat = ChatService(
         config.load_display_name(),
         on_roster_change=lambda peers: sig.roster_changed.emit(peers),
-        on_message=lambda ip, name, text, ts, reply: sig.message.emit(ip, name, text, ts, reply),
+        on_message=lambda ip, name, text, ts, reply, mid:
+            sig.message.emit(ip, name, text, ts, reply, mid),
         on_file_offer=lambda ip, name, msg: sig.file_offer.emit(ip, name, msg),
         on_file_accept=lambda ip, name, msg: sig.file_accept.emit(ip, name, msg),
         on_file_reject=lambda ip, name, msg: sig.file_reject.emit(ip, name, msg),
         on_chat_request=lambda ip, name, msg: sig.chat_request.emit(ip, name, msg),
-        on_group_message=lambda group, ip, name, text, ts, reply:
-            sig.group_message.emit(group, ip, name, text, ts, reply),
+        on_group_message=lambda group, ip, name, text, ts, reply, mid:
+            sig.group_message.emit(group, ip, name, text, ts, reply, mid),
+        on_receipt=lambda ip, mid, state: sig.receipt.emit(ip, mid, state),
+        on_delete=lambda ip, mid: sig.deleted.emit(ip, mid),
+        on_typing=lambda ip, name, gid, typing: sig.typing.emit(ip, name, gid, typing),
     )
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
     chat.presence_online = config.load_presence_online()
@@ -61,6 +65,9 @@ def run() -> None:
     sig.file_reject.connect(chat_window.on_file_rejected)
     sig.chat_request.connect(chat_window.on_chat_request_received)
     sig.group_message.connect(chat_window.on_group_message)
+    sig.receipt.connect(chat_window.on_receipt)
+    sig.deleted.connect(chat_window.on_remote_delete)
+    sig.typing.connect(chat_window.on_typing)
     chat_window.activity.connect(chat_window.open)
     toasts.clicked.connect(chat_window.open)
 

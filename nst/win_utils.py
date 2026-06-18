@@ -70,6 +70,42 @@ def elevate() -> None:
     sys.exit(0)
 
 
+def get_idle_seconds() -> float:
+    """Seconds since the last system-wide keyboard/mouse input.
+
+    Used to flip presence to *away* automatically when the user is idle.
+    Returns 0.0 if the query fails (treated as active).
+    """
+    try:
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            tick = ctypes.windll.kernel32.GetTickCount()
+            return max(0.0, (tick - info.dwTime) / 1000.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def flash_taskbar(hwnd, count: int = 3) -> None:
+    """Flash a window's taskbar button to draw attention (FlashWindowEx)."""
+    try:
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
+                        ("dwFlags", ctypes.c_uint), ("uCount", ctypes.c_uint),
+                        ("dwTimeout", ctypes.c_uint)]
+
+        FLASHW_ALL, FLASHW_TIMERNOFG = 0x3, 0xC
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), int(hwnd),
+                          FLASHW_ALL | FLASHW_TIMERNOFG, count, 0)
+        ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+
+
 def set_app_user_model_id(appid: str = "hackerslab.netsplittunnel.v4") -> None:
     """Set the AppUserModelID so the taskbar uses the bundled icon."""
     try:

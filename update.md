@@ -433,3 +433,122 @@ The application must remain:
 * Responsive with many users and groups
 
 The chat experience should feel modern, similar to WhatsApp/Teams, while preserving a lightweight LAN-first decentralized architecture.
+
+## Settings Module Requirements
+
+Add a dedicated **Settings** icon/button in the main chat interface. The settings window should be lightweight, modern, and organized into categories.
+
+### General Settings
+
+* Change Display Name.
+* Enable/Disable Invisible Mode.
+* Start application with Windows.
+* Minimize to system tray when closed.
+* Restore previous session on startup.
+
+### Notification Settings
+
+#### Global Controls
+
+* Enable/Disable all notifications.
+* Mute all notifications.
+* Do Not Disturb mode.
+* Configure notification sound volume.
+
+#### Private Chat Notifications
+
+Users can independently enable or disable:
+
+* Sound notifications.
+* Desktop popup notifications.
+* Windows toast notifications.
+* Taskbar flashing.
+* System tray unread badge/count.
+
+#### Group Chat Notifications
+
+Users can independently enable or disable:
+
+* Sound notifications.
+* Desktop popup notifications.
+* Windows toast notifications.
+* Taskbar flashing.
+* System tray unread badge/count.
+
+#### Broadcast Channel Notifications
+
+Users can independently enable or disable:
+
+* Sound notifications.
+* Desktop popup notifications.
+* Windows toast notifications.
+* Taskbar flashing.
+* System tray unread badge/count.
+
+### Storage Settings
+
+* Configure message retention period:
+
+  * 7 Days
+  * 30 Days
+  * 90 Days
+  * 180 Days
+  * Forever
+* Clear local chat history.
+* Configure file download location.
+* Configure maximum allowed file transfer size.
+* Display storage usage statistics.
+
+### Network Settings
+
+* Display all detected network interfaces.
+* Display LAN IP addresses.
+* Display Wi-Fi IP addresses.
+* Display listening port.
+* Show network connection status.
+* Generate and display QR code for mobile access.
+* Refresh network information without restarting application.
+
+### Mobile Access Settings
+
+* Enable/Disable mobile web access.
+* Show all connected mobile sessions.
+* Display:
+
+  * Display Name
+  * Device Name
+  * IP Address
+  * Connection Time
+* Disconnect selected mobile sessions.
+* View pending approval requests.
+* View blocked mobile devices.
+
+### Privacy & User Management
+
+* View blocked users.
+* Unblock users.
+* Manage pending mobile approval requests.
+* View recent connection attempts.
+* Session management controls.
+
+### File Transfer Settings
+
+* Configure default download folder.
+* Configure maximum file size allowed for transfer.
+* Configure temporary file expiry duration.
+* Configure transfer limits and behavior.
+
+### About Section
+
+* Application version.
+* Build information.
+* Update information.
+* Diagnostics information.
+* Network troubleshooting details.
+
+### Requirements
+
+* All settings must be stored locally.
+* Settings must persist across restarts.
+* Settings changes should take effect immediately where possible.
+* The settings UI should remain lightweight, responsive, and consistent with the overall LAN Chat design.

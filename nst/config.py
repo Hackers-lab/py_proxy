@@ -7,6 +7,7 @@ else lives under ``HKCU\\Software\\NetSplitTunnel``.
 import os
 import socket
 import sys
+import uuid
 import winreg
 
 from .constants import REG_APP_PATH, REG_RUN_PATH, RUN_VALUE_NAME
@@ -114,6 +115,25 @@ def save_display_name(name: str) -> bool:
     if not name:
         return False
     return _write_value("DisplayName", winreg.REG_SZ, name)
+
+# ── Device identity (internal unique ID + device name) ─────────────────────────
+
+def load_device_id() -> str:
+    """Return this install's stable internal unique ID, generating it once.
+
+    Identity for routing stays IP-based (see update.md #4); this UID is an
+    informational stable handle that survives IP changes and restarts.
+    """
+    val = str(_read_value("DeviceId", "")).strip()
+    if not val:
+        val = uuid.uuid4().hex
+        _write_value("DeviceId", winreg.REG_SZ, val)
+    return val
+
+
+def get_device_name() -> str:
+    """The computer/device name shown alongside the display name."""
+    return socket.gethostname() or "PC"
 
 # ── IP chat toggle ───────────────────────────────────────────────────────────
 

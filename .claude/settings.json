@@ -8,7 +8,13 @@
       "Bash(python -m PyInstaller NetSplitTunnel.spec --noconfirm)",
       "Bash(git check-ignore *)",
       "Bash(python -m py_compile nst/netinfo.py nst/qt/chat_window.py nst/qt/tray.py nst/qt/main_window.py)",
-      "Bash(python -m py_compile nst/qt/chat_window.py nst/qt/tray.py nst/qt/main_window.py nst/netinfo.py)"
+      "Bash(python -m py_compile nst/qt/chat_window.py nst/qt/tray.py nst/qt/main_window.py nst/netinfo.py)",
+      "Bash(python -m py_compile nst/constants.py nst/config.py nst/win_utils.py nst/chat.py nst/netinfo.py nst/qt/widgets.py nst/qt/chat_window.py)",
+      "Bash(python -c \"import nst.chat, nst.netinfo, nst.config, nst.win_utils; print\\('imports OK'\\); print\\('private 192.168.1.5 ->', nst.netinfo.is_private_ipv4\\('192.168.1.5'\\)\\); print\\('private 8.8.8.8 ->', nst.netinfo.is_private_ipv4\\('8.8.8.8'\\)\\); print\\('private 172.20.0.1 ->', nst.netinfo.is_private_ipv4\\('172.20.0.1'\\)\\); print\\('local ips:', nst.netinfo.get_all_local_ips\\(\\)\\); print\\('broadcasts:', nst.netinfo.get_subnet_broadcasts\\(\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile nst/chat.py nst/qt/signals.py nst/qt/app.py nst/qt/chat_window.py nst/qt/widgets.py)",
+      "Bash(python -c \"import nst.chat, nst.qt.signals; from nst.qt import chat_window; print\\('logic imports OK'\\)\")",
+      "Bash(QT_QPA_PLATFORM=offscreen python -c ' *)"
     ]
   }
 }

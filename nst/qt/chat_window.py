@@ -56,6 +56,69 @@ def _fmt_eta(secs: float) -> str:
     return f"{s}s" if s < 60 else f"{s // 60}m {s % 60}s"
 
 
+def _fmt_last_seen(ts: float) -> str:
+    if not ts:
+        return "offline"
+    d = time.time() - ts
+    if d < 60:
+        return "last seen just now"
+    if d < 3600:
+        return f"last seen {int(d // 60)}m ago"
+    if d < 86400:
+        return f"last seen {int(d // 3600)}h ago"
+    if d < 7 * 86400:
+        return f"last seen {int(d // 86400)}d ago"
+    return "last seen " + time.strftime("%b %d", time.localtime(ts))
+
+
+_DELETE_WINDOW = 180   # seconds you may still "delete for everyone"
+
+
+def _mk_id() -> str:
+    return uuid.uuid4().hex[:16]
+
+
+def _mk_entry(kind: str, sender: str, text: str, ts: float, *,
+              mid: str = "", reply: dict | None = None,
+              status: str = "sent", fwd: bool = False, **extra) -> dict:
+    """Build a canonical message entry dict.
+
+    kind: out | in | sys | file_out | file_in_offer | chat_req
+    """
+    e: dict = {"kind": kind, "mid": mid or _mk_id(),
+               "sender": sender, "text": text, "ts": float(ts)}
+    if reply:
+        e["reply"] = reply
+    if kind == "out":
+        e["status"] = status
+    if fwd:
+        e["fwd"] = True
+    e.update(extra)
+    return e
+
+
+def _migrate_entry(item) -> dict:
+    """Coerce a stored item (new dict, or legacy tuple/list) into an entry dict.
+
+    Legacy outgoing messages are marked already-'read' so they don't show stale
+    single ticks after upgrading (see update.md migration decision)."""
+    if isinstance(item, dict):
+        item.setdefault("mid", _mk_id())
+        return item
+    try:
+        kind = item[0]
+        ts = float(item[3]) if len(item) > 3 else time.time()
+    except (IndexError, TypeError, ValueError):
+        return _mk_entry("sys", "", "", time.time())
+    if kind in ("out", "in"):
+        reply = item[4] if len(item) > 4 and isinstance(item[4], dict) else None
+        return _mk_entry(kind, item[1], item[2], ts, reply=reply, status="read")
+    if kind == "sys":
+        return _mk_entry("sys", "", item[2], ts)
+    # file_/chat_req were never persisted; ignore quietly.
+    return _mk_entry("sys", "", "", ts)
+
+
 def _repolish(w: QWidget) -> None:
     w.style().unpolish(w)
     w.style().polish(w)
@@ -111,7 +174,7 @@ class _RosterRow(QFrame):
     clicked = pyqtSignal(str)
     deleted = pyqtSignal(str)
 
-    def __init__(self, key, title, subtitle, online, unread, is_group, deletable):
+    def __init__(self, key, title, subtitle, status, unread, is_group, deletable):
         super().__init__()
         self.key = key
         self.setObjectName("rosterRow")
@@ -136,7 +199,7 @@ class _RosterRow(QFrame):
             g.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
             sub.addWidget(g)
         else:
-            sub.addWidget(Dot(online, 9))
+            sub.addWidget(Dot(status, 9))
             s = QLabel(subtitle)
             s.setObjectName("muted")
             s.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
@@ -189,8 +252,11 @@ class ChatWindow(QWidget):
         self.resize(900, 600)
         self.setMinimumSize(720, 480)
 
-        self._conversations: dict[str, list[tuple]] = {}
+        # Each conversation is a list of message dicts (see _mk_entry). Keyed by
+        # peer IP or "group:<gid>".
+        self._conversations: dict[str, list[dict]] = {}
         self._names: dict[str, str] = {}
+        self._devices: dict[str, str] = {}
         self._aliases: dict[str, str] = {}
         self._unread: dict[str, int] = {}
         self._groups: dict[str, dict] = {}
@@ -201,6 +267,16 @@ class ChatWindow(QWidget):
         self._notifications_enabled = config.load_notifications_enabled()
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
+
+        # message-id bookkeeping (receipts, delete-for-everyone)
+        self._mid_index: dict[str, tuple[str, dict]] = {}   # mid -> (key, entry)
+        self._status_lbls: dict[str, QLabel] = {}           # mid -> tick label
+        self._read_sent: set[str] = set()                   # mids we've acked "read"
+
+        # typing indicators
+        self._typers: dict[str, dict[str, float]] = {}      # key -> {ip: expiry}
+        self._typing_last_sent = 0.0                        # throttle outgoing pings
+        self._typing_active = False
 
         # file transfer state
         self._progress_text: dict[str, str] = {}
@@ -219,6 +295,15 @@ class ChatWindow(QWidget):
         self._tick = QTimer(self)
         self._tick.timeout.connect(self._roster_tick)
         self._tick.start(3000)
+
+        # Typing: a one-shot timer that fires "stopped typing" after a pause, and
+        # a periodic sweep that expires stale remote typers.
+        self._typing_stop_timer = QTimer(self)
+        self._typing_stop_timer.setSingleShot(True)
+        self._typing_stop_timer.timeout.connect(self._stop_typing)
+        self._typing_sweep = QTimer(self)
+        self._typing_sweep.timeout.connect(self._typing_tick)
+        self._typing_sweep.start(2000)
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
@@ -272,7 +357,7 @@ class ChatWindow(QWidget):
 
         conrow = QHBoxLayout()
         self._ip_edit = QLineEdit()
-        self._ip_edit.setPlaceholderText("10.x.x.x")
+        self._ip_edit.setPlaceholderText("e.g. 192.168.1.20")
         self._ip_edit.returnPressed.connect(self._connect_manual_ip)
         conrow.addWidget(self._ip_edit, 1)
         go = QPushButton("➜")
@@ -345,6 +430,14 @@ class ChatWindow(QWidget):
         self._messages = _Scroll(autostick=True)
         r.addWidget(self._messages, 1)
 
+        # typing indicator
+        self._typing_lbl = QLabel("")
+        self._typing_lbl.setObjectName("muted")
+        self._typing_lbl.setStyleSheet("font-style:italic; font-size:11px; color:%s;"
+                                       % theme.color("text_sec"))
+        self._typing_lbl.hide()
+        r.addWidget(self._typing_lbl)
+
         # reply bar
         self._reply_bar = QFrame()
         self._reply_bar.setObjectName("replyBar")
@@ -380,6 +473,7 @@ class ChatWindow(QWidget):
         self._entry = QLineEdit()
         self._entry.setPlaceholderText(_PLACEHOLDER)
         self._entry.returnPressed.connect(self._send)
+        self._entry.textChanged.connect(self._on_typing_edit)
         comp.addWidget(self._entry, 1)
         self._btn_file = QPushButton("📎")
         self._btn_file.setFixedWidth(44)
@@ -419,8 +513,8 @@ class ChatWindow(QWidget):
         if not msgs:
             return 0.0
         try:
-            return float(msgs[-1][3])
-        except (IndexError, TypeError, ValueError):
+            return float(msgs[-1].get("ts", 0))
+        except (AttributeError, TypeError, ValueError):
             return 0.0
 
     # ── window visibility ─────────────────────────────────────────────────────
@@ -453,9 +547,11 @@ class ChatWindow(QWidget):
             # Otherwise every modal dialog (Save name, Connect by IP, New group)
             # opening/closing would tear down and re-add every row twice, which
             # flashes the peer list behind the dialog.
-            if self._visible and self._active and self._unread.get(self._active):
-                self._unread[self._active] = 0
-                self.update_roster(self.chat.peers())
+            if self._visible and self._active:
+                if self._unread.get(self._active):
+                    self._unread[self._active] = 0
+                    self.update_roster(self.chat.peers())
+                self._mark_read(self._active)
         super().changeEvent(e)
 
     # ── self identity / settings ──────────────────────────────────────────────
@@ -514,43 +610,60 @@ class ChatWindow(QWidget):
         self.update_roster(self.chat.peers())
 
     # ── roster ────────────────────────────────────────────────────────────────
-    def _is_online(self, ip: str, live: set[str]) -> bool:
+    def _status_of(self, ip: str) -> str:
+        """'online' | 'away' | 'offline' for a peer."""
         if ip == DemoBot.IP:
-            return True
-        if ip in live and not self.chat.is_manual_peer(ip):
-            return True
-        return self.chat.is_peer_online(ip)
+            return "online"
+        return self.chat.peer_status(ip)
 
-    def _online_ips(self, peers) -> list[str]:
-        live = {p.ip for p in peers}
-        cands = live | set(self._conversations) | set(self._names) | set(self._aliases)
-        cands = {c for c in cands if not self._is_group(c)}
+    def _is_online(self, ip: str) -> bool:
+        return self._status_of(ip) in ("online", "away")
+
+    def _visible_peers(self, peers) -> set[str]:
+        """Peers to list: everyone currently seen, plus anyone we have history
+        with (shown offline with a last-seen) — never groups or ourselves."""
+        cands = {p.ip for p in peers}
+        cands |= {c for c in self._conversations if not self._is_group(c)}
         cands.discard(self.chat.my_ip)
-        return [ip for ip in cands
-                if self._is_online(ip, live) or self.chat.is_manual_peer(ip)]
+        return cands
+
+    def _peer_subtitle(self, ip: str, status: str) -> str:
+        if ip == DemoBot.IP:
+            return "demo peer"
+        if status == "offline":
+            return _fmt_last_seen(self.chat.last_seen_of(ip))
+        dev = self._devices.get(ip)
+        label = f"{dev} · {ip}" if dev else ip
+        return f"away · {label}" if status == "away" else label
 
     def _matches(self, key: str) -> bool:
         if not self._peer_filter:
             return True
-        return self._peer_filter in f"{self._display_name(key)} {key}".lower()
+        hay = f"{self._display_name(key)} {key} {self._devices.get(key, '')}".lower()
+        return self._peer_filter in hay
+
+    def _status_sig(self, peers) -> frozenset:
+        return frozenset((ip, self._status_of(ip)) for ip in self._visible_peers(peers))
 
     def _roster_tick(self) -> None:
         peers = self.chat.peers()
-        if frozenset(self._online_ips(peers)) != self._last_online_sig:
+        sig = self._status_sig(peers)
+        if sig != self._last_online_sig:
             self.update_roster(peers)
 
     def update_roster(self, peers) -> None:
         for p in peers:
             self._names[p.ip] = p.name
-        online = self._online_ips(peers)
-        self._last_online_sig = frozenset(online)
-        live = {p.ip for p in peers}
+            if getattr(p, "device", ""):
+                self._devices[p.ip] = p.device
+
+        self._last_online_sig = self._status_sig(peers)
 
         self._roster.clear()
         self._rows = {}
 
         groups = [f"group:{g}" for g in self._groups if self._matches(f"group:{g}")]
-        peers_f = [ip for ip in online if self._matches(ip)]
+        peers_f = [ip for ip in self._visible_peers(peers) if self._matches(ip)]
 
         if not groups and not peers_f:
             hint = QLabel("No matches." if self._peer_filter
@@ -566,20 +679,22 @@ class ChatWindow(QWidget):
             gid = key[6:]
             n = len(self._group_meta(gid).get("members", []))
             self._add_row(key, self._display_name(key), f"{n} members",
-                          True, self._unread.get(key, 0), True, True)
-        for ip in sorted(peers_f, key=lambda x: (not self._is_online(x, live),
+                          "online", self._unread.get(key, 0), True, True)
+
+        # Online/away first, then offline; within a group, most-recent first.
+        _rank = {"online": 0, "away": 1, "offline": 2}
+        for ip in sorted(peers_f, key=lambda x: (_rank.get(self._status_of(x), 2),
                                                  -self._last_activity(x),
                                                  self._display_name(x).lower())):
-            on = self._is_online(ip, live)
-            sub = "demo peer" if ip == DemoBot.IP else ip
-            self._add_row(ip, self._display_name(ip), sub, on,
-                          self._unread.get(ip, 0), False, ip != DemoBot.IP)
+            status = self._status_of(ip)
+            self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
+                          status, self._unread.get(ip, 0), False, ip != DemoBot.IP)
 
         if self._active:
             self._update_header_sub(peers)
 
-    def _add_row(self, key, title, sub, online, unread, is_group, deletable) -> None:
-        row = _RosterRow(key, title, sub, online, unread, is_group, deletable)
+    def _add_row(self, key, title, sub, status, unread, is_group, deletable) -> None:
+        row = _RosterRow(key, title, sub, status, unread, is_group, deletable)
         row.set_active(key == self._active)
         row.clicked.connect(self.select_peer)
         row.deleted.connect(self._delete_group if is_group else self._delete_peer)
@@ -594,8 +709,13 @@ class ChatWindow(QWidget):
         elif key == DemoBot.IP:
             self._head_sub.setText("demo peer")
         else:
-            on = self._is_online(key, {p.ip for p in peers})
-            self._head_sub.setText(f"{key}  ·  {'Online' if on else 'Offline'}")
+            status = self._status_of(key)
+            dev = self._devices.get(key)
+            ident = f"{dev}  ·  {key}" if dev else key
+            if status == "offline":
+                self._head_sub.setText(f"{ident}  ·  {_fmt_last_seen(self.chat.last_seen_of(key))}")
+            else:
+                self._head_sub.setText(f"{ident}  ·  {status.capitalize()}")
 
     # ── selection ─────────────────────────────────────────────────────────────
     def select_peer(self, key: str) -> None:
@@ -614,6 +734,8 @@ class ChatWindow(QWidget):
         self._btn_file.setVisible(not is_grp)
         self._set_composer_visible(True)
         self._render(key)
+        self._refresh_typing()
+        self._mark_read(key)
         self._entry.setFocus()
         if prev != key:
             self.update_roster(self.chat.peers())
@@ -633,10 +755,33 @@ class ChatWindow(QWidget):
         w.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._messages.add(w)
 
+    # ── message store ─────────────────────────────────────────────────────────
+    def _store(self, key: str, entry: dict) -> None:
+        """Append an entry to a conversation and index it by message id."""
+        self._conversations.setdefault(key, []).append(entry)
+        if entry.get("mid"):
+            self._mid_index[entry["mid"]] = (key, entry)
+        self._trim(key)
+
+    def _persist(self, key: str) -> None:
+        if self._is_group(key):
+            self._save_group(key[6:])
+        else:
+            self._save_peer(key)
+
+    def _drop_index(self, key: str) -> None:
+        for mid in [m for m, (k, _e) in self._mid_index.items() if k == key]:
+            self._mid_index.pop(mid, None)
+
+    @staticmethod
+    def _entry_sender(entry: dict) -> str:
+        return "You" if entry.get("kind") == "out" else entry.get("sender", "")
+
     # ── rendering ─────────────────────────────────────────────────────────────
     def _render(self, key: str) -> None:
         self._messages.clear()
         self._progress_lbls.clear()
+        self._status_lbls.clear()
         msgs = self._conversations.get(key, [])
         if not msgs:
             w = QLabel("Say hi! 👋")
@@ -648,26 +793,36 @@ class ChatWindow(QWidget):
                 self._messages.add(self._make_bubble(entry))
         self._messages.scroll_to_bottom()
 
-    def _append(self, entry: tuple) -> None:
+    def _append(self, entry: dict) -> None:
         self._messages.add(self._make_bubble(entry))
         self._messages.scroll_to_bottom()
 
-    def _make_bubble(self, entry: tuple) -> QWidget:
-        kind = entry[0]
+    def _tick_parts(self, status: str, is_out: bool) -> tuple[str, str]:
+        """Return (glyph, color) for a delivery-status tick on an out bubble."""
+        muted = "rgba(255,255,255,0.65)" if is_out else theme.color("text_sec")
+        if status == "read":
+            return "✓✓", "#a8e0ff" if is_out else theme.color("accent")
+        if status == "delivered":
+            return "✓✓", muted
+        return "✓", muted   # sent
+
+    def _make_bubble(self, entry: dict) -> QWidget:
+        kind = entry.get("kind", "sys")
         if kind in ("file_out", "file_in_offer"):
             return self._make_file_bubble(entry)
         if kind == "chat_req":
             return self._make_req_bubble(entry)
         if kind == "sys":
-            lbl = QLabel(f"— {entry[2]} —")
+            lbl = QLabel(f"— {entry.get('text', '')} —")
             lbl.setObjectName("muted")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("font-style:italic; padding:3px; color:%s;" % theme.color("text_sec"))
             return lbl
 
-        sender, text, ts = entry[1], entry[2], entry[3]
-        reply = entry[4] if len(entry) > 4 else None
+        sender, text, ts = entry.get("sender", ""), entry.get("text", ""), entry.get("ts", 0)
+        reply = entry.get("reply")
         is_out = kind == "out"
+        deleted = bool(entry.get("deleted"))
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(4, 2, 4, 2)
@@ -679,10 +834,33 @@ class ChatWindow(QWidget):
         bv.setSpacing(2)
         txcol = theme.color("bubble_out_tx" if is_out else "bubble_in_tx")
 
+        # Right-click menu (reply / delete) — not on tombstones.
+        if not deleted:
+            bubble.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            bubble.customContextMenuRequested.connect(
+                lambda pos, e=entry, b=bubble: self._msg_menu(e, b.mapToGlobal(pos)))
+
+        if deleted:
+            d = QLabel("🚫 This message was deleted")
+            d.setStyleSheet("color:%s; font-style:italic; font-size:12px;" % txcol)
+            bv.addWidget(d)
+            stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
+            stamp.setStyleSheet("font-size:10px; color:%s;" % txcol)
+            bv.addWidget(stamp, alignment=Qt.AlignmentFlag.AlignRight)
+            if is_out:
+                h.addStretch(1); h.addWidget(bubble)
+            else:
+                h.addWidget(bubble); h.addStretch(1)
+            return row
+
         if not is_out:
             sl = QLabel(sender)
             sl.setStyleSheet("color:%s; font-weight:700; font-size:11px;" % theme.color("accent"))
             bv.addWidget(sl)
+        if entry.get("fwd"):
+            fl = QLabel("↪ Forwarded")
+            fl.setStyleSheet("color:%s; font-style:italic; font-size:10px;" % txcol)
+            bv.addWidget(fl)
         if isinstance(reply, dict) and reply.get("text"):
             # Colour the nested quote to contrast with its own bubble: white on
             # the blue outgoing bubble, accent on the light incoming bubble —
@@ -737,6 +915,13 @@ class ChatWindow(QWidget):
         foot.addWidget(rep)
         foot.addStretch(1)
         foot.addWidget(stamp)
+        if is_out:
+            glyph, color = self._tick_parts(entry.get("status", "sent"), True)
+            tick = QLabel(glyph)
+            tick.setStyleSheet("font-size:11px; color:%s;" % color)
+            foot.addWidget(tick)
+            if entry.get("mid"):
+                self._status_lbls[entry["mid"]] = tick
         bv.addLayout(foot)
 
         if is_out:
@@ -766,51 +951,49 @@ class ChatWindow(QWidget):
         if not key or not text:
             return
         self._entry.clear()
+        self._stop_typing()
         reply = self._reply_to
-        entry = ("out", "You", text, time.time(), reply) if reply \
-            else ("out", "You", text, time.time())
-        self._conversations.setdefault(key, []).append(entry)
-        self._trim(key)
+        entry = _mk_entry("out", "You", text, time.time(), reply=reply, status="sent")
+        mid = entry["mid"]
+        self._store(key, entry)
         self._cancel_reply()
-        if self._is_group(key):
-            self._save_group(key[6:])
-        else:
-            self._save_peer(key)
+        self._persist(key)
         self._append(entry)
 
         if self._is_group(key):
             meta = self._group_meta(key[6:])
             threading.Thread(target=self._send_group_worker,
-                             args=(key, meta, text, reply), daemon=True).start()
+                             args=(key, meta, text, reply, mid), daemon=True).start()
         else:
             threading.Thread(target=self._send_worker,
-                             args=(key, text, reply), daemon=True).start()
+                             args=(key, text, reply, mid), daemon=True).start()
 
-    def _send_worker(self, ip, text, reply) -> None:
-        ok = self.chat.send(ip, text, reply=reply)
+    def _send_worker(self, ip, text, reply, mid) -> None:
+        ok = self.chat.send(ip, text, reply=reply, mid=mid)
         if not ok:
             QTimer.singleShot(0, lambda: self._sys(ip, "not delivered (peer offline?)"))
 
-    def _send_group_worker(self, key, meta, text, reply) -> None:
-        results = self.chat.send_group(meta, text, reply=reply)
+    def _send_group_worker(self, key, meta, text, reply, mid) -> None:
+        results = self.chat.send_group(meta, text, reply=reply, mid=mid)
         failed = [ip for ip, okk in results.items() if not okk]
         if failed:
             QTimer.singleShot(0, lambda: self._sys(
                 key, f"not delivered to {len(failed)} member(s) (offline?)"))
 
     def _sys(self, key, text) -> None:
-        self._conversations.setdefault(key, []).append(("sys", "", text, time.time()))
+        entry = _mk_entry("sys", "", text, time.time())
+        self._store(key, entry)
         if key == self._active:
-            self._append(("sys", "", text, time.time()))
+            self._append(entry)
 
-    def receive_message(self, ip, name, text, ts, reply=None) -> None:
+    def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
         self._names[ip] = name
-        entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
-        self._conversations.setdefault(ip, []).append(entry)
-        self._trim(ip)
+        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply)
+        self._store(ip, entry)
         self._save_peer(ip)
         if ip == self._active and self._visible:
             self._append(entry)
+            self._mark_read(ip)
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
@@ -819,7 +1002,7 @@ class ChatWindow(QWidget):
                 self._toasts.notify(name, prev, ip)
                 self.activity.emit(ip)
 
-    def on_group_message(self, group, ip, name, text, ts, reply=None) -> None:
+    def on_group_message(self, group, ip, name, text, ts, reply=None, mid="") -> None:
         gid = group.get("gid")
         if not gid:
             return
@@ -837,9 +1020,8 @@ class ChatWindow(QWidget):
             self._save_group(gid)
             self.update_roster(self.chat.peers())
             return
-        entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
-        self._conversations.setdefault(key, []).append(entry)
-        self._trim(key)
+        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply)
+        self._store(key, entry)
         self._save_group(gid)
         if key == self._active and self._visible:
             self._append(entry)
@@ -850,6 +1032,213 @@ class ChatWindow(QWidget):
                 prev = text if len(text) <= 100 else text[:97] + "…"
                 self._toasts.notify(f"{g['name']} (group)", f"{name}: {prev}", key)
                 self.activity.emit(key)
+
+    # ── receipts / read tracking ──────────────────────────────────────────────
+    def on_receipt(self, ip, mid, state) -> None:
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        if entry.get("kind") != "out":
+            return
+        order = {"sent": 0, "delivered": 1, "read": 2}
+        if order.get(state, 0) <= order.get(entry.get("status", "sent"), 0):
+            return   # never regress a status
+        entry["status"] = state
+        self._persist(key)
+        lbl = self._status_lbls.get(mid)
+        if lbl is not None:
+            try:
+                glyph, color = self._tick_parts(state, True)
+                lbl.setText(glyph)
+                lbl.setStyleSheet("font-size:11px; color:%s;" % color)
+            except RuntimeError:
+                self._status_lbls.pop(mid, None)
+
+    def _mark_read(self, key) -> None:
+        """Send 'read' receipts for incoming msgs once the chat is open+focused."""
+        if self._is_group(key) or key == DemoBot.IP:
+            return
+        if not (self._visible and self.isActiveWindow() and key == self._active):
+            return
+        pending = [e["mid"] for e in self._conversations.get(key, [])
+                   if e.get("kind") == "in" and not e.get("deleted")
+                   and e.get("mid") and e["mid"] not in self._read_sent]
+        if not pending:
+            return
+        self._read_sent.update(pending)
+        ip = key
+
+        def work():
+            for mid in pending:
+                self.chat.send_receipt(ip, mid, "read")
+        threading.Thread(target=work, daemon=True).start()
+
+    # ── delete ────────────────────────────────────────────────────────────────
+    def _msg_menu(self, entry: dict, gpos) -> None:
+        m = QMenu(self)
+        m.addAction("↩ Reply", lambda: self._set_reply(self._entry_sender(entry),
+                                                       entry.get("text", "")))
+        if entry.get("text"):
+            m.addAction("➤ Forward", lambda: self._forward(entry))
+        m.addSeparator()
+        if (entry.get("kind") == "out"
+                and time.time() - entry.get("ts", 0) <= _DELETE_WINDOW):
+            m.addAction("🚫 Delete for everyone", lambda: self._delete_everyone(entry))
+        m.addAction("🗑 Delete for me", lambda: self._delete_for_me(entry))
+        m.exec(gpos)
+
+    def _forward(self, entry: dict) -> None:
+        text = entry.get("text", "")
+        if not text:
+            return
+        targets: dict[str, str] = {}
+        for gid, g in self._groups.items():
+            targets[f"👥 {g.get('name', 'Group')}"] = f"group:{gid}"
+        for ip in self._visible_peers(self.chat.peers()):
+            if ip == DemoBot.IP or ip == self._active:
+                continue
+            targets[f"{self._display_name(ip)} ({ip})"] = ip
+        if not targets:
+            self._log("No other chats to forward to yet.")
+            return
+        items = list(targets.keys())
+        choice, ok = QInputDialog.getItem(self, "Forward", "Forward to:", items, 0, False)
+        if not ok or not choice:
+            return
+        key = targets[choice]
+        e = _mk_entry("out", "You", text, time.time(), status="sent", fwd=True)
+        mid = e["mid"]
+        self._store(key, e)
+        self._persist(key)
+        if self._is_group(key):
+            meta = self._group_meta(key[6:])
+            threading.Thread(target=lambda: self.chat.send_group(meta, text, mid=mid),
+                             daemon=True).start()
+        else:
+            threading.Thread(target=lambda: self.chat.send(key, text, mid=mid),
+                             daemon=True).start()
+        self.select_peer(key)
+        self._log("Message forwarded.")
+
+    def _delete_for_me(self, entry: dict) -> None:
+        mid = entry.get("mid")
+        loc = self._mid_index.get(mid)
+        key = loc[0] if loc else self._active
+        if not key:
+            return
+        self._conversations[key] = [e for e in self._conversations.get(key, [])
+                                    if e.get("mid") != mid]
+        self._mid_index.pop(mid, None)
+        self._persist(key)
+        if key == self._active:
+            self._render(key)
+
+    def _delete_everyone(self, entry: dict) -> None:
+        mid = entry.get("mid")
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, e = loc
+        e["deleted"] = True
+        e["text"] = ""
+        e.pop("reply", None)
+        self._persist(key)
+        if key == self._active:
+            self._render(key)
+        if self._is_group(key):
+            gid = key[6:]
+            meta = self._group_meta(gid)
+            targets = [m for m in meta.get("members", []) if m and m != self.chat.my_ip]
+            threading.Thread(target=lambda: [self.chat.send_delete(t, mid, gid=gid)
+                                             for t in targets], daemon=True).start()
+        else:
+            threading.Thread(target=lambda: self.chat.send_delete(key, mid),
+                             daemon=True).start()
+
+    def on_remote_delete(self, from_ip, mid) -> None:
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        if entry.get("kind") != "in":
+            return   # only the original sender can delete-for-everyone
+        entry["deleted"] = True
+        entry["text"] = ""
+        entry.pop("reply", None)
+        self._persist(key)
+        if key == self._active and self._visible:
+            self._render(key)
+        else:
+            self.update_roster(self.chat.peers())
+
+    # ── typing indicators ─────────────────────────────────────────────────────
+    def _on_typing_edit(self, _text: str) -> None:
+        key = self._active
+        if not key or key == DemoBot.IP or not self._entry.text().strip():
+            return
+        now = time.time()
+        if not self._typing_active or now - self._typing_last_sent > 2.0:
+            self._typing_active = True
+            self._typing_last_sent = now
+            self._send_typing(key, True)
+        self._typing_stop_timer.start(4000)
+
+    def _stop_typing(self) -> None:
+        if self._typing_active and self._active:
+            self._typing_active = False
+            self._send_typing(self._active, False)
+        self._typing_stop_timer.stop()
+
+    def _send_typing(self, key, is_typing) -> None:
+        if self._is_group(key):
+            gid = key[6:]
+            targets = [m for m in self._group_meta(gid).get("members", [])
+                       if m and m != self.chat.my_ip]
+            threading.Thread(target=lambda: [self.chat.send_typing(t, is_typing, gid=gid)
+                                             for t in targets], daemon=True).start()
+        else:
+            threading.Thread(target=lambda: self.chat.send_typing(key, is_typing),
+                             daemon=True).start()
+
+    def on_typing(self, ip, name, gid, is_typing) -> None:
+        key = f"group:{gid}" if gid else ip
+        self._names.setdefault(ip, name)
+        typers = self._typers.setdefault(key, {})
+        if is_typing:
+            typers[ip] = time.time() + 6.0
+        else:
+            typers.pop(ip, None)
+        if key == self._active:
+            self._refresh_typing()
+
+    def _typing_tick(self) -> None:
+        now = time.time()
+        changed = False
+        for key, typers in self._typers.items():
+            for ip in [i for i, exp in typers.items() if exp <= now]:
+                typers.pop(ip, None)
+                changed = True
+        if changed and self._active:
+            self._refresh_typing()
+
+    def _refresh_typing(self) -> None:
+        key = self._active
+        typers = self._typers.get(key, {}) if key else {}
+        live = [ip for ip, exp in typers.items() if exp > time.time()]
+        if not live:
+            self._typing_lbl.hide()
+            return
+        if self._is_group(key):
+            if len(live) == 1:
+                who = self._aliases.get(live[0]) or self._names.get(live[0], live[0])
+                txt = f"{who} is typing…"
+            else:
+                txt = f"{len(live)} people are typing…"
+        else:
+            txt = "typing…"
+        self._typing_lbl.setText(txt)
+        self._typing_lbl.show()
 
     # ── demo ──────────────────────────────────────────────────────────────────
     def _start_demo(self) -> None:
@@ -863,8 +1252,8 @@ class ChatWindow(QWidget):
         ip = self._ip_edit.text().strip()
         if not ip:
             return
-        if not is_valid_ipv4(ip) or not ip.startswith("10."):
-            self._log(f"Invalid IP: {ip!r} — must be a valid 10.x.x.x address.")
+        if not is_valid_ipv4(ip):
+            self._log(f"Invalid IP: {ip!r} — enter a valid IPv4 address (e.g. 192.168.1.20).")
             return
         if ip == self.chat.my_ip:
             self._log("Cannot chat with yourself.")
@@ -912,8 +1301,9 @@ class ChatWindow(QWidget):
                 != QMessageBox.StandardButton.Yes:
             return
         self.chat.remove_peer(ip)
-        for d in (self._conversations, self._unread, self._names,
-                  self._aliases, self._chat_req_states):
+        self._drop_index(ip)
+        for d in (self._conversations, self._unread, self._names, self._devices,
+                  self._aliases, self._chat_req_states, self._typers):
             d.pop(ip, None)
         self._delete_history_file(ip)
         if self._active == ip:
@@ -951,7 +1341,7 @@ class ChatWindow(QWidget):
         v.addWidget(lst, 1)
         v.addWidget(QLabel("Add an IP (optional)"))
         extra = QLineEdit()
-        extra.setPlaceholderText("10.x.x.x")
+        extra.setPlaceholderText("e.g. 192.168.1.20")
         v.addWidget(extra)
         brow = QHBoxLayout()
         brow.addStretch(1)
@@ -1028,9 +1418,11 @@ class ChatWindow(QWidget):
                                 f"Leave \"{name}\" and delete its history here?") \
                 != QMessageBox.StandardButton.Yes:
             return
+        self._drop_index(key)
         self._groups.pop(gid, None)
         self._conversations.pop(key, None)
         self._unread.pop(key, None)
+        self._typers.pop(key, None)
         self._delete_history_file(key)
         if self._active == key:
             self._reset_active()
@@ -1042,6 +1434,7 @@ class ChatWindow(QWidget):
         key = self._active
         if not key:
             return
+        self._drop_index(key)
         if self._is_group(key):
             self._conversations[key] = []
             self._unread.pop(key, None)
@@ -1054,8 +1447,12 @@ class ChatWindow(QWidget):
         self._log(f"Chat with {self._display_name(key)} cleared.")
 
     # ── file transfer ─────────────────────────────────────────────────────────
-    def _make_file_bubble(self, entry: tuple) -> QWidget:
-        kind, tid, meta, ts = entry
+    def _make_file_bubble(self, entry: dict) -> QWidget:
+        kind = entry["kind"]
+        tid = entry["tid"]
+        ts = entry.get("ts", 0)
+        meta = {"filename": entry.get("filename", ""), "size": entry.get("size", 0),
+                "from_ip": entry.get("from_ip")}
         is_out = kind == "file_out"
         row = QWidget()
         h = QHBoxLayout(row)
@@ -1177,11 +1574,9 @@ class ChatWindow(QWidget):
             QTimer.singleShot(0, lambda: self._log(f"Could not send file offer: {e}"))
 
     def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
-        meta = {"filename": filename, "size": size}
-        if from_ip:
-            meta["from_ip"] = from_ip
-        entry = (kind, tid, meta, time.time())
-        self._conversations.setdefault(ip, []).append(entry)
+        entry = _mk_entry(kind, "", "", time.time(), tid=tid, filename=filename,
+                          size=size, from_ip=from_ip)
+        self._store(ip, entry)
         if ip == self._active and self._visible:
             self._append(entry)
         else:
@@ -1253,8 +1648,9 @@ class ChatWindow(QWidget):
         self._rerender_if_active(ip)
 
     # ── chat requests (external IP first contact) ─────────────────────────────
-    def _make_req_bubble(self, entry: tuple) -> QWidget:
-        _, ip, meta, ts = entry
+    def _make_req_bubble(self, entry: dict) -> QWidget:
+        ip = entry.get("from_ip", "")
+        meta = {"from_name": entry.get("sender", ip), "first_msg": entry.get("text", "")}
         state = self._chat_req_states.get(ip, "pending")
         card = QFrame()
         card.setObjectName("card2")
@@ -1292,9 +1688,9 @@ class ChatWindow(QWidget):
             return
         self._names[ip] = name
         self._chat_req_states[ip] = "pending"
-        entry = ("chat_req", ip, {"from_name": name, "first_msg": str(msg.get("text", ""))},
-                 time.time())
-        self._conversations.setdefault(ip, []).append(entry)
+        entry = _mk_entry("chat_req", name, str(msg.get("text", "")), time.time(),
+                          from_ip=ip)
+        self._store(ip, entry)
         if ip == self._active and self._visible:
             self._append(entry)
         else:
@@ -1314,11 +1710,19 @@ class ChatWindow(QWidget):
         self.chat.block_ip(ip)
         self._rerender_if_active(ip)
 
-    # ── persistence (shares the JSON format with the old UI) ──────────────────
+    # ── persistence (JSON entry-dicts, with legacy-tuple migration) ───────────
     def _trim(self, key) -> None:
         m = self._conversations.get(key)
         if m and len(m) > _MAX_HISTORY:
-            self._conversations[key] = m[-_MAX_HISTORY:]
+            dropped, self._conversations[key] = m[:-_MAX_HISTORY], m[-_MAX_HISTORY:]
+            for e in dropped:
+                if isinstance(e, dict):
+                    self._mid_index.pop(e.get("mid"), None)
+
+    def _index_conversation(self, key) -> None:
+        for e in self._conversations.get(key, []):
+            if isinstance(e, dict) and e.get("mid"):
+                self._mid_index[e["mid"]] = (key, e)
 
     def _load_history(self) -> None:
         try:
@@ -1332,8 +1736,9 @@ class ChatWindow(QWidget):
                     ip = data.get("ip")
                     if not ip:
                         continue
-                    self._conversations[ip] = [tuple(m) for m in
+                    self._conversations[ip] = [_migrate_entry(m) for m in
                                                data.get("messages", [])[-_MAX_HISTORY:]]
+                    self._index_conversation(ip)
                     if self._is_group(ip) and isinstance(data.get("group"), dict):
                         gid = ip[6:]
                         g = data["group"]
@@ -1345,10 +1750,22 @@ class ChatWindow(QWidget):
                         continue
                     if data.get("name"):
                         self._names[ip] = data["name"]
+                    if data.get("device"):
+                        self._devices[ip] = data["device"]
                     if data.get("alias"):
                         self._aliases[ip] = data["alias"]
                     if data.get("manual"):
                         self.chat.add_manual_peer(ip)
+                    # Restore last-seen so the peer shows "last seen …" until it
+                    # comes back online; fall back to the newest message time.
+                    ls = data.get("last_seen") or 0.0
+                    if not ls:
+                        try:
+                            ls = max((float(m.get("ts", 0)) for m in self._conversations[ip]),
+                                     default=0.0)
+                        except (TypeError, ValueError):
+                            ls = 0.0
+                    self.chat.seed_last_seen(ip, ls)
                 except Exception:
                     pass
         except Exception:
@@ -1357,20 +1774,26 @@ class ChatWindow(QWidget):
     def _save_peer(self, ip) -> None:
         msgs = list(self._conversations.get(ip, []))
         name = self._names.get(ip, ip)
+        device = self._devices.get(ip)
         alias = self._aliases.get(ip)
         manual = self.chat.is_manual_peer(ip)
+        last_seen = self.chat.last_seen_of(ip)
 
         def write():
             try:
                 safe = ip.replace(".", "_").replace(":", "_")
-                kept = [m for m in msgs if not m[0].startswith("file_")
-                        and not m[0].startswith("chat_req")]
+                kept = [m for m in msgs
+                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
                 data = {"ip": ip, "name": name,
-                        "messages": [list(m) for m in kept[-_MAX_HISTORY:]]}
+                        "messages": kept[-_MAX_HISTORY:]}
+                if device:
+                    data["device"] = device
                 if alias:
                     data["alias"] = alias
                 if manual:
                     data["manual"] = True
+                if last_seen:
+                    data["last_seen"] = last_seen
                 with open(os.path.join(config.get_peer_chat_dir(), f"{safe}.json"),
                           "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
@@ -1385,12 +1808,12 @@ class ChatWindow(QWidget):
 
         def write():
             try:
-                kept = [m for m in msgs if not m[0].startswith("file_")
-                        and not m[0].startswith("chat_req")]
+                kept = [m for m in msgs
+                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
                 data = {"ip": key,
                         "group": {"name": group.get("name", "Group"),
                                   "members": group.get("members", [])},
-                        "messages": [list(m) for m in kept[-_MAX_HISTORY:]]}
+                        "messages": kept[-_MAX_HISTORY:]}
                 with open(os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json"),
                           "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)

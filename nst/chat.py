@@ -17,18 +17,22 @@ import socket
 import struct
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 
 import psutil
 
+from . import config
 from .constants import (
+    CHAT_AWAY_AFTER,
     CHAT_MAGIC,
     CHAT_PEER_TIMEOUT,
     CHAT_PRESENCE_EVERY,
     CHAT_PRESENCE_PORT,
     CHAT_TCP_PORT,
 )
-from .netinfo import get_local_ip, get_subnet_broadcasts
+from .netinfo import get_all_local_ips, get_local_ip, get_subnet_broadcasts
+from .win_utils import get_idle_seconds
 
 
 @dataclass
@@ -36,6 +40,10 @@ class Peer:
     ip: str
     name: str
     last_seen: float
+    uid: str = ""
+    device: str = ""
+    status: str = "online"        # "online" | "away"  (offline is derived from last_seen)
+    ips: tuple = ()               # all advertised IPs of this peer
 
 
 class ChatService:
@@ -46,19 +54,27 @@ class ChatService:
                  on_file_accept=None,
                  on_file_reject=None,
                  on_chat_request=None,
-                 on_group_message=None) -> None:
+                 on_group_message=None,
+                 on_receipt=None,
+                 on_delete=None,
+                 on_typing=None) -> None:
         """
         on_roster_change(peers: list[Peer])          -- roster changed.
-        on_message(ip, name, text, ts, reply)        -- incoming chat message.
+        on_message(ip, name, text, ts, reply, mid)   -- incoming chat message.
         on_file_offer(ip, name, msg_dict)            -- incoming file offer.
         on_file_accept(ip, name, msg_dict)           -- peer accepted our offer.
         on_file_reject(ip, name, msg_dict)           -- peer rejected our offer.
         on_chat_request(ip, name, msg_dict)          -- first message from unknown external IP.
-        on_group_message(group, ip, name, text, ts, reply) -- message addressed to a group.
+        on_group_message(group, ip, name, text, ts, reply, mid) -- message to a group.
+        on_receipt(ip, mid, state)                   -- peer acked one of our messages.
+        on_delete(from_ip, mid)                      -- peer deleted a message for everyone.
+        on_typing(ip, name, gid, is_typing)          -- peer started/stopped typing.
         All callbacks are invoked from background threads; marshal to main thread.
         """
         self.my_name = my_name
         self.my_ip: str = get_local_ip() or "127.0.0.1"
+        self.my_uid: str = config.load_device_id()
+        self.my_device: str = config.get_device_name()
         self._on_roster_change = on_roster_change
         self._on_message = on_message
         self._on_file_offer = on_file_offer
@@ -66,6 +82,9 @@ class ChatService:
         self._on_file_reject = on_file_reject
         self._on_chat_request = on_chat_request
         self._on_group_message = on_group_message
+        self._on_receipt = on_receipt
+        self._on_delete = on_delete
+        self._on_typing = on_typing
 
         # Appear-online toggle: when False we stop advertising presence so other
         # peers reap us, but we still receive and can reply to direct messages.
@@ -80,6 +99,9 @@ class ChatService:
         self._peers: dict[str, Peer] = {}
         self._virtual: dict[str, "DemoBot"] = {}   # ip -> bot (demo / loopback)
         self._manual: set[str] = set()  # IPs added manually (never reaped)
+        # last_seen survives reaping so the UI can show "Last seen …" for peers
+        # that have gone offline. Seeded by the UI from saved history on launch.
+        self._last_seen: dict[str, float] = {}
         self._lock = threading.Lock()
         self.running = False
 
@@ -242,8 +264,16 @@ class ChatService:
                     # Honour the appear-offline toggle: skip advertising but keep
                     # the loop alive so flipping back online resumes instantly.
                     if self.presence_online:
-                        payload = (CHAT_MAGIC + b"|" + self.my_name.encode("utf-8")
-                                   + b"|" + self.my_ip.encode("utf-8"))
+                        status = "away" if get_idle_seconds() >= CHAT_AWAY_AFTER else "online"
+                        payload = CHAT_MAGIC + b"|" + json.dumps({
+                            "v": 2,
+                            "uid": self.my_uid,
+                            "name": self.my_name,
+                            "device": self.my_device,
+                            "ip": self.my_ip,
+                            "ips": get_all_local_ips(),
+                            "status": status,
+                        }).encode("utf-8")
                         # Send to the generic broadcast *and* every subnet-specific
                         # broadcast address.  This ensures peers see us even when
                         # an extra 10.0.0.0/8 route alters default broadcast.
@@ -270,15 +300,23 @@ class ChatService:
             s.settimeout(1.0)
             while self.running:
                 try:
-                    data, _addr = s.recvfrom(512)
-                    parts = data.split(b"|", 2)
-                    if len(parts) != 3 or parts[0] != CHAT_MAGIC:
+                    data, _addr = s.recvfrom(1024)
+                    parts = data.split(b"|", 1)
+                    if len(parts) != 2 or parts[0] != CHAT_MAGIC:
                         continue
-                    name = parts[1].decode("utf-8", errors="replace").strip()
-                    ip = parts[2].decode("utf-8", errors="replace").strip()
-                    if not ip or ip == self.my_ip:
-                        continue  # ignore self
-                    self._touch_peer(ip, name)
+                    info = json.loads(parts[1].decode("utf-8", errors="replace"))
+                    ip = str(info.get("ip", "")).strip()
+                    name = str(info.get("name", "")).strip()
+                    uid = str(info.get("uid", "")).strip()
+                    if not ip or ip == self.my_ip or uid == self.my_uid:
+                        continue  # ignore self (by IP and by uid for multi-homed hosts)
+                    self._touch_peer(
+                        ip, name,
+                        uid=uid,
+                        device=str(info.get("device", "")).strip(),
+                        status=str(info.get("status", "online")).strip() or "online",
+                        ips=tuple(str(x) for x in info.get("ips", []) if x),
+                    )
                 except socket.timeout:
                     continue
                 except Exception:
@@ -287,19 +325,52 @@ class ChatService:
         except Exception:
             pass
 
-    def _touch_peer(self, ip: str, name: str) -> None:
+    def _touch_peer(self, ip: str, name: str, uid: str = "", device: str = "",
+                    status: str = "online", ips: tuple = ()) -> None:
         changed = False
         with self._lock:
             existing = self._peers.get(ip)
             now = time.time()
             was_online = (existing is not None
                           and (now - existing.last_seen) <= CHAT_PEER_TIMEOUT)
-            # Emit roster when peer is new, name changed, or was offline (coming online)
-            if existing is None or existing.name != name or not was_online:
+            # Carry forward identity fields when a touch omits them (e.g. a manual
+            # probe or an incoming message that didn't carry full presence info).
+            if existing is not None:
+                uid = uid or existing.uid
+                device = device or existing.device
+                ips = ips or existing.ips
+            # Emit roster when peer is new, identity changed, status changed, or
+            # the peer transitioned offline→online.
+            if (existing is None or existing.name != name
+                    or existing.status != status or existing.device != device
+                    or not was_online):
                 changed = True
-            self._peers[ip] = Peer(ip=ip, name=name or ip, last_seen=now)
+            self._peers[ip] = Peer(ip=ip, name=name or ip, last_seen=now,
+                                   uid=uid, device=device, status=status, ips=ips)
+            self._last_seen[ip] = now
         if changed:
             self._emit_roster()
+
+    # ── last-seen / status accessors (for the UI) ─────────────────────────────
+    def seed_last_seen(self, ip: str, ts: float) -> None:
+        """Restore a saved last-seen timestamp (called by the UI on launch)."""
+        if ts:
+            with self._lock:
+                self._last_seen[ip] = max(ts, self._last_seen.get(ip, 0.0))
+
+    def last_seen_of(self, ip: str) -> float:
+        with self._lock:
+            return self._last_seen.get(ip, 0.0)
+
+    def peer_status(self, ip: str) -> str:
+        """Return 'online', 'away' or 'offline' for *ip*."""
+        if ip == DemoBot.IP:
+            return "online"
+        with self._lock:
+            p = self._peers.get(ip)
+            if p is None or (time.time() - p.last_seen) > CHAT_PEER_TIMEOUT:
+                return "offline"
+            return p.status if p.status in ("online", "away") else "online"
 
     def _reaper_loop(self) -> None:
         while self.running:
@@ -362,8 +433,11 @@ class ChatService:
             ip = str(msg.get("from_ip", "")) or addr[0]
             msg_type = msg.get("type", "chat")
 
-            # file_accept / file_reject are responses to OUR offers — always trusted
-            if msg_type not in ("file_accept", "file_reject"):
+            # Control messages reference something we already own (an offer we
+            # made, a message id we sent, an ephemeral typing ping) so they're
+            # always trusted and bypass the first-contact approval gate.
+            _trusted = ("file_accept", "file_reject", "receipt", "delete", "typing")
+            if msg_type not in _trusted:
                 if not self._is_same_subnet(ip) and ip not in self._approved_ips:
                     if not self.ip_chat_enabled or ip in self._blocked_ips:
                         return  # silently drop
@@ -396,6 +470,17 @@ class ChatService:
         elif msg_type == "file_reject":
             if self._on_file_reject:
                 self._on_file_reject(ip, name, msg)
+        elif msg_type == "receipt":
+            if self._on_receipt:
+                self._on_receipt(ip, str(msg.get("mid", "")),
+                                 str(msg.get("state", "delivered")))
+        elif msg_type == "delete":
+            if self._on_delete:
+                self._on_delete(ip, str(msg.get("mid", "")))
+        elif msg_type == "typing":
+            gid = msg.get("gid") or None
+            if self._on_typing:
+                self._on_typing(ip, name, gid, bool(msg.get("is_typing")))
         elif msg_type in ("group", "group_invite"):
             # Synced group: every message carries the group identity + member
             # list so the receiving app can register the thread and route the
@@ -407,24 +492,32 @@ class ChatService:
             text = str(msg.get("text", ""))
             ts = float(msg.get("ts", time.time()))
             reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
+            mid = str(msg.get("mid", ""))
             if self._on_group_message:
-                self._on_group_message(group, ip, name, text, ts, reply)
+                self._on_group_message(group, ip, name, text, ts, reply, mid)
         else:
             text = str(msg.get("text", ""))
             ts = float(msg.get("ts", time.time()))
             reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
+            mid = str(msg.get("mid", ""))
             self._touch_peer(ip, name)
+            # Auto-acknowledge delivery the moment we hand the message to the UI.
+            if mid and msg_type == "chat":
+                threading.Thread(target=self.send_receipt,
+                                 args=(ip, mid, "delivered"), daemon=True).start()
             if text and self._on_message:
-                self._on_message(ip, name, text, ts, reply)
+                self._on_message(ip, name, text, ts, reply, mid)
 
     # ── messaging: outgoing ───────────────────────────────────────────────────
     def send(self, ip: str, text: str, reply: dict | None = None,
-             group: dict | None = None, msg_type: str = "chat") -> bool:
+             group: dict | None = None, msg_type: str = "chat",
+             mid: str = "") -> bool:
         """Deliver a message synchronously. Returns True on success.
 
         ``reply`` is an optional ``{"sender", "text"}`` snippet of the message
         being replied to. ``group`` carries the synced-group identity so the
-        peer can route the reply back to every member. Call from a worker
+        peer can route the reply back to every member. ``mid`` is the stable
+        message id used for receipts / delete-for-everyone. Call from a worker
         thread to avoid blocking the UI.
         """
         bot = self._virtual.get(ip)
@@ -438,6 +531,8 @@ class ChatService:
             "text": text,
             "ts": time.time(),
         }
+        if mid:
+            msg["mid"] = mid
         if reply:
             msg["reply"] = reply
         if group:
@@ -452,11 +547,12 @@ class ChatService:
             return False
 
     def send_group(self, group: dict, text: str, reply: dict | None = None,
-                   msg_type: str = "group") -> dict[str, bool]:
+                   msg_type: str = "group", mid: str = "") -> dict[str, bool]:
         """Fan a message out to every member of ``group`` except ourselves.
 
         Returns ``{ip: delivered}`` so the UI can flag members that were
-        offline. Members are auto-approved for inbound replies.
+        offline. Members are auto-approved for inbound replies. The same ``mid``
+        is used for every member so delete-for-everyone targets one logical msg.
         """
         members = [ip for ip in group.get("members", []) if ip and ip != self.my_ip]
         with self._lock:
@@ -464,8 +560,45 @@ class ChatService:
         results: dict[str, bool] = {}
         for ip in members:
             results[ip] = self.send(ip, text, reply=reply, group=group,
-                                    msg_type=msg_type)
+                                    msg_type=msg_type, mid=mid)
         return results
+
+    # ── control messages (receipts / delete / typing) ─────────────────────────
+    def _send_json(self, ip: str, payload: dict) -> bool:
+        try:
+            data = json.dumps(payload).encode("utf-8") + b"\n"
+            with socket.create_connection((ip, CHAT_TCP_PORT), timeout=3.0) as s:
+                s.sendall(data)
+            return True
+        except Exception:
+            return False
+
+    def send_receipt(self, ip: str, mid: str, state: str) -> bool:
+        """Tell *ip* that one of their messages was delivered/read by us."""
+        if not mid or ip in self._virtual:
+            return False
+        return self._send_json(ip, {
+            "type": "receipt", "mid": mid, "state": state,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        })
+
+    def send_delete(self, ip: str, mid: str, gid: str = "") -> bool:
+        """Ask *ip* to remove message *mid* for everyone."""
+        if not mid or ip in self._virtual:
+            return False
+        return self._send_json(ip, {
+            "type": "delete", "mid": mid, "gid": gid,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        })
+
+    def send_typing(self, ip: str, is_typing: bool, gid: str = "") -> bool:
+        """Send an ephemeral typing ping to *ip*."""
+        if ip in self._virtual:
+            return False
+        return self._send_json(ip, {
+            "type": "typing", "is_typing": bool(is_typing), "gid": gid,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        })
 
 
 class DemoBot:
@@ -492,7 +625,8 @@ class DemoBot:
     def _say(self, text: str, delay: float) -> None:
         def fire():
             if self.service._on_message and self.IP in self.service._virtual:
-                self.service._on_message(self.IP, self.NAME, text, time.time(), None)
+                self.service._on_message(self.IP, self.NAME, text, time.time(),
+                                         None, uuid.uuid4().hex[:16])
         threading.Timer(delay, fire).start()
 
     def greet(self) -> None:
