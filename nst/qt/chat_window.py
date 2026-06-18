@@ -14,7 +14,7 @@ import time
 import uuid
 
 from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PyQt6.QtGui import QCursor, QPixmap
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame,
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -55,6 +55,17 @@ def _fmt_speed(bps: float) -> str:
 def _fmt_eta(secs: float) -> str:
     s = int(secs)
     return f"{s}s" if s < 60 else f"{s // 60}m {s % 60}s"
+
+
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+
+
+def _fmt_progress(verb: str, done: int, total: int,
+                  speed: float, elapsed: float, eta: float) -> str:
+    """One-line transfer status: e.g. 'Receiving 42% · 4.2/10.0 MB · 2.1 MB/s · 2s · ETA 3s'."""
+    pct = int(done * 100 / total) if total else 0
+    return (f"{verb} {pct}% · {_fmt_size(done)}/{_fmt_size(total)} · "
+            f"{_fmt_speed(speed)} · {_fmt_eta(elapsed)} · ETA {_fmt_eta(eta)}")
 
 
 def _fmt_last_seen(ts: float) -> str:
@@ -243,6 +254,12 @@ class ChatWindow(QWidget):
     """Standalone chat window. Closing hides it so conversations persist."""
 
     activity = pyqtSignal(str)     # background message arrived on this key
+    # File-transfer callbacks fire on worker threads; these signals marshal them
+    # back onto the GUI thread (QTimer.singleShot from a worker thread never
+    # fires — the worker has no Qt event loop).
+    _xfer_progress = pyqtSignal(str, str)            # tid, status text
+    _xfer_finished = pyqtSignal(str, str, str, str)  # tid, ip, path(""=failed), status text
+    _sys_sig = pyqtSignal(str, str)                  # key, text — post a system line
 
     def __init__(self, chat_service, toasts,
                  log_fn=lambda m: None) -> None:
@@ -291,6 +308,11 @@ class ChatWindow(QWidget):
 
         self._ft = FileTransferService(chat_service)
         self._ft.start()
+
+        # Deliver worker-thread transfer updates onto the GUI thread.
+        self._xfer_progress.connect(self._on_xfer_progress)
+        self._xfer_finished.connect(self._on_xfer_finished)
+        self._sys_sig.connect(self._sys)
 
         self._build()
         self._load_history()
@@ -1010,14 +1032,14 @@ class ChatWindow(QWidget):
     def _send_worker(self, ip, text, reply, mid) -> None:
         ok = self.chat.send(ip, text, reply=reply, mid=mid)
         if not ok:
-            QTimer.singleShot(0, lambda: self._sys(ip, "not delivered (peer offline?)"))
+            self._sys_sig.emit(ip, "not delivered (peer offline?)")
 
     def _send_group_worker(self, key, meta, text, reply, mid) -> None:
         results = self.chat.send_group(meta, text, reply=reply, mid=mid)
         failed = [ip for ip, okk in results.items() if not okk]
         if failed:
-            QTimer.singleShot(0, lambda: self._sys(
-                key, f"not delivered to {len(failed)} member(s) (offline?)"))
+            self._sys_sig.emit(
+                key, f"not delivered to {len(failed)} member(s) (offline?)")
 
     def _sys(self, key, text) -> None:
         entry = _mk_entry("sys", "", text, time.time())
@@ -1518,8 +1540,8 @@ class ChatWindow(QWidget):
 
     def _probe_manual(self, ip) -> None:
         if not check_host_reachable(ip, CHAT_TCP_PORT):
-            QTimer.singleShot(0, lambda: self._sys(
-                ip, "Not reachable — make sure the app is running on that PC."))
+            self._sys_sig.emit(
+                ip, "Not reachable — make sure the app is running on that PC.")
 
     # ── alias / delete ────────────────────────────────────────────────────────
     def _edit_alias(self) -> None:
@@ -1744,6 +1766,9 @@ class ChatWindow(QWidget):
                 cancel.clicked.connect(lambda: self._cancel_file(tid))
                 bv.addWidget(cancel)
             elif done:
+                thumb = self._make_thumbnail(done)
+                if thumb is not None:
+                    bv.addWidget(thumb)
                 orow = QHBoxLayout()
                 of = QPushButton("Open File")
                 of.clicked.connect(lambda: os.startfile(done))
@@ -1762,6 +1787,24 @@ class ChatWindow(QWidget):
         else:
             h.addWidget(bubble); h.addStretch(1)
         return row
+
+    def _make_thumbnail(self, path: str) -> QLabel | None:
+        """Return a clickable image preview for *path*, or None if not an image.
+
+        Uses Qt's built-in image readers (png/jpg/gif/bmp/webp) — no extra deps.
+        """
+        if not path or not path.lower().endswith(_IMAGE_EXTS):
+            return None
+        pm = QPixmap(path)
+        if pm.isNull():
+            return None
+        thumb = QLabel()
+        thumb.setPixmap(pm.scaled(260, 260, Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation))
+        thumb.setCursor(Qt.CursorShape.PointingHandCursor)
+        thumb.setToolTip("Click to open")
+        thumb.mousePressEvent = lambda _e, p=path: os.startfile(p)
+        return thumb
 
     def _set_progress(self, tid: str, text: str) -> None:
         self._progress_text[tid] = text
@@ -1791,49 +1834,32 @@ class ChatWindow(QWidget):
                          args=(ip, path, filename, size, tid), daemon=True).start()
 
     def _offer_worker(self, ip, path, filename, size, tid) -> None:
-        holder = {"tid": tid}
+        # Callbacks run on a transfer worker thread — emit signals (queued to the
+        # GUI thread) rather than touching widgets or using QTimer here.
+        throttle = {"t": 0.0, "pct": -1}
 
         def progress(done, total, speed, elapsed, eta):
-            if holder["tid"]:
-                pct = int(done * 100 / total) if total else 0
-                def main_prog():
-                    self._set_progress(holder["tid"], f"Sending {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}")
-                QTimer.singleShot(0, main_prog)
+            pct = int(done * 100 / total) if total else 0
+            now = time.time()
+            if pct != throttle["pct"] or now - throttle["t"] >= 0.12:
+                throttle["pct"], throttle["t"] = pct, now
+                self._xfer_progress.emit(
+                    tid, _fmt_progress("Sending", done, total, speed, elapsed, eta))
 
         def done():
-            tid = holder["tid"]
-            if tid:
-                self._transfer_paths[tid] = path
-                def main_done():
-                    self._set_progress(tid, "Sent!")
-                    self._render(ip)  # Always render to show completion
-                QTimer.singleShot(0, main_done)
+            self._xfer_finished.emit(tid, ip, path, "Sent ✓")
 
         def error(msg):
-            tid = holder["tid"]
-            if tid:
-                self._transfer_paths[tid] = ""
-                def main_error():
-                    self._set_progress(tid, f"Failed: {msg}")
-                    self._render(ip)  # Always render to show error
-                QTimer.singleShot(0, main_error)
+            self._xfer_finished.emit(tid, ip, "", f"Failed: {msg}")
 
         def expire():
-            tid = holder["tid"]
-            if tid:
-                def main_expire():
-                    self._set_progress(tid, "No response — expired")
-                QTimer.singleShot(0, main_expire)
+            self._xfer_finished.emit(tid, ip, "", "No response — expired")
 
         try:
             self._ft.offer_file(ip, path, tid=tid, progress_cb=progress, done_cb=done,
                                 error_cb=error, expire_cb=expire)
         except Exception as e:
-            self._transfer_paths[tid] = ""
-            def main_exc():
-                self._set_progress(tid, f"Failed: {e}")
-                self._rerender_if_active(ip)
-            QTimer.singleShot(0, main_exc)
+            self._xfer_finished.emit(tid, ip, "", f"Failed: {e}")
 
     def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
         entry = _mk_entry(kind, "", "", time.time(), tid=tid, filename=filename,
@@ -1848,6 +1874,17 @@ class ChatWindow(QWidget):
     def _rerender_if_active(self, ip) -> None:
         if ip == self._active:
             self._render(ip)
+
+    # ── transfer updates (delivered on the GUI thread via signals) ─────────────
+    def _on_xfer_progress(self, tid: str, text: str) -> None:
+        """Live progress tick: update the label in place (cheap, no re-render)."""
+        self._set_progress(tid, text)
+
+    def _on_xfer_finished(self, tid: str, ip: str, path: str, text: str) -> None:
+        """Terminal state (done / failed / expired): record result and re-render."""
+        self._transfer_paths[tid] = path   # real path = success, "" = failed
+        self._set_progress(tid, text)
+        self._render(ip)
 
     def on_file_offer_received(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
@@ -1867,27 +1904,25 @@ class ChatWindow(QWidget):
         self._offer_states[tid] = "accepted"
         self._transfer_paths[tid] = None
         self._set_progress(tid, "Connecting…")
-        self._render(from_ip)  # Always render to show progress, even if peer not active
+        self._render(from_ip)  # show the progress bubble immediately
+
+        # Callbacks run on a transfer worker thread — emit signals (queued to the
+        # GUI thread) rather than touching widgets or using QTimer here.
+        throttle = {"t": 0.0, "pct": -1}
 
         def progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
-            def main_prog():
-                self._set_progress(tid, f"Receiving {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}")
-            QTimer.singleShot(0, main_prog)
+            now = time.time()
+            if pct != throttle["pct"] or now - throttle["t"] >= 0.12:
+                throttle["pct"], throttle["t"] = pct, now
+                self._xfer_progress.emit(
+                    tid, _fmt_progress("Receiving", done, total, speed, elapsed, eta))
 
         def fdone(save_path):
-            self._transfer_paths[tid] = save_path
-            def main_fdone():
-                self._set_progress(tid, "Saved!")
-                self._render(from_ip)  # Always render to show completion
-            QTimer.singleShot(0, main_fdone)
+            self._xfer_finished.emit(tid, from_ip, save_path, "Saved ✓")
 
         def ferr(msg):
-            self._transfer_paths[tid] = ""
-            def main_ferr():
-                self._set_progress(tid, f"Failed: {msg}")
-                self._render(from_ip)  # Always render to show error
-            QTimer.singleShot(0, main_ferr)
+            self._xfer_finished.emit(tid, from_ip, "", f"Failed: {msg}")
 
         def work():
             self._ft.send_accept(from_ip, tid)
