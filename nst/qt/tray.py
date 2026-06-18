@@ -120,7 +120,14 @@ class TrayManager:
 
 
 class SpeedOverlay(QWidget):
-    """A tiny always-on-top, click-through readout pinned beside the clock."""
+    """A small always-on-top, click-through readout pinned beside the clock.
+
+    Windows owns the taskbar clock/date area, so a third-party app can't embed
+    a widget there directly. This floats a legible rounded pill over that spot
+    instead, staying above the taskbar.
+    """
+
+    _W, _H = 108, 38
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -130,26 +137,34 @@ class SpeedOverlay(QWidget):
                             | Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 0, 2, 0)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # A semi-opaque dark pill so the text is readable over any taskbar colour.
+        pill = QWidget()
+        pill.setObjectName("speedPill")
+        pill.setStyleSheet("QWidget#speedPill { background: rgba(18,20,26,0.90);"
+                           " border-radius: 7px; }")
+        lay = QVBoxLayout(pill)
+        lay.setContentsMargins(8, 2, 8, 2)
         lay.setSpacing(0)
         self._up = QLabel("")
-        self._up.setStyleSheet("color:#f59e0b; font:700 9px 'Segoe UI'; background:transparent;")
+        self._up.setStyleSheet("color:#f59e0b; font:700 10px 'Segoe UI'; background:transparent;")
         self._down = QLabel("")
-        self._down.setStyleSheet("color:#22c55e; font:700 9px 'Segoe UI'; background:transparent;")
+        self._down.setStyleSheet("color:#22c55e; font:700 10px 'Segoe UI'; background:transparent;")
         lay.addWidget(self._up)
         lay.addWidget(self._down)
-        self.setFixedSize(96, 34)
+        outer.addWidget(pill)
+        self.setFixedSize(self._W, self._H)
 
     def show_speed(self, up: str, down: str) -> None:
-        self._up.setText(f"U: {up}")
-        self._down.setText(f"D: {down}")
+        self._up.setText(f"▲ {up}")
+        self._down.setText(f"▼ {down}")
         rect = get_tray_notify_rect()
         if not rect:
             self.hide()
             return
         left, top, right, bottom = rect
-        ow, oh = 96, 34
+        ow, oh = self._W, self._H
         if (bottom - top) < (right - left):   # horizontal taskbar
             x, y = left - ow - 8, top + (bottom - top - oh) // 2
         else:
@@ -157,3 +172,4 @@ class SpeedOverlay(QWidget):
         self.move(int(x), int(y))
         if not self.isVisible():
             self.show()
+        self.raise_()

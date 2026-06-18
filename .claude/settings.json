@@ -6,7 +6,9 @@
       "Bash(python -m py_compile nst/ui/tray.py nst/win_utils.py)",
       "Bash(python -c \"import nst.ui.tray, nst.win_utils; print\\('OK'\\)\")",
       "Bash(python -m PyInstaller NetSplitTunnel.spec --noconfirm)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(python -m py_compile nst/netinfo.py nst/qt/chat_window.py nst/qt/tray.py nst/qt/main_window.py)",
+      "Bash(python -m py_compile nst/qt/chat_window.py nst/qt/tray.py nst/qt/main_window.py nst/netinfo.py)"
     ]
   }
 }

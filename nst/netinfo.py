@@ -8,15 +8,65 @@ import subprocess
 import psutil
 
 
-def get_intranet_ip() -> str | None:
-    """Return the first 10.x.x.x address on this host (fast, no DNS lookup)."""
+def is_private_ipv4(ip: str) -> bool:
+    """True for RFC-1918 private ranges: 10/8, 172.16–31/12, 192.168/16.
+
+    Discovery and cross-subnet chat work on any of these, not just 10.x.
+    """
+    if not ip or not is_valid_ipv4(ip):
+        return False
+    a, b, *_ = (int(p) for p in ip.split("."))
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    return False
+
+
+def list_local_ipv4() -> list[tuple[str, str, str]]:
+    """Return ``[(iface, ip, netmask), …]`` for every usable IPv4 interface.
+
+    Loopback (127.x) and link-local (169.254.x) addresses are skipped. No
+    assumption is made about which private range the network uses.
+    """
+    out: list[tuple[str, str, str]] = []
     try:
-        for _interface, addrs in psutil.net_if_addrs().items():
+        for iface, addrs in psutil.net_if_addrs().items():
             for addr in addrs:
-                if addr.family == socket.AF_INET and addr.address.startswith("10."):
-                    return addr.address
+                if addr.family != socket.AF_INET:
+                    continue
+                ip = addr.address
+                if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+                    continue
+                out.append((iface, ip, addr.netmask or "255.255.255.0"))
     except Exception:
         pass
+    return out
+
+
+def get_all_local_ips() -> list[str]:
+    """All local private IPv4 addresses (every interface). Used by LAN chat."""
+    ips = [ip for _iface, ip, _mask in list_local_ipv4() if is_private_ipv4(ip)]
+    if not ips:
+        # No private address — fall back to whatever we can find.
+        ips = [ip for _iface, ip, _mask in list_local_ipv4()]
+    # De-dupe, preserve order.
+    return list(dict.fromkeys(ips))
+
+
+def get_intranet_ip() -> str | None:
+    """Return a private intranet IPv4 address (fast, no DNS lookup).
+
+    Prefers 10.x (the corporate range the proxy split-tunnel route targets),
+    then falls back to any other private range so the proxy panel still shows
+    a sensible address on 172.16/12 or 192.168/16 networks.
+    """
+    privs = get_all_local_ips()
+    for ip in privs:
+        if ip.startswith("10."):
+            return ip
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(0.1)
@@ -26,33 +76,27 @@ def get_intranet_ip() -> str | None:
                 return ip
     except Exception:
         pass
-    return None
+    return privs[0] if privs else None
 
 
 def get_subnet_broadcasts() -> list[str]:
-    """Return subnet broadcast addresses for every 10.x.x.x interface.
+    """Return subnet broadcast addresses for every private IPv4 interface.
 
-    Uses the actual netmask from ``psutil`` so both /16 and /24 networks
-    are handled correctly.  Falls back to 255.255.255.255 on error.
+    Uses the actual netmask from ``psutil`` so /8, /16 and /24 networks are
+    all handled, on any private range. Falls back to 255.255.255.255 on error.
     """
     results: list[str] = []
     try:
-        for _iface, addrs in psutil.net_if_addrs().items():
-            for addr in addrs:
-                if addr.family != socket.AF_INET:
-                    continue
-                if not addr.address.startswith("10."):
-                    continue
-                netmask = addr.netmask
-                if not netmask:
-                    continue
-                # ip | ~mask  →  broadcast
-                ip_int = struct.unpack("!I", socket.inet_aton(addr.address))[0]
-                mask_int = struct.unpack("!I", socket.inet_aton(netmask))[0]
-                bcast_int = ip_int | (~mask_int & 0xFFFFFFFF)
-                bcast = socket.inet_ntoa(struct.pack("!I", bcast_int))
-                if bcast not in results:
-                    results.append(bcast)
+        for _iface, ip, netmask in list_local_ipv4():
+            if not is_private_ipv4(ip) or not netmask:
+                continue
+            # ip | ~mask  →  broadcast
+            ip_int = struct.unpack("!I", socket.inet_aton(ip))[0]
+            mask_int = struct.unpack("!I", socket.inet_aton(netmask))[0]
+            bcast_int = ip_int | (~mask_int & 0xFFFFFFFF)
+            bcast = socket.inet_ntoa(struct.pack("!I", bcast_int))
+            if bcast not in results:
+                results.append(bcast)
     except Exception:
         pass
     if not results:
@@ -61,17 +105,23 @@ def get_subnet_broadcasts() -> list[str]:
 
 
 def get_local_ip() -> str | None:
-    """Return the primary outbound IPv4 address (any subnet). Used by LAN chat."""
-    ip = get_intranet_ip()
-    if ip:
-        return ip
+    """Return the primary outbound IPv4 address (any subnet). Used by LAN chat.
+
+    Uses the OS routing table (the address chosen to reach an external host) so
+    that on a multi-homed PC we advertise the interface actually used for
+    traffic, rather than blindly preferring one private range.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(0.2)
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
     except Exception:
-        return None
+        pass
+    privs = get_all_local_ips()
+    return privs[0] if privs else None
 
 
 def calculate_gateway(ip: str) -> str:

@@ -152,9 +152,16 @@ class _RosterRow(QFrame):
             lay.addWidget(b)
         if deletable:
             x = QPushButton("✕")
-            x.setProperty("variant", "ghost")
             x.setFixedSize(22, 22)
             x.setCursor(Qt.CursorShape.PointingHandCursor)
+            x.setToolTip("Remove")
+            # Explicit style: the base button padding (8px 14px) would otherwise
+            # squeeze the glyph out of this 22px box and make it look invisible.
+            x.setStyleSheet(
+                "QPushButton{background:transparent; border:none; padding:0;"
+                " font-size:13px; font-weight:700; color:%s;}"
+                "QPushButton:hover{color:#fff; background:%s; border-radius:11px;}"
+                % (theme.color("text_sec"), theme.color("danger")))
             x.clicked.connect(lambda: self.deleted.emit(self.key))
             lay.addWidget(x)
 
@@ -246,7 +253,8 @@ class ChatWindow(QWidget):
         idrow.addWidget(self._self_avatar)
         self._name_edit = QLineEdit(self.chat.my_name)
         self._name_edit.setStyleSheet("font-weight:700;")
-        self._name_edit.returnPressed.connect(self._rename)
+        # editingFinished already fires on both Enter and focus-out; connecting
+        # returnPressed too made _rename run twice per save.
         self._name_edit.editingFinished.connect(self._rename)
         idrow.addWidget(self._name_edit, 1)
         s.addLayout(idrow)
@@ -356,8 +364,13 @@ class ChatWindow(QWidget):
         rbt.addWidget(self._reply_prev)
         rb.addLayout(rbt, 1)
         rbx = QPushButton("✕")
-        rbx.setProperty("variant", "ghost")
         rbx.setFixedSize(22, 22)
+        rbx.setCursor(Qt.CursorShape.PointingHandCursor)
+        rbx.setStyleSheet(
+            "QPushButton{background:transparent; border:none; padding:0;"
+            " font-size:13px; color:%s;}"
+            "QPushButton:hover{color:%s;}"
+            % (theme.color("text_sec"), theme.color("text_pri")))
         rbx.clicked.connect(self._cancel_reply)
         rb.addWidget(rbx)
         self._reply_bar.hide()
@@ -436,7 +449,11 @@ class ChatWindow(QWidget):
         from PyQt6.QtCore import QEvent
         if e.type() == QEvent.Type.ActivationChange:
             self._visible = self.isActiveWindow() and self.isVisible()
-            if self._visible and self._active:
+            # Only rebuild the roster when there was actually unread to clear.
+            # Otherwise every modal dialog (Save name, Connect by IP, New group)
+            # opening/closing would tear down and re-add every row twice, which
+            # flashes the peer list behind the dialog.
+            if self._visible and self._active and self._unread.get(self._active):
                 self._unread[self._active] = 0
                 self.update_roster(self.chat.peers())
         super().changeEvent(e)
@@ -667,20 +684,38 @@ class ChatWindow(QWidget):
             sl.setStyleSheet("color:%s; font-weight:700; font-size:11px;" % theme.color("accent"))
             bv.addWidget(sl)
         if isinstance(reply, dict) and reply.get("text"):
+            # Colour the nested quote to contrast with its own bubble: white on
+            # the blue outgoing bubble, accent on the light incoming bubble —
+            # never blue-on-blue.
+            if is_out:
+                q_bg, q_stripe = "rgba(255,255,255,0.20)", "rgba(255,255,255,0.85)"
+                q_who, q_tx = "#ffffff", "rgba(255,255,255,0.88)"
+            else:
+                q_bg, q_stripe = "rgba(127,127,127,0.14)", theme.color("accent")
+                q_who, q_tx = theme.color("accent"), txcol
             q = QFrame()
-            q.setObjectName("quote")
-            qv = QVBoxLayout(q)
+            q.setStyleSheet("background:%s; border-radius:7px;" % q_bg)
+            qh = QHBoxLayout(q)
+            qh.setContentsMargins(0, 0, 0, 0)
+            qh.setSpacing(0)
+            stripe = QFrame()
+            stripe.setFixedWidth(3)
+            stripe.setStyleSheet("background:%s; border-top-left-radius:7px;"
+                                 "border-bottom-left-radius:7px;" % q_stripe)
+            qh.addWidget(stripe)
+            qv = QVBoxLayout()
             qv.setContentsMargins(8, 3, 8, 3)
             qv.setSpacing(0)
             who = QLabel(reply.get("sender", ""))
-            who.setStyleSheet("color:%s; font-weight:700; font-size:10px;" % theme.color("accent"))
+            who.setStyleSheet("color:%s; font-weight:700; font-size:10px;" % q_who)
             snip = reply["text"]
             snip = snip if len(snip) <= 80 else snip[:77] + "…"
             qt = QLabel(snip)
-            qt.setStyleSheet("color:%s; font-size:11px;" % txcol)
+            qt.setStyleSheet("color:%s; font-size:11px;" % q_tx)
             qt.setWordWrap(True)
             qv.addWidget(who)
             qv.addWidget(qt)
+            qh.addLayout(qv, 1)
             bv.addWidget(q)
 
         msg = QLabel(text)

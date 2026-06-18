@@ -409,10 +409,12 @@ class MainWindow(QMainWindow):
                 self._lbl_down.setText(f"Download  :  {down_s}")
                 self._lbl_up.setText(f"Upload    :  {up_s}")
                 if self._act_speed.isChecked():
-                    if self._tray:
-                        self._tray.set_speed(up_s, down_s)
+                    # Show the speed as a readout beside the clock, and keep the
+                    # tray icon clean rather than cramming the numbers into 32px.
                     if self._overlay:
                         self._overlay.show_speed(up_s, down_s)
+                    if self._tray:
+                        self._tray.set_idle()
                 else:
                     if self._tray:
                         self._tray.set_idle()
