@@ -332,7 +332,7 @@ class ChatWindow(QWidget):
         lbl.setObjectName("section")
         you.addWidget(lbl)
         you.addStretch(1)
-        self._self_dot = Dot(self.chat.presence_online, 9)
+        self._self_dot = Dot(self.chat.my_status, 9)
         you.addWidget(self._self_dot)
         gear = QToolButton()
         gear.setText("⚙")
@@ -586,10 +586,10 @@ class ChatWindow(QWidget):
 
     def _open_settings(self) -> None:
         m = QMenu(self)
-        if self.chat.presence_online:
-            m.addAction("● Online — appear offline", lambda: self._set_presence(False))
-        else:
-            m.addAction("○ Offline — appear online", lambda: self._set_presence(True))
+        status = self.chat.my_status
+        m.addAction("● Online" + (" ✓" if status == "online" else ""), lambda: self._set_status("online"))
+        m.addAction("🌙 Away" + (" ✓" if status == "away" else ""), lambda: self._set_status("away"))
+        m.addAction("○ Invisible (appear offline)" + (" ✓" if status == "invisible" else ""), lambda: self._set_status("invisible"))
         m.addSeparator()
         if self._notifications_enabled:
             m.addAction("🔔 Popups on — pause popups", lambda: self._set_notify(False))
@@ -599,11 +599,11 @@ class ChatWindow(QWidget):
         m.addAction("📱 Mobile Access — Show QR", self._show_qr_dialog)
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
-    def _set_presence(self, online: bool) -> None:
-        self.chat.presence_online = online
-        config.save_presence_online(online)
-        self._self_dot.set_online(online)
-        self._log(f"You now appear {'online' if online else 'offline'} to peers.")
+    def _set_status(self, status: str) -> None:
+        self.chat.my_status = status
+        config.save_my_status(status)
+        self._self_dot.set_status(status)
+        self._log(f"You now appear {status} to peers.")
 
     def _set_notify(self, enabled: bool) -> None:
         self._notifications_enabled = enabled
@@ -1085,7 +1085,6 @@ class ChatWindow(QWidget):
             if self._notifications_enabled:
                 prev = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(name, prev, ip)
-                self.activity.emit(ip)
 
     def on_group_message(self, group, ip, name, text, ts, reply=None, mid="") -> None:
         gid = group.get("gid")
@@ -1116,7 +1115,6 @@ class ChatWindow(QWidget):
             if self._notifications_enabled:
                 prev = text if len(text) <= 100 else text[:97] + "…"
                 self._toasts.notify(f"{g['name']} (group)", f"{name}: {prev}", key)
-                self.activity.emit(key)
 
     # ── receipts / read tracking ──────────────────────────────────────────────
     def on_receipt(self, ip, mid, state) -> None:
@@ -1488,7 +1486,6 @@ class ChatWindow(QWidget):
         if self._notifications_enabled:
             self._toasts.notify(f"{session.name} 📱",
                                 f"Wants to join from {session.ip}", key)
-            self.activity.emit(key)
         if key == self._active and self._visible:
             self._append(entry)
 
@@ -1516,7 +1513,6 @@ class ChatWindow(QWidget):
             if self._notifications_enabled:
                 prev = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(f"{session.name} 📱", prev, key)
-                self.activity.emit(key)
 
     def on_mobile_file(self, session, filename: str, save_path: str, size: int) -> None:
         """Approved mobile user uploaded a file."""
@@ -1532,7 +1528,6 @@ class ChatWindow(QWidget):
             self.update_roster(self.chat.peers())
             if self._notifications_enabled:
                 self._toasts.notify(f"{session.name} 📱", f"📎 Sent a file: {filename}", key)
-                self.activity.emit(key)
 
     def on_mobile_download(self, sid: str, tid: str) -> None:
         """Mobile user started/finished downloading a file offered by desktop."""
@@ -2212,7 +2207,6 @@ class ChatWindow(QWidget):
         self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
         if not (ip == self._active and self._visible) and self._notifications_enabled:
             self._toasts.notify(name, f"📎 Wants to send: {msg['filename']}", ip)
-            self.activity.emit(ip)
 
     def _accept_file(self, tid, from_ip, filename, size) -> None:
         from_ip = from_ip or self._active
@@ -2268,6 +2262,7 @@ class ChatWindow(QWidget):
 
     def on_file_accepted(self, ip, name, msg) -> None:
         self._set_progress(msg["transfer_id"], f"{name} accepted — sending…")
+        self._rerender_if_active(ip)
 
     def on_file_rejected(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
@@ -2327,7 +2322,6 @@ class ChatWindow(QWidget):
             self.update_roster(self.chat.peers())
         if self._notifications_enabled:
             self._toasts.notify(name, "Wants to chat — tap to respond", ip)
-            self.activity.emit(ip)
 
     def _accept_chat(self, ip) -> None:
         self._chat_req_states[ip] = "accepted"

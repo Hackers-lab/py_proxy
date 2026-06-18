@@ -153,14 +153,28 @@ def load_notifications_enabled() -> bool:
 def save_notifications_enabled(enabled: bool) -> bool:
     return _write_value("NotificationsEnabled", winreg.REG_DWORD, 1 if enabled else 0)
 
-# ── Presence (appear online / offline) ────────────────────────────────────────
+# ── Presence status (manual: online / away / invisible) ───────────────────────
 
+def load_my_status() -> str:
+    """Return the saved presence status: 'online', 'away', or 'invisible'."""
+    val = str(_read_value("MyStatus", "online")).strip().lower()
+    return val if val in ("online", "away", "invisible") else "online"
+
+
+def save_my_status(status: str) -> bool:
+    status = status.strip().lower()
+    if status not in ("online", "away", "invisible"):
+        status = "online"
+    return _write_value("MyStatus", winreg.REG_SZ, status)
+
+
+# Keep legacy helpers so existing code doesn't break during migration.
 def load_presence_online() -> bool:
-    return bool(_read_value("PresenceOnline", 1))
+    return load_my_status() != "invisible"
 
 
 def save_presence_online(online: bool) -> bool:
-    return _write_value("PresenceOnline", winreg.REG_DWORD, 1 if online else 0)
+    return save_my_status("online" if online else "invisible")
 
 # ── Mobile access ────────────────────────────────────────────────────────────
 

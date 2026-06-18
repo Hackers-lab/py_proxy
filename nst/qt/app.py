@@ -54,7 +54,7 @@ def run() -> None:
         on_reaction=lambda ip, mid, emoji: sig.reaction.emit(ip, mid, emoji),
     )
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
-    chat.presence_online = config.load_presence_online()
+    chat.my_status = config.load_my_status()
 
     mobile = MobileServer(
         port=MOBILE_HTTP_PORT,

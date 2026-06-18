@@ -47,6 +47,14 @@ class Peer:
 
 
 class ChatService:
+    @property
+    def presence_online(self) -> bool:
+        return getattr(self, "my_status", "online") != "invisible"
+
+    @presence_online.setter
+    def presence_online(self, val: bool):
+        self.my_status = "online" if val else "invisible"
+
     def __init__(self, my_name: str,
                  on_roster_change=None,
                  on_message=None,
@@ -89,9 +97,9 @@ class ChatService:
         self._on_typing = on_typing
         self._on_reaction = on_reaction
 
-        # Appear-online toggle: when False we stop advertising presence so other
-        # peers reap us, but we still receive and can reply to direct messages.
-        self.presence_online: bool = True
+        # Manual status: 'online', 'away', or 'invisible'.
+        # 'invisible' stops advertising presence so peers reap us.
+        self.my_status: str = "online"
 
         # IP chat access control
         self.ip_chat_enabled: bool = True
@@ -293,8 +301,7 @@ class ChatService:
                 try:
                     # Honour the appear-offline toggle: skip advertising but keep
                     # the loop alive so flipping back online resumes instantly.
-                    if self.presence_online:
-                        status = "away" if get_idle_seconds() >= CHAT_AWAY_AFTER else "online"
+                    if self.my_status != "invisible":
                         payload = CHAT_MAGIC + b"|" + json.dumps({
                             "v": 2,
                             "uid": self.my_uid,
@@ -302,7 +309,7 @@ class ChatService:
                             "device": self.my_device,
                             "ip": self.my_ip,
                             "ips": get_all_local_ips(),
-                            "status": status,
+                            "status": self.my_status,
                         }).encode("utf-8")
                         # Broadcast only on the primary LAN subnet so the
                         # presence beacon doesn't leak onto hotspot/VPN adapters.
