@@ -1,0 +1,1381 @@
+"""The modern LAN-chat window (PyQt6).
+
+A messaging-app style two-pane layout: a searchable roster of peers and groups
+on the left, a smooth bubble conversation + composer on the right. All chat
+state, history files and the synced-group / reply / file-transfer protocols are
+shared unchanged with the service layer.
+"""
+
+import json
+import os
+import subprocess
+import threading
+import time
+import uuid
+
+from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame,
+                             QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                             QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                             QPushButton, QScrollArea, QSizePolicy, QToolButton,
+                             QVBoxLayout, QWidget)
+
+from .. import config
+from ..chat import DemoBot
+from ..constants import CHAT_TCP_PORT
+from ..filetransfer import FileTransferService
+from ..netinfo import check_host_reachable, is_valid_ipv4
+from .theme import theme
+from .widgets import Avatar, Dot, ToggleSwitch, hline
+
+_PLACEHOLDER = "Type a message…"
+_MAX_HISTORY = 200
+_BUBBLE_MAX = 420
+
+
+def _fmt_size(b: int) -> str:
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 ** 2:
+        return f"{b / 1024:.1f} KB"
+    if b < 1024 ** 3:
+        return f"{b / 1024 ** 2:.1f} MB"
+    return f"{b / 1024 ** 3:.2f} GB"
+
+
+def _fmt_speed(bps: float) -> str:
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    if bps < 1024 ** 2:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps / 1024 ** 2:.1f} MB/s"
+
+
+def _fmt_eta(secs: float) -> str:
+    s = int(secs)
+    return f"{s}s" if s < 60 else f"{s // 60}m {s % 60}s"
+
+
+def _repolish(w: QWidget) -> None:
+    w.style().unpolish(w)
+    w.style().polish(w)
+
+
+class _Scroll(QScrollArea):
+    """A vertical scroll area exposing a ``body`` VBox to add widgets to."""
+
+    def __init__(self, autostick: bool = False) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body = QWidget()
+        self.box = QVBoxLayout(self.body)
+        self.box.setContentsMargins(6, 6, 6, 6)
+        self.box.setSpacing(2)
+        self.box.addStretch(1)
+        self.setWidget(self.body)
+        self._autostick = autostick
+        self._stick = True
+        if autostick:
+            bar = self.verticalScrollBar()
+            bar.rangeChanged.connect(self._on_range)
+            bar.valueChanged.connect(self._on_value)
+
+    def add(self, w: QWidget) -> None:
+        # Insert before the trailing stretch.
+        self.box.insertWidget(self.box.count() - 1, w)
+
+    def clear(self) -> None:
+        while self.box.count() > 1:
+            item = self.box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _on_value(self, v: int) -> None:
+        bar = self.verticalScrollBar()
+        self._stick = v >= bar.maximum() - 4
+
+    def _on_range(self, _min: int, _max: int) -> None:
+        if self._stick:
+            self.verticalScrollBar().setValue(_max)
+
+    def scroll_to_bottom(self) -> None:
+        self._stick = True
+        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
+            self.verticalScrollBar().maximum()))
+
+
+class _RosterRow(QFrame):
+    clicked = pyqtSignal(str)
+    deleted = pyqtSignal(str)
+
+    def __init__(self, key, title, subtitle, online, unread, is_group, deletable):
+        super().__init__()
+        self.key = key
+        self.setObjectName("rosterRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(9)
+
+        av = Avatar("👥" if is_group else title, 38)
+        lay.addWidget(av)
+
+        mid = QVBoxLayout()
+        mid.setSpacing(1)
+        name = QLabel(title)
+        name.setStyleSheet("font-weight:700;")
+        mid.addWidget(name)
+        sub = QHBoxLayout()
+        sub.setSpacing(4)
+        if is_group:
+            g = QLabel("👥 " + subtitle)
+            g.setObjectName("muted")
+            g.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
+            sub.addWidget(g)
+        else:
+            sub.addWidget(Dot(online, 9))
+            s = QLabel(subtitle)
+            s.setObjectName("muted")
+            s.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
+            sub.addWidget(s)
+        sub.addStretch(1)
+        mid.addLayout(sub)
+        lay.addLayout(mid, 1)
+
+        if unread:
+            b = QLabel(str(unread))
+            b.setObjectName("unread")
+            b.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(b)
+        if deletable:
+            x = QPushButton("✕")
+            x.setProperty("variant", "ghost")
+            x.setFixedSize(22, 22)
+            x.setCursor(Qt.CursorShape.PointingHandCursor)
+            x.clicked.connect(lambda: self.deleted.emit(self.key))
+            lay.addWidget(x)
+
+    def set_active(self, active: bool) -> None:
+        self.setProperty("active", "true" if active else "false")
+        _repolish(self)
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.key)
+        super().mousePressEvent(e)
+
+
+class ChatWindow(QWidget):
+    """Standalone chat window. Closing hides it so conversations persist."""
+
+    activity = pyqtSignal(str)     # background message arrived on this key
+
+    def __init__(self, chat_service, toasts, log_fn=lambda m: None) -> None:
+        super().__init__(None)
+        self.chat = chat_service
+        self._toasts = toasts
+        self._log = log_fn
+        self.setWindowTitle("LAN Chat — Net Split-Tunneler")
+        self.resize(900, 600)
+        self.setMinimumSize(720, 480)
+
+        self._conversations: dict[str, list[tuple]] = {}
+        self._names: dict[str, str] = {}
+        self._aliases: dict[str, str] = {}
+        self._unread: dict[str, int] = {}
+        self._groups: dict[str, dict] = {}
+        self._active: str | None = None
+        self._visible = False
+        self._peer_filter = ""
+        self._reply_to: dict | None = None
+        self._notifications_enabled = config.load_notifications_enabled()
+        self._last_online_sig: frozenset = frozenset()
+        self._rows: dict[str, _RosterRow] = {}
+
+        # file transfer state
+        self._progress_text: dict[str, str] = {}
+        self._progress_lbls: dict[str, QLabel] = {}
+        self._offer_states: dict[str, str] = {}
+        self._transfer_paths: dict[str, str] = {}
+        self._chat_req_states: dict[str, str] = {}
+
+        self._ft = FileTransferService(chat_service)
+        self._ft.start()
+
+        self._build()
+        self._load_history()
+        theme.changed.connect(self._on_theme)
+        self.update_roster(self.chat.peers())
+        self._tick = QTimer(self)
+        self._tick.timeout.connect(self._roster_tick)
+        self._tick.start(3000)
+
+    # ── construction ────────────────────────────────────────────────────────
+    def _build(self) -> None:
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        side = QWidget()
+        side.setObjectName("card")
+        side.setFixedWidth(270)
+        s = QVBoxLayout(side)
+        s.setContentsMargins(12, 12, 12, 12)
+        s.setSpacing(8)
+
+        # YOU header
+        you = QHBoxLayout()
+        lbl = QLabel("YOU")
+        lbl.setObjectName("section")
+        you.addWidget(lbl)
+        you.addStretch(1)
+        self._self_dot = Dot(self.chat.presence_online, 9)
+        you.addWidget(self._self_dot)
+        gear = QToolButton()
+        gear.setText("⚙")
+        gear.setCursor(Qt.CursorShape.PointingHandCursor)
+        gear.clicked.connect(self._open_settings)
+        you.addWidget(gear)
+        s.addLayout(you)
+
+        idrow = QHBoxLayout()
+        self._self_avatar = Avatar(self.chat.my_name, 34)
+        idrow.addWidget(self._self_avatar)
+        self._name_edit = QLineEdit(self.chat.my_name)
+        self._name_edit.setStyleSheet("font-weight:700;")
+        self._name_edit.returnPressed.connect(self._rename)
+        self._name_edit.editingFinished.connect(self._rename)
+        idrow.addWidget(self._name_edit, 1)
+        s.addLayout(idrow)
+
+        # connect by IP
+        ciprow = QHBoxLayout()
+        cip = QLabel("CONNECT BY IP")
+        cip.setObjectName("section")
+        ciprow.addWidget(cip)
+        ciprow.addStretch(1)
+        self._ip_toggle = ToggleSwitch(self.chat.ip_chat_enabled)
+        self._ip_toggle.toggled.connect(self._toggle_ip_chat)
+        ciprow.addWidget(self._ip_toggle)
+        s.addLayout(ciprow)
+
+        conrow = QHBoxLayout()
+        self._ip_edit = QLineEdit()
+        self._ip_edit.setPlaceholderText("10.x.x.x")
+        self._ip_edit.returnPressed.connect(self._connect_manual_ip)
+        conrow.addWidget(self._ip_edit, 1)
+        go = QPushButton("➜")
+        go.setProperty("variant", "accent")
+        go.setFixedWidth(40)
+        go.clicked.connect(self._connect_manual_ip)
+        conrow.addWidget(go)
+        s.addLayout(conrow)
+
+        # peers header + new group
+        phrow = QHBoxLayout()
+        ph = QLabel("PEERS")
+        ph.setObjectName("section")
+        phrow.addWidget(ph)
+        phrow.addStretch(1)
+        newg = QPushButton("＋ Group")
+        newg.setProperty("variant", "ghost")
+        newg.setStyleSheet("color:%s; font-weight:700;" % theme.color("accent"))
+        newg.clicked.connect(self._new_group_dialog)
+        phrow.addWidget(newg)
+        s.addLayout(phrow)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("🔍  Search peers…")
+        self._search.textChanged.connect(self._on_search)
+        s.addWidget(self._search)
+
+        self._roster = _Scroll()
+        s.addWidget(self._roster, 1)
+
+        demo = QPushButton("Try Demo Chat")
+        demo.setProperty("variant", "accent")
+        demo.clicked.connect(self._start_demo)
+        s.addWidget(demo)
+
+        root.addWidget(side)
+
+        # right pane
+        right = QWidget()
+        r = QVBoxLayout(right)
+        r.setContentsMargins(14, 12, 14, 12)
+        r.setSpacing(8)
+
+        head = QHBoxLayout()
+        self._head_avatar = Avatar("LAN", 40)
+        head.addWidget(self._head_avatar)
+        htext = QVBoxLayout()
+        htext.setSpacing(0)
+        self._head_name = QLabel("LAN Chat")
+        self._head_name.setObjectName("title")
+        self._head_sub = QLabel("Select a peer on the left")
+        self._head_sub.setObjectName("muted")
+        htext.addWidget(self._head_name)
+        htext.addWidget(self._head_sub)
+        head.addLayout(htext)
+        head.addStretch(1)
+        self._btn_add = QPushButton("＋ Add")
+        self._btn_add.setProperty("variant", "accent")
+        self._btn_add.clicked.connect(self._add_group_members)
+        head.addWidget(self._btn_add)
+        self._btn_save = QPushButton("✎ Save name")
+        self._btn_save.clicked.connect(self._edit_alias)
+        head.addWidget(self._btn_save)
+        self._btn_clear = QPushButton("Clear")
+        self._btn_clear.clicked.connect(self._clear_chat)
+        head.addWidget(self._btn_clear)
+        r.addLayout(head)
+        r.addWidget(hline())
+
+        self._messages = _Scroll(autostick=True)
+        r.addWidget(self._messages, 1)
+
+        # reply bar
+        self._reply_bar = QFrame()
+        self._reply_bar.setObjectName("replyBar")
+        rb = QHBoxLayout(self._reply_bar)
+        rb.setContentsMargins(10, 6, 8, 6)
+        stripe = QFrame()
+        stripe.setFixedWidth(3)
+        stripe.setStyleSheet("background:%s; border-radius:2px;" % theme.color("accent"))
+        rb.addWidget(stripe)
+        rbt = QVBoxLayout()
+        rbt.setSpacing(0)
+        self._reply_who = QLabel("")
+        self._reply_who.setObjectName("accent")
+        self._reply_prev = QLabel("")
+        self._reply_prev.setObjectName("muted")
+        rbt.addWidget(self._reply_who)
+        rbt.addWidget(self._reply_prev)
+        rb.addLayout(rbt, 1)
+        rbx = QPushButton("✕")
+        rbx.setProperty("variant", "ghost")
+        rbx.setFixedSize(22, 22)
+        rbx.clicked.connect(self._cancel_reply)
+        rb.addWidget(rbx)
+        self._reply_bar.hide()
+        r.addWidget(self._reply_bar)
+
+        comp = QHBoxLayout()
+        self._entry = QLineEdit()
+        self._entry.setPlaceholderText(_PLACEHOLDER)
+        self._entry.returnPressed.connect(self._send)
+        comp.addWidget(self._entry, 1)
+        self._btn_file = QPushButton("📎")
+        self._btn_file.setFixedWidth(44)
+        self._btn_file.clicked.connect(self._attach_file)
+        comp.addWidget(self._btn_file)
+        self._btn_send = QPushButton("Send")
+        self._btn_send.setProperty("variant", "accent")
+        self._btn_send.clicked.connect(self._send)
+        comp.addWidget(self._btn_send)
+        self._composer = QWidget()
+        self._composer.setLayout(comp)
+        r.addWidget(self._composer)
+
+        root.addWidget(right, 1)
+        self._show_empty_state()
+        self._set_composer_visible(False)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _is_group(key: str) -> bool:
+        return bool(key) and key.startswith("group:")
+
+    def _display_name(self, key: str) -> str:
+        if self._is_group(key):
+            return self._groups.get(key[6:], {}).get("name", "Group")
+        return self._aliases.get(key) or self._names.get(key, key)
+
+    def _group_meta(self, gid: str) -> dict:
+        g = self._groups.get(gid, {})
+        members = list(g.get("members", []))
+        if self.chat.my_ip not in members:
+            members = members + [self.chat.my_ip]
+        return {"gid": gid, "name": g.get("name", "Group"), "members": members}
+
+    def _last_activity(self, key: str) -> float:
+        msgs = self._conversations.get(key)
+        if not msgs:
+            return 0.0
+        try:
+            return float(msgs[-1][3])
+        except (IndexError, TypeError, ValueError):
+            return 0.0
+
+    # ── window visibility ─────────────────────────────────────────────────────
+    def open(self, key: str | None = None) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._visible = True
+        if key:
+            self.select_peer(key)
+
+    def closeEvent(self, e) -> None:
+        e.ignore()
+        self._visible = False
+        self.hide()
+
+    def showEvent(self, e) -> None:
+        self._visible = True
+        super().showEvent(e)
+
+    def hideEvent(self, e) -> None:
+        self._visible = False
+        super().hideEvent(e)
+
+    def changeEvent(self, e) -> None:
+        from PyQt6.QtCore import QEvent
+        if e.type() == QEvent.Type.ActivationChange:
+            self._visible = self.isActiveWindow() and self.isVisible()
+            if self._visible and self._active:
+                self._unread[self._active] = 0
+                self.update_roster(self.chat.peers())
+        super().changeEvent(e)
+
+    # ── self identity / settings ──────────────────────────────────────────────
+    def _rename(self) -> None:
+        new = self._name_edit.text().strip()[:32]
+        if not new:
+            self._name_edit.setText(self.chat.my_name)
+            return
+        if new == self.chat.my_name:
+            return
+        self.chat.set_name(new)
+        config.save_display_name(new)
+        self._self_avatar.set_name(new)
+        self._log(f"Chat display name set to '{new}'.")
+
+    def _open_settings(self) -> None:
+        m = QMenu(self)
+        if self.chat.presence_online:
+            m.addAction("● Online — appear offline", lambda: self._set_presence(False))
+        else:
+            m.addAction("○ Offline — appear online", lambda: self._set_presence(True))
+        m.addSeparator()
+        if self._notifications_enabled:
+            m.addAction("🔔 Popups on — pause popups", lambda: self._set_notify(False))
+        else:
+            m.addAction("🔕 Popups paused — enable popups", lambda: self._set_notify(True))
+        m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
+
+    def _set_presence(self, online: bool) -> None:
+        self.chat.presence_online = online
+        config.save_presence_online(online)
+        self._self_dot.set_online(online)
+        self._log(f"You now appear {'online' if online else 'offline'} to peers.")
+
+    def _set_notify(self, enabled: bool) -> None:
+        self._notifications_enabled = enabled
+        config.save_notifications_enabled(enabled)
+        self._log(f"Message popups {'enabled' if enabled else 'paused'}.")
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self._notifications_enabled
+
+    def _toggle_ip_chat(self, enabled: bool) -> None:
+        self.chat.ip_chat_enabled = enabled
+        config.save_ip_chat_enabled(enabled)
+        self._log(f"External IP chat {'enabled' if enabled else 'disabled'}.")
+
+    def _on_search(self, text: str) -> None:
+        self._peer_filter = text.strip().lower()
+        self.update_roster(self.chat.peers())
+
+    def _on_theme(self) -> None:
+        if self._active:
+            self._render(self._active)
+        self.update_roster(self.chat.peers())
+
+    # ── roster ────────────────────────────────────────────────────────────────
+    def _is_online(self, ip: str, live: set[str]) -> bool:
+        if ip == DemoBot.IP:
+            return True
+        if ip in live and not self.chat.is_manual_peer(ip):
+            return True
+        return self.chat.is_peer_online(ip)
+
+    def _online_ips(self, peers) -> list[str]:
+        live = {p.ip for p in peers}
+        cands = live | set(self._conversations) | set(self._names) | set(self._aliases)
+        cands = {c for c in cands if not self._is_group(c)}
+        cands.discard(self.chat.my_ip)
+        return [ip for ip in cands
+                if self._is_online(ip, live) or self.chat.is_manual_peer(ip)]
+
+    def _matches(self, key: str) -> bool:
+        if not self._peer_filter:
+            return True
+        return self._peer_filter in f"{self._display_name(key)} {key}".lower()
+
+    def _roster_tick(self) -> None:
+        peers = self.chat.peers()
+        if frozenset(self._online_ips(peers)) != self._last_online_sig:
+            self.update_roster(peers)
+
+    def update_roster(self, peers) -> None:
+        for p in peers:
+            self._names[p.ip] = p.name
+        online = self._online_ips(peers)
+        self._last_online_sig = frozenset(online)
+        live = {p.ip for p in peers}
+
+        self._roster.clear()
+        self._rows = {}
+
+        groups = [f"group:{g}" for g in self._groups if self._matches(f"group:{g}")]
+        peers_f = [ip for ip in online if self._matches(ip)]
+
+        if not groups and not peers_f:
+            hint = QLabel("No matches." if self._peer_filter
+                          else "Looking for people on your network…\nOpen the app on another PC, or Try Demo Chat.")
+            hint.setObjectName("muted")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setWordWrap(True)
+            self._roster.add(hint)
+            return
+
+        for key in sorted(groups, key=lambda x: (-self._last_activity(x),
+                                                 self._display_name(x).lower())):
+            gid = key[6:]
+            n = len(self._group_meta(gid).get("members", []))
+            self._add_row(key, self._display_name(key), f"{n} members",
+                          True, self._unread.get(key, 0), True, True)
+        for ip in sorted(peers_f, key=lambda x: (not self._is_online(x, live),
+                                                 -self._last_activity(x),
+                                                 self._display_name(x).lower())):
+            on = self._is_online(ip, live)
+            sub = "demo peer" if ip == DemoBot.IP else ip
+            self._add_row(ip, self._display_name(ip), sub, on,
+                          self._unread.get(ip, 0), False, ip != DemoBot.IP)
+
+        if self._active:
+            self._update_header_sub(peers)
+
+    def _add_row(self, key, title, sub, online, unread, is_group, deletable) -> None:
+        row = _RosterRow(key, title, sub, online, unread, is_group, deletable)
+        row.set_active(key == self._active)
+        row.clicked.connect(self.select_peer)
+        row.deleted.connect(self._delete_group if is_group else self._delete_peer)
+        self._roster.add(row)
+        self._rows[key] = row
+
+    def _update_header_sub(self, peers) -> None:
+        key = self._active
+        if self._is_group(key):
+            n = len(self._group_meta(key[6:]).get("members", []))
+            self._head_sub.setText(f"Group · {n} members")
+        elif key == DemoBot.IP:
+            self._head_sub.setText("demo peer")
+        else:
+            on = self._is_online(key, {p.ip for p in peers})
+            self._head_sub.setText(f"{key}  ·  {'Online' if on else 'Offline'}")
+
+    # ── selection ─────────────────────────────────────────────────────────────
+    def select_peer(self, key: str) -> None:
+        prev = self._active
+        self._active = key
+        self._unread[key] = 0
+        self._cancel_reply()
+        for k, row in self._rows.items():
+            row.set_active(k == key)
+        self._head_avatar.set_name("👥" if self._is_group(key) else self._display_name(key))
+        self._head_name.setText(self._display_name(key))
+        self._update_header_sub(self.chat.peers())
+        is_grp = self._is_group(key)
+        self._btn_add.setVisible(is_grp)
+        self._btn_save.setVisible(not is_grp and key != DemoBot.IP)
+        self._btn_file.setVisible(not is_grp)
+        self._set_composer_visible(True)
+        self._render(key)
+        self._entry.setFocus()
+        if prev != key:
+            self.update_roster(self.chat.peers())
+
+    def _set_composer_visible(self, on: bool) -> None:
+        self._composer.setVisible(on)
+        self._btn_clear.setVisible(on)
+        if not on:
+            self._btn_add.setVisible(False)
+            self._btn_save.setVisible(False)
+            self._cancel_reply()
+
+    def _show_empty_state(self) -> None:
+        self._messages.clear()
+        w = QLabel("💬\n\nPick someone from the list to start chatting.")
+        w.setObjectName("muted")
+        w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._messages.add(w)
+
+    # ── rendering ─────────────────────────────────────────────────────────────
+    def _render(self, key: str) -> None:
+        self._messages.clear()
+        self._progress_lbls.clear()
+        msgs = self._conversations.get(key, [])
+        if not msgs:
+            w = QLabel("Say hi! 👋")
+            w.setObjectName("muted")
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._messages.add(w)
+        else:
+            for entry in msgs:
+                self._messages.add(self._make_bubble(entry))
+        self._messages.scroll_to_bottom()
+
+    def _append(self, entry: tuple) -> None:
+        self._messages.add(self._make_bubble(entry))
+        self._messages.scroll_to_bottom()
+
+    def _make_bubble(self, entry: tuple) -> QWidget:
+        kind = entry[0]
+        if kind in ("file_out", "file_in_offer"):
+            return self._make_file_bubble(entry)
+        if kind == "chat_req":
+            return self._make_req_bubble(entry)
+        if kind == "sys":
+            lbl = QLabel(f"— {entry[2]} —")
+            lbl.setObjectName("muted")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("font-style:italic; padding:3px; color:%s;" % theme.color("text_sec"))
+            return lbl
+
+        sender, text, ts = entry[1], entry[2], entry[3]
+        reply = entry[4] if len(entry) > 4 else None
+        is_out = kind == "out"
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 2, 4, 2)
+        bubble = QFrame()
+        bubble.setProperty("bubble", "out" if is_out else "in")
+        bubble.setMaximumWidth(_BUBBLE_MAX)
+        bv = QVBoxLayout(bubble)
+        bv.setContentsMargins(12, 8, 12, 6)
+        bv.setSpacing(2)
+        txcol = theme.color("bubble_out_tx" if is_out else "bubble_in_tx")
+
+        if not is_out:
+            sl = QLabel(sender)
+            sl.setStyleSheet("color:%s; font-weight:700; font-size:11px;" % theme.color("accent"))
+            bv.addWidget(sl)
+        if isinstance(reply, dict) and reply.get("text"):
+            q = QFrame()
+            q.setObjectName("quote")
+            qv = QVBoxLayout(q)
+            qv.setContentsMargins(8, 3, 8, 3)
+            qv.setSpacing(0)
+            who = QLabel(reply.get("sender", ""))
+            who.setStyleSheet("color:%s; font-weight:700; font-size:10px;" % theme.color("accent"))
+            snip = reply["text"]
+            snip = snip if len(snip) <= 80 else snip[:77] + "…"
+            qt = QLabel(snip)
+            qt.setStyleSheet("color:%s; font-size:11px;" % txcol)
+            qt.setWordWrap(True)
+            qv.addWidget(who)
+            qv.addWidget(qt)
+            bv.addWidget(q)
+
+        msg = QLabel(text)
+        msg.setWordWrap(True)
+        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg.setStyleSheet("color:%s; font-size:13px;" % txcol)
+        bv.addWidget(msg)
+
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        rep = QPushButton("↩ Reply")
+        rep.setProperty("variant", "ghost")
+        rep.setStyleSheet("font-size:10px; color:%s; padding:0;" % txcol)
+        rep.setCursor(Qt.CursorShape.PointingHandCursor)
+        snd = "You" if is_out else sender
+        rep.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
+        stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
+        stamp.setStyleSheet("font-size:10px; color:%s;" % txcol)
+        foot.addWidget(rep)
+        foot.addStretch(1)
+        foot.addWidget(stamp)
+        bv.addLayout(foot)
+
+        if is_out:
+            h.addStretch(1)
+            h.addWidget(bubble)
+        else:
+            h.addWidget(bubble)
+            h.addStretch(1)
+        return row
+
+    # ── reply ─────────────────────────────────────────────────────────────────
+    def _set_reply(self, sender: str, text: str) -> None:
+        self._reply_to = {"sender": sender, "text": text}
+        self._reply_who.setText(f"↩ Replying to {sender}")
+        self._reply_prev.setText(text if len(text) <= 80 else text[:77] + "…")
+        self._reply_bar.show()
+        self._entry.setFocus()
+
+    def _cancel_reply(self) -> None:
+        self._reply_to = None
+        self._reply_bar.hide()
+
+    # ── send / receive ────────────────────────────────────────────────────────
+    def _send(self) -> None:
+        key = self._active
+        text = self._entry.text().strip()
+        if not key or not text:
+            return
+        self._entry.clear()
+        reply = self._reply_to
+        entry = ("out", "You", text, time.time(), reply) if reply \
+            else ("out", "You", text, time.time())
+        self._conversations.setdefault(key, []).append(entry)
+        self._trim(key)
+        self._cancel_reply()
+        if self._is_group(key):
+            self._save_group(key[6:])
+        else:
+            self._save_peer(key)
+        self._append(entry)
+
+        if self._is_group(key):
+            meta = self._group_meta(key[6:])
+            threading.Thread(target=self._send_group_worker,
+                             args=(key, meta, text, reply), daemon=True).start()
+        else:
+            threading.Thread(target=self._send_worker,
+                             args=(key, text, reply), daemon=True).start()
+
+    def _send_worker(self, ip, text, reply) -> None:
+        ok = self.chat.send(ip, text, reply=reply)
+        if not ok:
+            QTimer.singleShot(0, lambda: self._sys(ip, "not delivered (peer offline?)"))
+
+    def _send_group_worker(self, key, meta, text, reply) -> None:
+        results = self.chat.send_group(meta, text, reply=reply)
+        failed = [ip for ip, okk in results.items() if not okk]
+        if failed:
+            QTimer.singleShot(0, lambda: self._sys(
+                key, f"not delivered to {len(failed)} member(s) (offline?)"))
+
+    def _sys(self, key, text) -> None:
+        self._conversations.setdefault(key, []).append(("sys", "", text, time.time()))
+        if key == self._active:
+            self._append(("sys", "", text, time.time()))
+
+    def receive_message(self, ip, name, text, ts, reply=None) -> None:
+        self._names[ip] = name
+        entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
+        self._conversations.setdefault(ip, []).append(entry)
+        self._trim(ip)
+        self._save_peer(ip)
+        if ip == self._active and self._visible:
+            self._append(entry)
+        else:
+            self._unread[ip] = self._unread.get(ip, 0) + 1
+            self.update_roster(self.chat.peers())
+            if self._notifications_enabled:
+                prev = text if len(text) <= 120 else text[:117] + "…"
+                self._toasts.notify(name, prev, ip)
+                self.activity.emit(ip)
+
+    def on_group_message(self, group, ip, name, text, ts, reply=None) -> None:
+        gid = group.get("gid")
+        if not gid:
+            return
+        members = [m for m in group.get("members", []) if m]
+        g = self._groups.setdefault(gid, {"name": group.get("name", "Group"), "members": members})
+        g["name"] = group.get("name", g.get("name", "Group"))
+        if members:
+            g["members"] = members
+        for m in members:
+            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                self.chat.add_manual_peer(m)
+        self._names[ip] = name
+        key = f"group:{gid}"
+        if not text:
+            self._save_group(gid)
+            self.update_roster(self.chat.peers())
+            return
+        entry = ("in", name, text, ts, reply) if reply else ("in", name, text, ts)
+        self._conversations.setdefault(key, []).append(entry)
+        self._trim(key)
+        self._save_group(gid)
+        if key == self._active and self._visible:
+            self._append(entry)
+        else:
+            self._unread[key] = self._unread.get(key, 0) + 1
+            self.update_roster(self.chat.peers())
+            if self._notifications_enabled:
+                prev = text if len(text) <= 100 else text[:97] + "…"
+                self._toasts.notify(f"{g['name']} (group)", f"{name}: {prev}", key)
+                self.activity.emit(key)
+
+    # ── demo ──────────────────────────────────────────────────────────────────
+    def _start_demo(self) -> None:
+        if not self.chat.has_demo():
+            self.chat.add_demo_bot()
+            self._log("Demo chat started — say hi to the Demo Bot.")
+        QTimer.singleShot(150, lambda: self.select_peer(DemoBot.IP))
+
+    # ── manual IP ─────────────────────────────────────────────────────────────
+    def _connect_manual_ip(self) -> None:
+        ip = self._ip_edit.text().strip()
+        if not ip:
+            return
+        if not is_valid_ipv4(ip) or not ip.startswith("10."):
+            self._log(f"Invalid IP: {ip!r} — must be a valid 10.x.x.x address.")
+            return
+        if ip == self.chat.my_ip:
+            self._log("Cannot chat with yourself.")
+            return
+        name, ok = QInputDialog.getText(self, "Name this PC", f"Enter a name for {ip}:")
+        if ok and name.strip():
+            self._aliases[ip] = name.strip()[:32]
+        self.chat.add_manual_peer(ip)
+        self._names.setdefault(ip, ip)
+        self._ip_edit.clear()
+        self.select_peer(ip)
+        self._save_peer(ip)
+        threading.Thread(target=self._probe_manual, args=(ip,), daemon=True).start()
+
+    def _probe_manual(self, ip) -> None:
+        if not check_host_reachable(ip, CHAT_TCP_PORT):
+            QTimer.singleShot(0, lambda: self._sys(
+                ip, "Not reachable — make sure the app is running on that PC."))
+
+    # ── alias / delete ────────────────────────────────────────────────────────
+    def _edit_alias(self) -> None:
+        ip = self._active
+        if not ip or self._is_group(ip) or ip == DemoBot.IP:
+            return
+        cur = self._aliases.get(ip, "")
+        name, ok = QInputDialog.getText(self, "Save name", f"Name for {ip}:",
+                                        text=cur)
+        if not ok:
+            return
+        name = name.strip()[:32]
+        if name:
+            self._aliases[ip] = name
+        else:
+            self._aliases.pop(ip, None)
+        self._save_peer(ip)
+        self._head_name.setText(self._display_name(ip))
+        self._head_avatar.set_name(self._display_name(ip))
+        self.update_roster(self.chat.peers())
+        self._log(f"Saved name for {ip}.")
+
+    def _delete_peer(self, ip) -> None:
+        name = self._display_name(ip)
+        if QMessageBox.question(self, "Remove peer",
+                                f"Remove {name} and delete its chat history?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.chat.remove_peer(ip)
+        for d in (self._conversations, self._unread, self._names,
+                  self._aliases, self._chat_req_states):
+            d.pop(ip, None)
+        self._delete_history_file(ip)
+        if self._active == ip:
+            self._reset_active()
+        self.update_roster(self.chat.peers())
+        self._log(f"Removed {name} from the chat list.")
+
+    def _reset_active(self) -> None:
+        self._active = None
+        self._head_name.setText("LAN Chat")
+        self._head_sub.setText("Select a peer on the left")
+        self._head_avatar.set_name("LAN")
+        self._set_composer_visible(False)
+        self._show_empty_state()
+
+    # ── groups ────────────────────────────────────────────────────────────────
+    def _member_dialog(self, title, exclude) -> list[str] | None:
+        cands = [ip for ip in (set(self._names) | set(self._aliases) | set(self._conversations))
+                 if ip not in exclude and ip != self.chat.my_ip
+                 and ip != DemoBot.IP and not self._is_group(ip)]
+        cands.sort(key=lambda x: self._display_name(x).lower())
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(360, 420)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel("Select members"))
+        lst = QListWidget()
+        boxes = {}
+        for ip in cands:
+            it = QListWidgetItem()
+            cb = QCheckBox(f"{self._display_name(ip)}  ({ip})")
+            boxes[ip] = cb
+            lst.addItem(it)
+            lst.setItemWidget(it, cb)
+        v.addWidget(lst, 1)
+        v.addWidget(QLabel("Add an IP (optional)"))
+        extra = QLineEdit()
+        extra.setPlaceholderText("10.x.x.x")
+        v.addWidget(extra)
+        brow = QHBoxLayout()
+        brow.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        okb = QPushButton("OK")
+        okb.setProperty("variant", "accent")
+        okb.clicked.connect(dlg.accept)
+        brow.addWidget(cancel)
+        brow.addWidget(okb)
+        v.addLayout(brow)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        chosen = [ip for ip, cb in boxes.items() if cb.isChecked()]
+        ex = extra.text().strip()
+        if ex and is_valid_ipv4(ex) and ex != self.chat.my_ip and ex not in exclude:
+            chosen.append(ex)
+        return list(dict.fromkeys(chosen))
+
+    def _new_group_dialog(self) -> None:
+        name, ok = QInputDialog.getText(self, "New group", "Group name:")
+        if not ok or not name.strip():
+            return
+        members = self._member_dialog("New group members", {self.chat.my_ip})
+        if not members:
+            return
+        gid = uuid.uuid4().hex[:12]
+        self._groups[gid] = {"name": name.strip()[:32], "members": members}
+        self._conversations.setdefault(f"group:{gid}", [])
+        for ip in members:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        meta = self._group_meta(gid)
+        threading.Thread(
+            target=lambda: self.chat.send_group(
+                meta, f"{self.chat.my_name} created group \"{name.strip()}\"",
+                msg_type="group_invite"), daemon=True).start()
+        self._save_group(gid)
+        self.update_roster(self.chat.peers())
+        self.select_peer(f"group:{gid}")
+        self._log(f"Group \"{name.strip()}\" created with {len(members)} member(s).")
+
+    def _add_group_members(self) -> None:
+        key = self._active
+        if not key or not self._is_group(key):
+            return
+        gid = key[6:]
+        existing = set(self._group_meta(gid).get("members", []))
+        new = self._member_dialog("Add members", existing)
+        if not new:
+            return
+        new = [ip for ip in new if ip not in existing]
+        if not new:
+            return
+        g = self._groups.get(gid)
+        g["members"] = list(dict.fromkeys(list(g.get("members", [])) + new))
+        for ip in new:
+            if not self.chat.is_manual_peer(ip):
+                self.chat.add_manual_peer(ip)
+        meta = self._group_meta(gid)
+        threading.Thread(
+            target=lambda: self.chat.send_group(
+                meta, f"{self.chat.my_name} added {len(new)} member(s)",
+                msg_type="group_invite"), daemon=True).start()
+        self._save_group(gid)
+        self._update_header_sub(self.chat.peers())
+        self.update_roster(self.chat.peers())
+        self._log(f"Added {len(new)} member(s) to \"{g.get('name', 'Group')}\".")
+
+    def _delete_group(self, key) -> None:
+        gid = key[6:]
+        name = self._display_name(key)
+        if QMessageBox.question(self, "Leave group",
+                                f"Leave \"{name}\" and delete its history here?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._groups.pop(gid, None)
+        self._conversations.pop(key, None)
+        self._unread.pop(key, None)
+        self._delete_history_file(key)
+        if self._active == key:
+            self._reset_active()
+        self.update_roster(self.chat.peers())
+        self._log(f"Left group \"{name}\".")
+
+    # ── clear ─────────────────────────────────────────────────────────────────
+    def _clear_chat(self) -> None:
+        key = self._active
+        if not key:
+            return
+        if self._is_group(key):
+            self._conversations[key] = []
+            self._unread.pop(key, None)
+            self._save_group(key[6:])
+        else:
+            self._conversations.pop(key, None)
+            self._unread.pop(key, None)
+            self._save_peer(key)
+        self._render(key)
+        self._log(f"Chat with {self._display_name(key)} cleared.")
+
+    # ── file transfer ─────────────────────────────────────────────────────────
+    def _make_file_bubble(self, entry: tuple) -> QWidget:
+        kind, tid, meta, ts = entry
+        is_out = kind == "file_out"
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 2, 4, 2)
+        bubble = QFrame()
+        bubble.setProperty("bubble", "out" if is_out else "in")
+        bubble.setMaximumWidth(_BUBBLE_MAX)
+        bv = QVBoxLayout(bubble)
+        bv.setContentsMargins(12, 8, 12, 8)
+        bv.setSpacing(3)
+        txcol = theme.color("bubble_out_tx" if is_out else "bubble_in_tx")
+
+        title = QLabel(f"📎 {meta['filename']}")
+        title.setStyleSheet("color:%s; font-weight:700;" % txcol)
+        bv.addWidget(title)
+        bv.addWidget(QLabel(_fmt_size(meta["size"])))
+
+        state = self._offer_states.get(tid, "pending")
+        if kind == "file_in_offer" and state == "pending" and (time.time() - ts <= 60):
+            brow = QHBoxLayout()
+            acc = QPushButton("Accept")
+            acc.setProperty("variant", "success")
+            acc.clicked.connect(lambda: self._accept_file(tid, meta["from_ip"],
+                                                          meta["filename"], meta["size"]))
+            rej = QPushButton("Reject")
+            rej.setProperty("variant", "danger")
+            rej.clicked.connect(lambda: self._reject_file(tid, meta["from_ip"]))
+            brow.addWidget(acc)
+            brow.addWidget(rej)
+            brow.addStretch(1)
+            bv.addLayout(brow)
+        else:
+            prog = QLabel(self._progress_text.get(tid, "…"))
+            prog.setStyleSheet("color:%s; font-size:11px;" % txcol)
+            bv.addWidget(prog)
+            self._progress_lbls[tid] = prog
+            done = self._transfer_paths.get(tid)
+            if done is None:
+                cancel = QPushButton("Cancel")
+                cancel.setProperty("variant", "danger")
+                cancel.clicked.connect(lambda: self._cancel_file(tid))
+                bv.addWidget(cancel)
+            elif done:
+                orow = QHBoxLayout()
+                of = QPushButton("Open File")
+                of.clicked.connect(lambda: os.startfile(done))
+                ofd = QPushButton("Open Folder")
+                ofd.clicked.connect(lambda: subprocess.Popen(f'explorer /select,"{done}"', shell=True))
+                orow.addWidget(of)
+                orow.addWidget(ofd)
+                orow.addStretch(1)
+                bv.addLayout(orow)
+
+        stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
+        stamp.setStyleSheet("font-size:10px; color:%s;" % txcol)
+        bv.addWidget(stamp, alignment=Qt.AlignmentFlag.AlignRight)
+        if is_out:
+            h.addStretch(1); h.addWidget(bubble)
+        else:
+            h.addWidget(bubble); h.addStretch(1)
+        return row
+
+    def _set_progress(self, tid: str, text: str) -> None:
+        self._progress_text[tid] = text
+        lbl = self._progress_lbls.get(tid)
+        if lbl is not None:
+            try:
+                lbl.setText(text)
+            except RuntimeError:
+                self._progress_lbls.pop(tid, None)
+
+    def _attach_file(self) -> None:
+        ip = self._active
+        if not ip or self._is_group(ip):
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Send file")
+        if not path:
+            return
+        filename = os.path.basename(path)
+        size = os.path.getsize(path)
+        threading.Thread(target=self._offer_worker,
+                         args=(ip, path, filename, size), daemon=True).start()
+
+    def _offer_worker(self, ip, path, filename, size) -> None:
+        holder = {"tid": None}
+
+        def progress(done, total, speed, elapsed, eta):
+            if holder["tid"]:
+                pct = int(done * 100 / total) if total else 0
+                QTimer.singleShot(0, lambda: self._set_progress(
+                    holder["tid"], f"Sending {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}"))
+
+        def done():
+            tid = holder["tid"]
+            if tid:
+                self._transfer_paths[tid] = path
+                QTimer.singleShot(0, lambda: (self._set_progress(tid, "Sent!"),
+                                              self._rerender_if_active(ip)))
+
+        def error(msg):
+            tid = holder["tid"]
+            if tid:
+                self._transfer_paths[tid] = ""
+                QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {msg}"),
+                                              self._rerender_if_active(ip)))
+
+        def expire():
+            tid = holder["tid"]
+            if tid:
+                QTimer.singleShot(0, lambda: self._set_progress(tid, "No response — expired"))
+
+        try:
+            tid = self._ft.offer_file(ip, path, progress_cb=progress, done_cb=done,
+                                      error_cb=error, expire_cb=expire)
+            holder["tid"] = tid
+            self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
+            QTimer.singleShot(0, lambda: self._add_file_entry(ip, "file_out", tid, filename, size))
+        except Exception as e:
+            QTimer.singleShot(0, lambda: self._log(f"Could not send file offer: {e}"))
+
+    def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
+        meta = {"filename": filename, "size": size}
+        if from_ip:
+            meta["from_ip"] = from_ip
+        entry = (kind, tid, meta, time.time())
+        self._conversations.setdefault(ip, []).append(entry)
+        if ip == self._active and self._visible:
+            self._append(entry)
+        else:
+            self._unread[ip] = self._unread.get(ip, 0) + 1
+            self.update_roster(self.chat.peers())
+
+    def _rerender_if_active(self, ip) -> None:
+        if ip == self._active:
+            self._render(ip)
+
+    def on_file_offer_received(self, ip, name, msg) -> None:
+        tid = msg["transfer_id"]
+        self._names[ip] = name
+        self._offer_states[tid] = "pending"
+        self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
+        if not (ip == self._active and self._visible) and self._notifications_enabled:
+            self._toasts.notify(name, f"📎 Wants to send: {msg['filename']}", ip)
+            self.activity.emit(ip)
+
+    def _accept_file(self, tid, from_ip, filename, size) -> None:
+        self._offer_states[tid] = "accepted"
+        self._transfer_paths[tid] = None
+        self._set_progress(tid, "Connecting…")
+        self._rerender_if_active(from_ip)
+
+        def progress(done, total, speed, elapsed, eta):
+            pct = int(done * 100 / total) if total else 0
+            QTimer.singleShot(0, lambda: self._set_progress(
+                tid, f"Receiving {pct}%  {_fmt_speed(speed)}  ETA {_fmt_eta(eta)}"))
+
+        def fdone(save_path):
+            self._transfer_paths[tid] = save_path
+            QTimer.singleShot(0, lambda: (self._set_progress(tid, "Saved!"),
+                                          self._rerender_if_active(from_ip)))
+
+        def ferr(msg):
+            self._transfer_paths[tid] = ""
+            QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {msg}"),
+                                          self._rerender_if_active(from_ip)))
+
+        def work():
+            self._ft.send_accept(from_ip, tid)
+            self._ft.receive_file(tid, from_ip, progress_cb=progress,
+                                  done_cb=fdone, error_cb=ferr)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _reject_file(self, tid, from_ip) -> None:
+        self._offer_states[tid] = "rejected"
+        self._transfer_paths[tid] = ""
+        self._set_progress(tid, "Rejected")
+        self._rerender_if_active(from_ip)
+        threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
+
+    def _cancel_file(self, tid) -> None:
+        self._ft.cancel_transfer(tid)
+        self._transfer_paths[tid] = ""
+        self._set_progress(tid, "Cancelled")
+        if self._active:
+            self._render(self._active)
+
+    def on_file_accepted(self, ip, name, msg) -> None:
+        self._set_progress(msg["transfer_id"], f"{name} accepted — sending…")
+
+    def on_file_rejected(self, ip, name, msg) -> None:
+        tid = msg["transfer_id"]
+        self._ft.cancel_offer(tid)
+        self._transfer_paths[tid] = ""
+        self._set_progress(tid, f"Rejected by {name}")
+        self._rerender_if_active(ip)
+
+    # ── chat requests (external IP first contact) ─────────────────────────────
+    def _make_req_bubble(self, entry: tuple) -> QWidget:
+        _, ip, meta, ts = entry
+        state = self._chat_req_states.get(ip, "pending")
+        card = QFrame()
+        card.setObjectName("card2")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.addWidget(QLabel(f"{meta['from_name']} ({ip}) wants to chat"))
+        if meta.get("first_msg"):
+            q = QLabel(f"\"{meta['first_msg'][:80]}\"")
+            q.setObjectName("muted")
+            v.addWidget(q)
+        if state == "pending":
+            brow = QHBoxLayout()
+            acc = QPushButton("Accept")
+            acc.setProperty("variant", "success")
+            acc.clicked.connect(lambda: self._accept_chat(ip))
+            blk = QPushButton("Block")
+            blk.setProperty("variant", "danger")
+            blk.clicked.connect(lambda: self._block_chat(ip))
+            brow.addWidget(acc); brow.addWidget(blk); brow.addStretch(1)
+            v.addLayout(brow)
+        elif state == "accepted":
+            ok = QLabel("Accepted — messages will now appear normally.")
+            ok.setStyleSheet("color:%s;" % theme.color("success"))
+            v.addWidget(ok)
+        else:
+            bl = QLabel("Blocked — messages from this IP are discarded.")
+            bl.setStyleSheet("color:%s;" % theme.color("danger"))
+            v.addWidget(bl)
+        return card
+
+    def on_chat_request_received(self, ip, name, msg) -> None:
+        if ip in self._chat_req_states:
+            if self._chat_req_states[ip] == "accepted":
+                self.chat.approve_ip(ip)
+            return
+        self._names[ip] = name
+        self._chat_req_states[ip] = "pending"
+        entry = ("chat_req", ip, {"from_name": name, "first_msg": str(msg.get("text", ""))},
+                 time.time())
+        self._conversations.setdefault(ip, []).append(entry)
+        if ip == self._active and self._visible:
+            self._append(entry)
+        else:
+            self._unread[ip] = self._unread.get(ip, 0) + 1
+            self.update_roster(self.chat.peers())
+        if self._notifications_enabled:
+            self._toasts.notify(name, "Wants to chat — tap to respond", ip)
+            self.activity.emit(ip)
+
+    def _accept_chat(self, ip) -> None:
+        self._chat_req_states[ip] = "accepted"
+        self.chat.approve_ip(ip)
+        self._rerender_if_active(ip)
+
+    def _block_chat(self, ip) -> None:
+        self._chat_req_states[ip] = "blocked"
+        self.chat.block_ip(ip)
+        self._rerender_if_active(ip)
+
+    # ── persistence (shares the JSON format with the old UI) ──────────────────
+    def _trim(self, key) -> None:
+        m = self._conversations.get(key)
+        if m and len(m) > _MAX_HISTORY:
+            self._conversations[key] = m[-_MAX_HISTORY:]
+
+    def _load_history(self) -> None:
+        try:
+            d = config.get_peer_chat_dir()
+            for fname in os.listdir(d):
+                if not fname.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(d, fname), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    ip = data.get("ip")
+                    if not ip:
+                        continue
+                    self._conversations[ip] = [tuple(m) for m in
+                                               data.get("messages", [])[-_MAX_HISTORY:]]
+                    if self._is_group(ip) and isinstance(data.get("group"), dict):
+                        gid = ip[6:]
+                        g = data["group"]
+                        self._groups[gid] = {"name": g.get("name", "Group"),
+                                             "members": [m for m in g.get("members", []) if m]}
+                        for m in self._groups[gid]["members"]:
+                            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                                self.chat.add_manual_peer(m)
+                        continue
+                    if data.get("name"):
+                        self._names[ip] = data["name"]
+                    if data.get("alias"):
+                        self._aliases[ip] = data["alias"]
+                    if data.get("manual"):
+                        self.chat.add_manual_peer(ip)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _save_peer(self, ip) -> None:
+        msgs = list(self._conversations.get(ip, []))
+        name = self._names.get(ip, ip)
+        alias = self._aliases.get(ip)
+        manual = self.chat.is_manual_peer(ip)
+
+        def write():
+            try:
+                safe = ip.replace(".", "_").replace(":", "_")
+                kept = [m for m in msgs if not m[0].startswith("file_")
+                        and not m[0].startswith("chat_req")]
+                data = {"ip": ip, "name": name,
+                        "messages": [list(m) for m in kept[-_MAX_HISTORY:]]}
+                if alias:
+                    data["alias"] = alias
+                if manual:
+                    data["manual"] = True
+                with open(os.path.join(config.get_peer_chat_dir(), f"{safe}.json"),
+                          "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except Exception:
+                pass
+        threading.Thread(target=write, daemon=True).start()
+
+    def _save_group(self, gid) -> None:
+        key = f"group:{gid}"
+        msgs = list(self._conversations.get(key, []))
+        group = dict(self._groups.get(gid, {}))
+
+        def write():
+            try:
+                kept = [m for m in msgs if not m[0].startswith("file_")
+                        and not m[0].startswith("chat_req")]
+                data = {"ip": key,
+                        "group": {"name": group.get("name", "Group"),
+                                  "members": group.get("members", [])},
+                        "messages": [list(m) for m in kept[-_MAX_HISTORY:]]}
+                with open(os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json"),
+                          "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except Exception:
+                pass
+        threading.Thread(target=write, daemon=True).start()
+
+    def _delete_history_file(self, key) -> None:
+        def rm():
+            try:
+                safe = key.replace(".", "_").replace(":", "_")
+                p = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        threading.Thread(target=rm, daemon=True).start()
+
+    def shutdown(self) -> None:
+        try:
+            self._ft.stop()
+        except Exception:
+            pass

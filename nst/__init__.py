@@ -13,7 +13,7 @@ Package layout:
     proxy_server    — HTTP/HTTPS tunnelling proxy server
     beacon          — host discovery (UDP broadcast) for the proxy feature
     chat            — LAN peer discovery + text messaging
-    ui.*            — tkinter UI (app window, widgets, tray, toasts, chat view)
+    qt.*            — PyQt6 UI (main window, chat window, widgets, tray, toasts)
 """
 
 __version__ = "4.5"

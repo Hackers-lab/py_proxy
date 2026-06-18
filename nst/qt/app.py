@@ -1,0 +1,102 @@
+"""QApplication bootstrap: wires the shared service layer to the Qt windows,
+toasts and tray, then runs the event loop."""
+
+import os
+import sys
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication
+
+from .. import config
+from ..chat import ChatService
+from ..win_utils import get_resource_path, set_app_user_model_id
+from .chat_window import ChatWindow
+from .main_window import MainWindow
+from .signals import ChatSignals
+from .theme import theme
+from .toast import ToastManager
+from .tray import SpeedOverlay, TrayManager
+
+
+def run() -> None:
+    set_app_user_model_id()
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(sys.argv)
+    app.setApplicationName("Net Split-Tunneler")
+    app.setQuitOnLastWindowClosed(False)   # closing windows hides to tray
+    app.setStyleSheet(theme.qss())
+    theme.changed.connect(lambda: app.setStyleSheet(theme.qss()))
+
+    ico = get_resource_path("icon.ico")
+    if os.path.exists(ico):
+        app.setWindowIcon(QIcon(ico))
+
+    # ── services + signal bridge ──────────────────────────────────────────────
+    sig = ChatSignals()
+    chat = ChatService(
+        config.load_display_name(),
+        on_roster_change=lambda peers: sig.roster_changed.emit(peers),
+        on_message=lambda ip, name, text, ts, reply: sig.message.emit(ip, name, text, ts, reply),
+        on_file_offer=lambda ip, name, msg: sig.file_offer.emit(ip, name, msg),
+        on_file_accept=lambda ip, name, msg: sig.file_accept.emit(ip, name, msg),
+        on_file_reject=lambda ip, name, msg: sig.file_reject.emit(ip, name, msg),
+        on_chat_request=lambda ip, name, msg: sig.chat_request.emit(ip, name, msg),
+        on_group_message=lambda group, ip, name, text, ts, reply:
+            sig.group_message.emit(group, ip, name, text, ts, reply),
+    )
+    chat.ip_chat_enabled = config.load_ip_chat_enabled()
+    chat.presence_online = config.load_presence_online()
+
+    toasts = ToastManager()
+    _log_holder = {"main": None}
+    chat_window = ChatWindow(chat, toasts,
+                             log_fn=lambda m: _log_holder["main"] and _log_holder["main"].log(m))
+
+    sig.roster_changed.connect(chat_window.update_roster)
+    sig.message.connect(chat_window.receive_message)
+    sig.file_offer.connect(chat_window.on_file_offer_received)
+    sig.file_accept.connect(chat_window.on_file_accepted)
+    sig.file_reject.connect(chat_window.on_file_rejected)
+    sig.chat_request.connect(chat_window.on_chat_request_received)
+    sig.group_message.connect(chat_window.on_group_message)
+    chat_window.activity.connect(chat_window.open)
+    toasts.clicked.connect(chat_window.open)
+
+    def run_demo():
+        chat_window.open()
+        chat_window._start_demo()
+
+    def quit_app():
+        try:
+            chat.stop()
+            chat_window.shutdown()
+            main.shutdown()
+            toasts.destroy_all()
+            tray.hide()
+            overlay.hide()
+        except Exception:
+            pass
+        app.quit()
+
+    main = MainWindow(open_chat=chat_window.open, run_demo=run_demo, on_quit=quit_app)
+    _log_holder["main"] = main
+
+    def open_proxy():
+        main.showNormal()
+        main.raise_()
+        main.activateWindow()
+
+    tray = TrayManager(on_open_proxy=open_proxy,
+                       on_open_chat=chat_window.open,
+                       on_quit=quit_app)
+    overlay = SpeedOverlay()
+    main.set_tray(tray)
+    main.set_overlay(overlay)
+    tray.show()
+
+    chat.start()
+    main.show()
+
+    sys.exit(app.exec())

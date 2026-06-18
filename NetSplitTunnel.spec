@@ -1,14 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 datas = [('icon.ico', '.'), ('icon.png', '.')]
 binaries = []
-hiddenimports = ['pystray._win32']
 # The UI is imported lazily inside net_tunnel.main(); collect the whole package
 # explicitly so every nst submodule is bundled regardless of import location.
-hiddenimports += collect_submodules('nst')
-tmp_ret = collect_all('pystray')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# PyQt6 itself (and its Qt plugins) is handled by PyInstaller's bundled hooks.
+hiddenimports = collect_submodules('nst')
 
 
 a = Analysis(
