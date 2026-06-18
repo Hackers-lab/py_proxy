@@ -176,6 +176,19 @@ def load_presence_online() -> bool:
 def save_presence_online(online: bool) -> bool:
     return save_my_status("online" if online else "invisible")
 
+# ── Hidden (deleted) peers ────────────────────────────────────────────────────
+
+def load_hidden_peers() -> list[str]:
+    """IPs the user has deleted; kept out of the roster until they make contact."""
+    val = str(_read_value("HiddenPeers", "")).strip()
+    if not val:
+        return []
+    return [x.strip() for x in val.split(",") if x.strip()]
+
+
+def save_hidden_peers(ips: list[str]) -> bool:
+    return _write_value("HiddenPeers", winreg.REG_SZ, ",".join(sorted(set(ips))))
+
 # ── Chat history path ────────────────────────────────────────────────────────
 
 def get_chat_history_path() -> str:

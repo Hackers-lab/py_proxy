@@ -238,6 +238,7 @@ class FileTransferService:
     def _receive_one(self, tid: str, sender_ip: str,
                      progress_cb, done_cb, error_cb, cancel_event=None) -> None:
         save_path = None
+        ok = False
         try:
             time.sleep(0.3)
             if cancel_event and cancel_event.is_set():
@@ -265,7 +266,9 @@ class FileTransferService:
                             raise InterruptedError("Cancelled")
                         chunk = s.recv(CHUNK)
                         if not chunk:
-                            break
+                            # Sender closed early (cancelled / crashed / network
+                            # drop). The file is incomplete — do NOT report done.
+                            raise ConnectionError("Cancelled by sender")
                         f.write(chunk)
                         received += len(chunk)
                         if progress_cb:
@@ -273,20 +276,24 @@ class FileTransferService:
                             speed = received / elapsed
                             eta = (total - received) / speed if speed > 0 else 0
                             progress_cb(received, total, speed, elapsed, eta)
+                if received < total:
+                    raise ConnectionError("Cancelled by sender")
+            ok = True
             if done_cb:
                 done_cb(str(save_path))
         except InterruptedError as e:
-            if save_path:
-                try:
-                    os.remove(str(save_path))
-                except Exception:
-                    pass
             if error_cb:
                 error_cb(str(e))
         except Exception as e:
             if error_cb:
                 error_cb(str(e))
         finally:
+            # Any non-success path leaves a partial/broken file — remove it.
+            if not ok and save_path:
+                try:
+                    os.remove(str(save_path))
+                except Exception:
+                    pass
             with self._lock:
                 self._cancel_events.pop(tid, None)
 

@@ -68,6 +68,27 @@ def _fmt_progress(verb: str, done: int, total: int,
             f"{_fmt_speed(speed)} · {_fmt_eta(elapsed)} · ETA {_fmt_eta(eta)}")
 
 
+def _xfer_fail_text(msg: str) -> str:
+    """Friendly terminal status for a failed transfer ('Cancelled' vs 'Failed: …')."""
+    low = (msg or "").lower()
+    if "cancel" in low or "interrupt" in low:
+        return "Cancelled"
+    return f"Failed: {msg}"
+
+
+def _reveal_in_explorer(path: str) -> None:
+    """Open Explorer with *path* selected, without flashing a console window.
+
+    ``shell=True`` routes through cmd.exe and flashes a black console; calling
+    explorer.exe directly (a GUI process) with CREATE_NO_WINDOW avoids it.
+    """
+    try:
+        subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        pass
+
+
 def _fmt_last_seen(ts: float) -> str:
     if not ts:
         return "offline"
@@ -165,7 +186,11 @@ class _Scroll(QScrollArea):
             item = self.box.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.setParent(None)
+                # NB: do NOT setParent(None) here — that momentarily promotes the
+                # (still-visible) child to a top-level window, which flashes on
+                # screen before deleteLater() runs. hide() + deleteLater() keeps
+                # the parent intact so nothing is ever shown as its own window.
+                w.hide()
                 w.deleteLater()
 
     def _on_value(self, v: int) -> None:
@@ -286,6 +311,8 @@ class ChatWindow(QWidget):
         self._notifications_enabled = config.load_notifications_enabled()
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
+        # Peers the user deleted — hidden from the roster until they contact us.
+        self._hidden: set[str] = set(config.load_hidden_peers())
 
         # message-id bookkeeping (receipts, delete-for-everyone, reactions)
         self._mid_index: dict[str, tuple[str, dict]] = {}   # mid -> (key, entry)
@@ -648,11 +675,19 @@ class ChatWindow(QWidget):
 
     def _visible_peers(self, peers) -> set[str]:
         """Peers to list: everyone currently seen, plus anyone we have history
-        with (shown offline with a last-seen) — never groups or ourselves."""
+        with (shown offline with a last-seen) — never groups, ourselves, or
+        peers the user deleted (hidden until they contact us again)."""
         cands = {p.ip for p in peers}
         cands |= {c for c in self._conversations if not self._is_group(c)}
         cands.discard(self.chat.my_ip)
+        cands -= self._hidden
         return cands
+
+    def _unhide(self, ip: str) -> None:
+        """A hidden (deleted) peer made contact — bring it back into the roster."""
+        if ip in self._hidden:
+            self._hidden.discard(ip)
+            config.save_hidden_peers(list(self._hidden))
 
     def _peer_subtitle(self, ip: str, status: str) -> str:
         if ip == DemoBot.IP:
@@ -1048,6 +1083,7 @@ class ChatWindow(QWidget):
             self._append(entry)
 
     def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
+        self._unhide(ip)
         self._names[ip] = name
         entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply)
         self._store(ip, entry)
@@ -1531,6 +1567,7 @@ class ChatWindow(QWidget):
         name, ok = QInputDialog.getText(self, "Name this PC", f"Enter a name for {ip}:")
         if ok and name.strip():
             self._aliases[ip] = name.strip()[:32]
+        self._unhide(ip)   # explicit re-add overrides a prior deletion
         self.chat.add_manual_peer(ip)
         self._names.setdefault(ip, ip)
         self._ip_edit.clear()
@@ -1576,6 +1613,10 @@ class ChatWindow(QWidget):
                   self._aliases, self._chat_req_states, self._typers):
             d.pop(ip, None)
         self._delete_history_file(ip)
+        # Remember the deletion so a live peer's next broadcast (or a reload of
+        # its group membership) doesn't silently bring it back.
+        self._hidden.add(ip)
+        config.save_hidden_peers(list(self._hidden))
         if self._active == ip:
             self._reset_active()
         self.update_roster(self.chat.peers())
@@ -1773,7 +1814,7 @@ class ChatWindow(QWidget):
                 of = QPushButton("Open File")
                 of.clicked.connect(lambda: os.startfile(done))
                 ofd = QPushButton("Open Folder")
-                ofd.clicked.connect(lambda: subprocess.Popen(f'explorer /select,"{done}"', shell=True))
+                ofd.clicked.connect(lambda _=False, p=done: _reveal_in_explorer(p))
                 orow.addWidget(of)
                 orow.addWidget(ofd)
                 orow.addStretch(1)
@@ -1850,7 +1891,7 @@ class ChatWindow(QWidget):
             self._xfer_finished.emit(tid, ip, path, "Sent ✓")
 
         def error(msg):
-            self._xfer_finished.emit(tid, ip, "", f"Failed: {msg}")
+            self._xfer_finished.emit(tid, ip, "", _xfer_fail_text(msg))
 
         def expire():
             self._xfer_finished.emit(tid, ip, "", "No response — expired")
@@ -1883,11 +1924,14 @@ class ChatWindow(QWidget):
     def _on_xfer_finished(self, tid: str, ip: str, path: str, text: str) -> None:
         """Terminal state (done / failed / expired): record result and re-render."""
         self._transfer_paths[tid] = path   # real path = success, "" = failed
+        self._offer_states[tid] = "done" if path else "failed"
         self._set_progress(tid, text)
+        self._persist(ip)                  # keep this transfer in history
         self._render(ip)
 
     def on_file_offer_received(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
+        self._unhide(ip)
         self._names[ip] = name
         self._offer_states[tid] = "pending"
         self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
@@ -1922,7 +1966,7 @@ class ChatWindow(QWidget):
             self._xfer_finished.emit(tid, from_ip, save_path, "Saved ✓")
 
         def ferr(msg):
-            self._xfer_finished.emit(tid, from_ip, "", f"Failed: {msg}")
+            self._xfer_finished.emit(tid, from_ip, "", _xfer_fail_text(msg))
 
         def work():
             self._ft.send_accept(from_ip, tid)
@@ -1937,6 +1981,7 @@ class ChatWindow(QWidget):
         self._offer_states[tid] = "rejected"
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Rejected")
+        self._persist(from_ip)
         self._rerender_if_active(from_ip)
 
         threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
@@ -1944,8 +1989,10 @@ class ChatWindow(QWidget):
     def _cancel_file(self, tid) -> None:
         self._ft.cancel_transfer(tid)
         self._transfer_paths[tid] = ""
+        self._offer_states[tid] = "cancelled"
         self._set_progress(tid, "Cancelled")
         if self._active:
+            self._persist(self._active)
             self._render(self._active)
 
     def on_file_accepted(self, ip, name, msg) -> None:
@@ -1956,7 +2003,9 @@ class ChatWindow(QWidget):
         tid = msg["transfer_id"]
         self._ft.cancel_offer(tid)
         self._transfer_paths[tid] = ""
+        self._offer_states[tid] = "rejected"
         self._set_progress(tid, f"Rejected by {name}")
+        self._persist(ip)
         self._render(ip)  # Always render to show rejection status
 
     # ── chat requests (external IP first contact) ─────────────────────────────
@@ -1994,6 +2043,7 @@ class ChatWindow(QWidget):
         return card
 
     def on_chat_request_received(self, ip, name, msg) -> None:
+        self._unhide(ip)
         if ip in self._chat_req_states:
             if self._chat_req_states[ip] == "accepted":
                 self.chat.approve_ip(ip)
@@ -2054,6 +2104,7 @@ class ChatWindow(QWidget):
                     self._conversations[ip] = [_migrate_entry(m) for m in
                                                data.get("messages", [])[-_MAX_HISTORY:]]
                     self._index_conversation(ip)
+                    self._seed_transfer_state(ip)
                     if self._is_group(ip) and isinstance(data.get("group"), dict):
                         gid = ip[6:]
                         g = data["group"]
@@ -2092,7 +2143,41 @@ class ChatWindow(QWidget):
         except Exception:
             pass
 
+    def _seed_transfer_state(self, key) -> None:
+        """Restore the live transfer dicts from persisted file entries on load,
+        so reloaded file bubbles render their final state (Open / Cancelled / …)."""
+        for e in self._conversations.get(key, []):
+            if not (isinstance(e, dict) and e.get("kind") in ("file_out", "file_in_offer")):
+                continue
+            tid = e.get("tid")
+            if not tid:
+                continue
+            self._transfer_paths[tid] = e.get("path", "")
+            self._progress_text[tid] = e.get("status", "")
+            self._offer_states[tid] = e.get("state", "done")
+
+    def _freeze_file_entries(self, key) -> None:
+        """Snapshot the live transfer state into each file entry so it survives a
+        restart. Pending offers never acted on are marked expired."""
+        for e in self._conversations.get(key, []):
+            if not (isinstance(e, dict) and e.get("kind") in ("file_out", "file_in_offer")):
+                continue
+            tid = e.get("tid")
+            if not tid:
+                continue
+            path = self._transfer_paths.get(tid)
+            status = self._progress_text.get(tid, e.get("status", ""))
+            state = self._offer_states.get(tid, e.get("state", "done"))
+            if not path and state in ("pending", "accepted"):
+                # interrupted before completion or never answered
+                status = status or "Offer expired"
+                state = "expired"
+            e["path"] = path if path else ""
+            e["status"] = status
+            e["state"] = state
+
     def _save_peer(self, ip) -> None:
+        self._freeze_file_entries(ip)
         msgs = list(self._conversations.get(ip, []))
         name = self._names.get(ip, ip)
         device = self._devices.get(ip)
@@ -2103,8 +2188,7 @@ class ChatWindow(QWidget):
         def write():
             try:
                 safe = ip.replace(".", "_").replace(":", "_")
-                kept = [m for m in msgs
-                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
+                kept = [m for m in msgs if m.get("kind") != "chat_req"]
                 data = {"ip": ip, "name": name,
                         "messages": kept[-_MAX_HISTORY:]}
                 if device:
