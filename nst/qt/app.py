@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import QApplication
 
 from .. import config
 from ..chat import ChatService
+from ..constants import MOBILE_HTTP_PORT
+from ..mobile import MobileServer
 from ..win_utils import get_resource_path, set_app_user_model_id
 from .chat_window import ChatWindow
 from .main_window import MainWindow
@@ -54,9 +56,19 @@ def run() -> None:
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
     chat.presence_online = config.load_presence_online()
 
+    mobile = MobileServer(
+        port=MOBILE_HTTP_PORT,
+        on_join=lambda s: sig.mobile_join.emit(s),
+        on_leave=lambda s: sig.mobile_leave.emit(s),
+        on_message=lambda s, t: sig.mobile_message.emit(s, t),
+    )
+    if config.load_mobile_enabled():
+        mobile.start()
+
     toasts = ToastManager()
     _log_holder = {"main": None}
     chat_window = ChatWindow(chat, toasts,
+                             mobile_server=mobile,
                              log_fn=lambda m: _log_holder["main"] and _log_holder["main"].log(m))
 
     sig.roster_changed.connect(chat_window.update_roster)
@@ -70,6 +82,9 @@ def run() -> None:
     sig.deleted.connect(chat_window.on_remote_delete)
     sig.typing.connect(chat_window.on_typing)
     sig.reaction.connect(chat_window.on_reaction)
+    sig.mobile_join.connect(chat_window.on_mobile_join)
+    sig.mobile_leave.connect(chat_window.on_mobile_leave)
+    sig.mobile_message.connect(chat_window.on_mobile_message)
     chat_window.activity.connect(chat_window.open)
     toasts.clicked.connect(chat_window.open)
 
@@ -80,6 +95,7 @@ def run() -> None:
     def quit_app():
         try:
             chat.stop()
+            mobile.stop()
             chat_window.shutdown()
             main.shutdown()
             toasts.destroy_all()

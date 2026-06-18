@@ -21,6 +21,9 @@ class ChatSignals(QObject):
     deleted = pyqtSignal(str, str)             # from_ip, mid (delete-for-everyone)
     typing = pyqtSignal(str, str, object, bool)  # ip, name, gid|None, is_typing
     reaction = pyqtSignal(str, str, str)       # from_ip, mid, emoji
+    mobile_join = pyqtSignal(object)           # MobileSession — needs approval
+    mobile_leave = pyqtSignal(object)          # MobileSession — disconnected
+    mobile_message = pyqtSignal(object, str)   # session, text
 
 
 class MainSignals(QObject):

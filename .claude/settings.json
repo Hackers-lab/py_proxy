@@ -14,7 +14,14 @@
       "Bash(python -c ' *)",
       "Bash(python -m py_compile nst/chat.py nst/qt/signals.py nst/qt/app.py nst/qt/chat_window.py nst/qt/widgets.py)",
       "Bash(python -c \"import nst.chat, nst.qt.signals; from nst.qt import chat_window; print\\('logic imports OK'\\)\")",
-      "Bash(QT_QPA_PLATFORM=offscreen python -c ' *)"
+      "Bash(QT_QPA_PLATFORM=offscreen python -c ' *)",
+      "Bash(python -c \"from nst.mobile import MobileServer, make_qr_png, _add_firewall_rule; print\\('mobile.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('nst/qt/chat_window.py'\\).read\\(\\)\\); print\\('chat_window.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('nst/qt/chat_window.py', encoding='utf-8'\\).read\\(\\)\\); print\\('chat_window.py OK'\\)\")",
+      "Bash(python -c \"import aiohttp; print\\('aiohttp', aiohttp.__version__\\)\")",
+      "Bash(python -c \"import qrcode; print\\('qrcode OK'\\)\")",
+      "Bash(python -c \"from PIL import Image; print\\('Pillow OK'\\)\")",
+      "Bash(python -m pip install aiohttp qrcode pillow)"
     ]
   }
 }

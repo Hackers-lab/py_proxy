@@ -162,6 +162,15 @@ def load_presence_online() -> bool:
 def save_presence_online(online: bool) -> bool:
     return _write_value("PresenceOnline", winreg.REG_DWORD, 1 if online else 0)
 
+# ── Mobile access ────────────────────────────────────────────────────────────
+
+def load_mobile_enabled() -> bool:
+    return bool(_read_value("MobileEnabled", 1))
+
+
+def save_mobile_enabled(enabled: bool) -> bool:
+    return _write_value("MobileEnabled", winreg.REG_DWORD, 1 if enabled else 0)
+
 # ── Chat history path ────────────────────────────────────────────────────────
 
 def get_chat_history_path() -> str:
