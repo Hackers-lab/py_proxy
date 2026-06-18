@@ -24,6 +24,9 @@ class ChatSignals(QObject):
     mobile_join = pyqtSignal(object)           # MobileSession — needs approval
     mobile_leave = pyqtSignal(object)          # MobileSession — disconnected
     mobile_message = pyqtSignal(object, str)   # session, text
+    mobile_file = pyqtSignal(object, str, str, int)  # session, filename, path, size
+    mobile_download = pyqtSignal(str, str)     # sid, tid
+
 
 
 class MainSignals(QObject):

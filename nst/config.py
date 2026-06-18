@@ -191,3 +191,18 @@ def get_peer_chat_dir() -> str:
     folder = os.path.join(appdata, "NetSplitTunnel", "chats")
     os.makedirs(folder, exist_ok=True)
     return folder
+
+
+def load_approved_mobile_devices() -> list[str]:
+    """Load approved mobile client IDs from the registry."""
+    val = str(_read_value("ApprovedMobileDevices", "")).strip()
+    if not val:
+        return []
+    return [x.strip() for x in val.split(",") if x.strip()]
+
+
+def save_approved_mobile_devices(devices: list[str]) -> bool:
+    """Save approved mobile client IDs list to the registry."""
+    val = ",".join(devices)
+    return _write_value("ApprovedMobileDevices", winreg.REG_SZ, val)
+

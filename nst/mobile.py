@@ -123,22 +123,34 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <div id='hdr'><span>📡</span><span id='hn'>LAN Chat</span></div>
   <div id='msgs'></div>
   <div id='comp'>
+    <button id='ab' onclick='document.getElementById("fi").click()' style='background:none;border:none;color:#94a3b8;font-size:20px;cursor:pointer;padding:0 8px'>📎</button>
+    <input type="file" id="fi" style="display:none" onchange="uploadFile()">
     <input id='mi' placeholder='Message…' autocomplete='off'>
     <button id='sb' onclick='send()'>&#10148;</button>
   </div>
 </div>
 <script>
 var ws=null,myName='',ok=false;
+var clientId=localStorage.getItem('nst_client_id');
+if(!clientId){
+  clientId='mob_'+Math.random().toString(36).substring(2,15)+Math.random().toString(36).substring(2,15);
+  localStorage.setItem('nst_client_id',clientId);
+}
+var savedName=localStorage.getItem('nst_name')||'';
+if(savedName){
+  document.getElementById('ni').value=savedName;
+}
 function st(t){document.getElementById('st').textContent=t;}
 function join(){
   var n=document.getElementById('ni').value.trim();
   if(!n)return;
   myName=n;
+  localStorage.setItem('nst_name',myName);
   document.getElementById('jb').disabled=true;
   st('Connecting…');
   ws=new WebSocket('ws://'+location.host+'/ws');
   ws.onopen=function(){
-    ws.send(JSON.stringify({type:'hello',name:myName,device:navigator.userAgent.slice(0,80)}));
+    ws.send(JSON.stringify({type:'hello',name:myName,device:navigator.userAgent.slice(0,80),client_id:clientId}));
     st('Waiting for approval from the desktop…');
   };
   ws.onmessage=function(e){
@@ -159,10 +171,12 @@ function join(){
     }else if(m.type==='chat'){
       addMsg(m.name,m.text,m.name===myName);
     }else if(m.type==='history'){
-      (m.messages||[]).forEach(function(x){addMsg(x.name,x.text,x.name===myName);});
+      (m.messages||[]).forEach(function(x){addMsg(x.name,x.text,x.name!=='You');});
       sc();
     }else if(m.type==='sys'){
       addSys(m.text);
+    }else if(m.type==='file_offer'){
+      addFileOffer(m.transfer_id, m.filename, m.size);
     }
   };
   ws.onclose=function(){
@@ -180,13 +194,61 @@ function addMsg(name,text,isOut){
 function addSys(t){
   var d=document.createElement('div');d.className='sy';d.textContent=t;
   document.getElementById('msgs').appendChild(d);sc();
+  return d;
 }
 function sc(){var m=document.getElementById('msgs');m.scrollTop=m.scrollHeight;}
 function send(){
   var i=document.getElementById('mi'),t=i.value.trim();
   if(!t||!ws||ws.readyState!==1)return;
   ws.send(JSON.stringify({type:'chat',text:t}));
+  addMsg(myName,t,true);
   i.value='';
+}
+function formatSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  return (b / (1024 * 1024)).toFixed(1) + ' MB';
+}
+function addFileOffer(tid, filename, size) {
+  var d = document.createElement('div');
+  d.className = 'b i';
+  var n = document.createElement('div');
+  n.className = 'bn';
+  n.textContent = 'File Offer';
+  d.appendChild(n);
+  var t = document.createElement('div');
+  t.innerHTML = '📎 <strong>' + filename + '</strong> (' + formatSize(size) + ')<br><br>' +
+    '<a href="/download?tid=' + tid + '&sid=' + clientId + '" target="_blank" style="display:inline-block;background:#3b82f6;color:#fff;text-decoration:none;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:700">Download</a>';
+  d.appendChild(t);
+  document.getElementById('msgs').appendChild(d);
+  sc();
+}
+function uploadFile() {
+  var fi = document.getElementById('fi');
+  if (!fi.files || fi.files.length === 0) return;
+  var file = fi.files[0];
+  var fd = new FormData();
+  fd.append('file', file);
+  var statusMsg = addSys('Uploading ' + file.name + ' (0%)');
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload?sid=' + clientId, true);
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      var pct = Math.round((e.loaded / e.total) * 100);
+      statusMsg.textContent = 'Uploading ' + file.name + ' (' + pct + '%)';
+    }
+  };
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      statusMsg.textContent = '✓ Uploaded ' + file.name;
+    } else {
+      statusMsg.textContent = '✗ Upload failed: ' + (xhr.statusText || 'Error code ' + xhr.status);
+    }
+  };
+  xhr.onerror = function() {
+    statusMsg.textContent = '✗ Upload failed.';
+  };
+  xhr.send(fd);
 }
 </script>
 </body>
@@ -221,14 +283,18 @@ class MobileServer:
     """
 
     def __init__(self, port: int = 8765,
-                 on_join=None, on_leave=None, on_message=None) -> None:
+                 on_join=None, on_leave=None, on_message=None,
+                 on_file=None, on_file_downloaded=None) -> None:
         self._port = port
         self._on_join = on_join
         self._on_leave = on_leave
         self._on_message = on_message
+        self._on_file = on_file
+        self._on_file_downloaded = on_file_downloaded
 
         self._sessions: dict[str, MobileSession] = {}
         self._blocked_ips: set[str] = set()
+        self._pending_files: dict[str, str] = {}  # tid -> local_file_path
         self._lock = threading.Lock()
 
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -271,6 +337,8 @@ class MobileServer:
         app = _aio_web.Application()
         app.router.add_get("/", self._http_index)
         app.router.add_get("/ws", self._handle_ws)
+        app.router.add_get("/download", self._http_download)
+        app.router.add_post("/upload", self._http_upload)
         self._runner = _aio_web.AppRunner(app)
         await self._runner.setup()
         site = _aio_web.TCPSite(self._runner, "0.0.0.0", self._port)
@@ -281,6 +349,66 @@ class MobileServer:
     async def _http_index(self, request):
         return _aio_web.Response(text=_INDEX_HTML, content_type="text/html",
                                  charset="utf-8")
+
+    async def _http_download(self, request):
+        tid = request.query.get("tid")
+        sid = request.query.get("sid")
+        with self._lock:
+            session = self._sessions.get(sid)
+        if not session or session.state != "approved":
+            return _aio_web.Response(status=403, text="Unauthorized")
+        path = None
+        with self._lock:
+            path = self._pending_files.get(tid)
+        if not path or not os.path.exists(path):
+            return _aio_web.Response(status=404, text="File not found")
+        filename = os.path.basename(path)
+        if self._on_file_downloaded:
+            try:
+                self._on_file_downloaded(sid, tid)
+            except Exception:
+                pass
+        return _aio_web.FileResponse(path, headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        })
+
+    async def _http_upload(self, request):
+        sid = request.query.get("sid")
+        with self._lock:
+            session = self._sessions.get(sid)
+        if not session or session.state != "approved":
+            return _aio_web.Response(status=403, text="Unauthorized")
+        reader = await request.multipart()
+        field = await reader.next()
+        if not field or field.name != "file":
+            return _aio_web.Response(status=400, text="No file field")
+        filename = field.filename
+        from .filetransfer import FILE_SAVE_DIR
+        base = Path.home() / "Documents" / FILE_SAVE_DIR
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / filename
+        if path.exists():
+            stem, suffix = Path(filename).stem, Path(filename).suffix
+            i = 1
+            while True:
+                path = base / f"{stem} ({i}){suffix}"
+                if not path.exists():
+                    break
+                i += 1
+        size = 0
+        with open(path, "wb") as f:
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                f.write(chunk)
+                size += len(chunk)
+        if self._on_file:
+            try:
+                self._on_file(session, filename, str(path), size)
+            except Exception:
+                pass
+        return _aio_web.Response(text="OK")
 
     # ── WebSocket ──────────────────────────────────────────────────────────────
 
@@ -314,7 +442,7 @@ class MobileServer:
                     break
         finally:
             with self._lock:
-                self._sessions.pop(sid, None)
+                self._sessions.pop(session.sid, None)
             if self._on_leave:
                 try:
                     self._on_leave(session)
@@ -326,8 +454,23 @@ class MobileServer:
     async def _dispatch(self, session: MobileSession, msg: dict) -> None:
         mtype = msg.get("type", "")
         if mtype == "hello" and session.state == "pending":
+            client_id = msg.get("client_id")
+            if client_id:
+                old_sid = session.sid
+                session.sid = client_id
+                with self._lock:
+                    self._sessions.pop(old_sid, None)
+                    self._sessions[client_id] = session
             session.name = str(msg.get("name", "")).strip()[:32] or "Mobile"
             session.device = str(msg.get("device", "")).strip()[:80]
+            
+            # Check if this device is already approved
+            from .config import load_approved_mobile_devices
+            approved_list = load_approved_mobile_devices()
+            if client_id and client_id in approved_list:
+                session.state = "approved"
+                self._send_nowait(session, {"type": "approved"})
+                
             if self._on_join:
                 self._on_join(session)
         elif mtype == "chat" and session.state == "approved":
@@ -446,6 +589,23 @@ class MobileServer:
             if ip.startswith("192.168."):
                 return f"http://{ip}:{self._port}"
         return f"http://{ips[0]}:{self._port}" if ips else None
+
+    def register_pending_file(self, tid: str, path: str) -> None:
+        """Register a file to be served for download via HTTP /download."""
+        with self._lock:
+            self._pending_files[tid] = path
+
+    def send_file_offer(self, sid: str, tid: str, filename: str, size: int) -> None:
+        """Send a file offer via WebSocket to the approved mobile client."""
+        with self._lock:
+            session = self._sessions.get(sid)
+        if session and session.state == "approved":
+            self._send_nowait(session, {
+                "type": "file_offer",
+                "transfer_id": tid,
+                "filename": filename,
+                "size": size
+            })
 
     # ── internal ─────────────────────────────────────────────────────────────
 

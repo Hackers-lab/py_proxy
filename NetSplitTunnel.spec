@@ -30,7 +30,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='NetSplitTunnel_v4.6',
+    name='NetSplitTunnel_v4.7',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -48,11 +48,12 @@ class FileTransferService:
         self.running = False
 
     # ── sender ────────────────────────────────────────────────────────────────
-    def offer_file(self, ip: str, path: str,
+    def offer_file(self, ip: str, path: str, tid: str = None,
                    progress_cb=None, done_cb=None, error_cb=None,
                    expire_cb=None, expire_after: int = 60) -> str:
         """Register a pending send, notify peer. Returns transfer_id. Raises on network error."""
-        tid = uuid.uuid4().hex[:12]
+        if not tid:
+            tid = uuid.uuid4().hex[:12]
         size = os.path.getsize(path)
         filename = os.path.basename(path)
         cancel_event = threading.Event()

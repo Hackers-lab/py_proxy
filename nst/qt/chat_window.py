@@ -773,7 +773,7 @@ class ChatWindow(QWidget):
         is_mob = self._is_mobile(key)
         self._btn_add.setVisible(is_grp)
         self._btn_save.setVisible(not is_grp and not is_mob and key != DemoBot.IP)
-        self._btn_file.setVisible(not is_grp and not is_mob)
+        self._btn_file.setVisible(not is_grp)
         self._set_composer_visible(True)
         self._render(key)
         self._refresh_typing()
@@ -1465,11 +1465,19 @@ class ChatWindow(QWidget):
 
     # ── mobile web bridge ─────────────────────────────────────────────────────
     def on_mobile_join(self, session) -> None:
-        """A phone submitted its name — show approval card."""
+        """A phone submitted its name — show approval card or handle auto-approval."""
         sid = session.sid
         self._mobile_sessions[sid] = session
         key = f"mobile:{sid}"
         self._names[key] = f"{session.name} 📱"
+        
+        if session.state == "approved":
+            self._sys(key, f"{session.name} 📱 has connected (auto-approved).")
+            self.update_roster(self.chat.peers())
+            if key == self._active:
+                self._update_header_sub(self.chat.peers())
+            return
+
         entry = _mk_entry("mobile_req", session.name, "", time.time(),
                           sid=sid, from_ip=session.ip, device=session.device)
         self._conversations.setdefault(key, [])
@@ -1508,6 +1516,28 @@ class ChatWindow(QWidget):
                 prev = text if len(text) <= 120 else text[:117] + "…"
                 self._toasts.notify(f"{session.name} 📱", prev, key)
                 self.activity.emit(key)
+
+    def on_mobile_file(self, session, filename: str, save_path: str, size: int) -> None:
+        """Approved mobile user uploaded a file."""
+        key = f"mobile:{session.sid}"
+        tid = uuid.uuid4().hex[:12]
+        self._transfer_paths[tid] = save_path
+        self._progress_text[tid] = "Saved!"
+        self._add_file_entry(key, "file_in_offer", tid, filename, size, from_ip=session.ip)
+        self._offer_states[tid] = "accepted"
+        self._rerender_if_active(key)
+        if key != self._active or not self._visible:
+            self._unread[key] = self._unread.get(key, 0) + 1
+            self.update_roster(self.chat.peers())
+            if self._notifications_enabled:
+                self._toasts.notify(f"{session.name} 📱", f"📎 Sent a file: {filename}", key)
+                self.activity.emit(key)
+
+    def on_mobile_download(self, sid: str, tid: str) -> None:
+        """Mobile user started/finished downloading a file offered by desktop."""
+        key = f"mobile:{sid}"
+        self._set_progress(tid, "Sent!")
+        self._rerender_if_active(key)
 
     def _make_mobile_req_bubble(self, entry: dict) -> QWidget:
         sid = entry.get("sid", "")
@@ -1559,6 +1589,14 @@ class ChatWindow(QWidget):
         if not sess or not self._mobile:
             return
         key = f"mobile:{sid}"
+        
+        # Save to registry approved devices list
+        from ..config import load_approved_mobile_devices, save_approved_mobile_devices
+        approved = load_approved_mobile_devices()
+        if sid not in approved:
+            approved.append(sid)
+            save_approved_mobile_devices(approved)
+
         history = list(self._conversations.get(key, []))
         self._mobile.approve(sid, history)
         self._sys(key, f"{sess.name} has been approved and joined the chat.")
@@ -1580,6 +1618,14 @@ class ChatWindow(QWidget):
             return
         self._mobile.block(sid)
         key = f"mobile:{sid}"
+        
+        # Remove from registry approved devices list
+        from ..config import load_approved_mobile_devices, save_approved_mobile_devices
+        approved = load_approved_mobile_devices()
+        if sid in approved:
+            approved.remove(sid)
+            save_approved_mobile_devices(approved)
+
         self._sys(key, f"{sess.name} ({sess.ip}) has been blocked.")
         self._rerender_if_active(key)
         self._log(f"Mobile IP {sess.ip} blocked.")
@@ -2079,11 +2125,28 @@ class ChatWindow(QWidget):
             return
         filename = os.path.basename(path)
         size = os.path.getsize(path)
-        threading.Thread(target=self._offer_worker,
-                         args=(ip, path, filename, size), daemon=True).start()
 
-    def _offer_worker(self, ip, path, filename, size) -> None:
-        holder = {"tid": None}
+        tid = uuid.uuid4().hex[:12]
+        if self._is_mobile(ip):
+            self._transfer_paths[tid] = path
+            self._progress_text[tid] = "Serving to mobile..."
+        else:
+            self._transfer_paths[tid] = None
+            self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
+        self._add_file_entry(ip, "file_out", tid, filename, size)
+
+        if self._is_mobile(ip):
+            sid = ip[7:]
+            if self._mobile:
+                self._mobile.register_pending_file(tid, path)
+                self._mobile.send_file_offer(sid, tid, filename, size)
+            return
+
+        threading.Thread(target=self._offer_worker,
+                         args=(ip, path, filename, size, tid), daemon=True).start()
+
+    def _offer_worker(self, ip, path, filename, size, tid) -> None:
+        holder = {"tid": tid}
 
         def progress(done, total, speed, elapsed, eta):
             if holder["tid"]:
@@ -2111,13 +2174,12 @@ class ChatWindow(QWidget):
                 QTimer.singleShot(0, lambda: self._set_progress(tid, "No response — expired"))
 
         try:
-            tid = self._ft.offer_file(ip, path, progress_cb=progress, done_cb=done,
-                                      error_cb=error, expire_cb=expire)
-            holder["tid"] = tid
-            self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
-            QTimer.singleShot(0, lambda: self._add_file_entry(ip, "file_out", tid, filename, size))
+            self._ft.offer_file(ip, path, tid=tid, progress_cb=progress, done_cb=done,
+                                error_cb=error, expire_cb=expire)
         except Exception as e:
-            QTimer.singleShot(0, lambda: self._log(f"Could not send file offer: {e}"))
+            self._transfer_paths[tid] = ""
+            QTimer.singleShot(0, lambda: (self._set_progress(tid, f"Failed: {e}"),
+                                          self._rerender_if_active(ip)))
 
     def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
         entry = _mk_entry(kind, "", "", time.time(), tid=tid, filename=filename,
@@ -2249,11 +2311,13 @@ class ChatWindow(QWidget):
     def _accept_chat(self, ip) -> None:
         self._chat_req_states[ip] = "accepted"
         self.chat.approve_ip(ip)
+        self._save_peer(ip)
         self._rerender_if_active(ip)
 
     def _block_chat(self, ip) -> None:
         self._chat_req_states[ip] = "blocked"
         self.chat.block_ip(ip)
+        self._save_peer(ip)
         self._rerender_if_active(ip)
 
     # ── persistence (JSON entry-dicts, with legacy-tuple migration) ───────────
@@ -2302,6 +2366,12 @@ class ChatWindow(QWidget):
                         self._aliases[ip] = data["alias"]
                     if data.get("manual"):
                         self.chat.add_manual_peer(ip)
+                    if data.get("approved"):
+                        self.chat.approve_ip(ip)
+                        self._chat_req_states[ip] = "accepted"
+                    elif data.get("blocked"):
+                        self.chat.block_ip(ip)
+                        self._chat_req_states[ip] = "blocked"
                     # Restore last-seen so the peer shows "last seen …" until it
                     # comes back online; fall back to the newest message time.
                     ls = data.get("last_seen") or 0.0
@@ -2340,6 +2410,10 @@ class ChatWindow(QWidget):
                     data["manual"] = True
                 if last_seen:
                     data["last_seen"] = last_seen
+                if ip in self.chat._approved_ips:
+                    data["approved"] = True
+                if ip in self.chat._blocked_ips:
+                    data["blocked"] = True
                 with open(os.path.join(config.get_peer_chat_dir(), f"{safe}.json"),
                           "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
