@@ -15,7 +15,6 @@ CONN_TIMEOUT  = 30
 CHAT_PRESENCE_PORT = 54322       # UDP broadcast port for chat peer presence
 CHAT_TCP_PORT      = 54323       # TCP port each peer listens on for messages
 FILE_TCP_PORT      = 54324       # TCP port for file transfer data streams
-MOBILE_HTTP_PORT   = 8765        # HTTP+WebSocket port for mobile PWA bridge
 # V2 presence: payload is ``CHAT_MAGIC|<json>`` carrying uid/device/ips/status.
 CHAT_MAGIC         = b"NST_CHAT_V2"
 CHAT_PRESENCE_EVERY = 3          # seconds between presence broadcasts

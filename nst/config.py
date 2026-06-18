@@ -176,15 +176,6 @@ def load_presence_online() -> bool:
 def save_presence_online(online: bool) -> bool:
     return save_my_status("online" if online else "invisible")
 
-# ── Mobile access ────────────────────────────────────────────────────────────
-
-def load_mobile_enabled() -> bool:
-    return bool(_read_value("MobileEnabled", 1))
-
-
-def save_mobile_enabled(enabled: bool) -> bool:
-    return _write_value("MobileEnabled", winreg.REG_DWORD, 1 if enabled else 0)
-
 # ── Chat history path ────────────────────────────────────────────────────────
 
 def get_chat_history_path() -> str:
@@ -206,17 +197,4 @@ def get_peer_chat_dir() -> str:
     os.makedirs(folder, exist_ok=True)
     return folder
 
-
-def load_approved_mobile_devices() -> list[str]:
-    """Load approved mobile client IDs from the registry."""
-    val = str(_read_value("ApprovedMobileDevices", "")).strip()
-    if not val:
-        return []
-    return [x.strip() for x in val.split(",") if x.strip()]
-
-
-def save_approved_mobile_devices(devices: list[str]) -> bool:
-    """Save approved mobile client IDs list to the registry."""
-    val = ",".join(devices)
-    return _write_value("ApprovedMobileDevices", winreg.REG_SZ, val)
 

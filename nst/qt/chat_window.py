@@ -18,12 +18,12 @@ from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame,
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                             QPushButton, QScrollArea, QSizePolicy, QToolButton,
+                             QPushButton, QScrollArea, QToolButton,
                              QVBoxLayout, QWidget)
 
 from .. import config
 from ..chat import DemoBot
-from ..constants import CHAT_TCP_PORT, MOBILE_HTTP_PORT
+from ..constants import CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
 from ..netinfo import check_host_reachable, is_valid_ipv4
 from .theme import theme
@@ -244,13 +244,12 @@ class ChatWindow(QWidget):
 
     activity = pyqtSignal(str)     # background message arrived on this key
 
-    def __init__(self, chat_service, toasts, mobile_server=None,
+    def __init__(self, chat_service, toasts,
                  log_fn=lambda m: None) -> None:
         super().__init__(None)
         self.chat = chat_service
         self._toasts = toasts
         self._log = log_fn
-        self._mobile = mobile_server
         self.setWindowTitle("LAN Chat — Net Split-Tunneler")
         self.resize(900, 600)
         self.setMinimumSize(720, 480)
@@ -270,9 +269,6 @@ class ChatWindow(QWidget):
         self._notifications_enabled = config.load_notifications_enabled()
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
-
-        # mobile sessions (keyed by sid; cleared on leave)
-        self._mobile_sessions: dict[str, object] = {}       # sid -> MobileSession
 
         # message-id bookkeeping (receipts, delete-for-everyone, reactions)
         self._mid_index: dict[str, tuple[str, dict]] = {}   # mid -> (key, entry)
@@ -504,17 +500,9 @@ class ChatWindow(QWidget):
     def _is_group(key: str) -> bool:
         return bool(key) and key.startswith("group:")
 
-    @staticmethod
-    def _is_mobile(key: str) -> bool:
-        return bool(key) and key.startswith("mobile:")
-
     def _display_name(self, key: str) -> str:
         if self._is_group(key):
             return self._groups.get(key[6:], {}).get("name", "Group")
-        if self._is_mobile(key):
-            sid = key[7:]
-            sess = self._mobile_sessions.get(sid)
-            return f"{sess.name} 📱" if sess else self._names.get(key, "Mobile 📱")
         return self._aliases.get(key) or self._names.get(key, key)
 
     def _group_meta(self, gid: str) -> dict:
@@ -595,8 +583,6 @@ class ChatWindow(QWidget):
             m.addAction("🔔 Popups on — pause popups", lambda: self._set_notify(False))
         else:
             m.addAction("🔕 Popups paused — enable popups", lambda: self._set_notify(True))
-        m.addSeparator()
-        m.addAction("📱 Mobile Access — Show QR", self._show_qr_dialog)
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
     def _set_status(self, status: str) -> None:
@@ -633,10 +619,6 @@ class ChatWindow(QWidget):
         """'online' | 'away' | 'offline' for a peer."""
         if ip == DemoBot.IP:
             return "online"
-        if self._is_mobile(ip):
-            sid = ip[7:]
-            sess = self._mobile_sessions.get(sid)
-            return "online" if (sess and sess.state == "approved") else "offline"
         return self.chat.peer_status(ip)
 
     def _is_online(self, ip: str) -> bool:
@@ -653,16 +635,6 @@ class ChatWindow(QWidget):
     def _peer_subtitle(self, ip: str, status: str) -> str:
         if ip == DemoBot.IP:
             return "demo peer"
-        if self._is_mobile(ip):
-            sid = ip[7:]
-            sess = self._mobile_sessions.get(sid)
-            if not sess:
-                return "📱 disconnected"
-            if sess.state == "pending":
-                return f"📱 {sess.ip} · waiting for approval"
-            if sess.state == "approved":
-                return f"📱 {sess.ip} · connected"
-            return f"📱 {sess.ip} · {sess.state}"
         if status == "offline":
             return _fmt_last_seen(self.chat.last_seen_of(ip))
         dev = self._devices.get(ip)
@@ -741,15 +713,6 @@ class ChatWindow(QWidget):
             self._head_sub.setText(f"Group · {n} members")
         elif key == DemoBot.IP:
             self._head_sub.setText("demo peer")
-        elif self._is_mobile(key):
-            sid = key[7:]
-            sess = self._mobile_sessions.get(sid)
-            if sess and sess.state == "approved":
-                self._head_sub.setText(f"📱 {sess.ip} · connected")
-            elif sess:
-                self._head_sub.setText(f"📱 {sess.ip} · {sess.state}")
-            else:
-                self._head_sub.setText("📱 mobile · disconnected")
         else:
             status = self._status_of(key)
             dev = self._devices.get(key)
@@ -771,9 +734,8 @@ class ChatWindow(QWidget):
         self._head_name.setText(self._display_name(key))
         self._update_header_sub(self.chat.peers())
         is_grp = self._is_group(key)
-        is_mob = self._is_mobile(key)
         self._btn_add.setVisible(is_grp)
-        self._btn_save.setVisible(not is_grp and not is_mob and key != DemoBot.IP)
+        self._btn_save.setVisible(not is_grp and key != DemoBot.IP)
         self._btn_file.setVisible(not is_grp)
         self._set_composer_visible(True)
         self._render(key)
@@ -857,8 +819,6 @@ class ChatWindow(QWidget):
             return self._make_file_bubble(entry)
         if kind == "chat_req":
             return self._make_req_bubble(entry)
-        if kind == "mobile_req":
-            return self._make_mobile_req_bubble(entry)
         if kind == "sys":
             lbl = QLabel(f"— {entry.get('text', '')} —")
             lbl.setObjectName("muted")
@@ -1043,12 +1003,6 @@ class ChatWindow(QWidget):
             meta = self._group_meta(key[6:])
             threading.Thread(target=self._send_group_worker,
                              args=(key, meta, text, reply, mid), daemon=True).start()
-        elif self._is_mobile(key):
-            sid = key[7:]
-            if self._mobile:
-                threading.Thread(
-                    target=lambda: self._mobile.send_to(sid, self.chat.my_name, text),
-                    daemon=True).start()
         else:
             threading.Thread(target=self._send_worker,
                              args=(key, text, reply, mid), daemon=True).start()
@@ -1186,7 +1140,7 @@ class ChatWindow(QWidget):
 
     def _mark_read(self, key) -> None:
         """Send 'read' receipts once the chat is open+focused."""
-        if key == DemoBot.IP or self._is_mobile(key):
+        if key == DemoBot.IP:
             return
         if not (self._visible and self.isActiveWindow() and key == self._active):
             return
@@ -1466,302 +1420,10 @@ class ChatWindow(QWidget):
             a.setEnabled(False)
         popup.exec(QCursor.pos())
 
-    # ── mobile web bridge ─────────────────────────────────────────────────────
-    def on_mobile_join(self, session) -> None:
-        """A phone submitted its name — show approval card or handle auto-approval."""
-        sid = session.sid
-        self._mobile_sessions[sid] = session
-        key = f"mobile:{sid}"
-        self._names[key] = f"{session.name} 📱"
-        
-        if session.state == "approved":
-            self._sys(key, f"{session.name} 📱 has connected (auto-approved).")
-            self.update_roster(self.chat.peers())
-            if key == self._active:
-                self._update_header_sub(self.chat.peers())
-            return
-
-        entry = _mk_entry("mobile_req", session.name, "", time.time(),
-                          sid=sid, from_ip=session.ip, device=session.device)
-        self._conversations.setdefault(key, [])
-        self._store(key, entry)
-        self._unread[key] = self._unread.get(key, 0) + 1
-        self.update_roster(self.chat.peers())
-        if self._notifications_enabled:
-            self._toasts.notify(f"{session.name} 📱",
-                                f"Wants to join from {session.ip}", key)
-        if key == self._active and self._visible:
-            self._append(entry)
-
-    def on_mobile_leave(self, session) -> None:
-        """A phone disconnected."""
-        sid = session.sid
-        key = f"mobile:{sid}"
-        self._mobile_sessions.pop(sid, None)
-        if session.state == "approved":
-            self._sys(key, f"{session.name} 📱 disconnected.")
-        self.update_roster(self.chat.peers())
-        if key == self._active:
-            self._update_header_sub(self.chat.peers())
-
-    def on_mobile_message(self, session, text: str) -> None:
-        """Approved mobile user sent a chat message."""
-        key = f"mobile:{session.sid}"
-        entry = _mk_entry("in", f"{session.name} 📱", text, time.time())
-        self._store(key, entry)
-        if key == self._active and self._visible:
-            self._append(entry)
-        else:
-            self._unread[key] = self._unread.get(key, 0) + 1
-            self.update_roster(self.chat.peers())
-            if self._notifications_enabled:
-                self.activity.emit(key)
-            else:
-                prev = text if len(text) <= 120 else text[:117] + "…"
-                self._toasts.notify(f"{session.name} 📱", prev, key)
-
-    def on_mobile_file(self, session, tid: str, filename: str, save_path: str, size: int) -> None:
-        key = f"mobile:{session.sid}"
-        self._transfer_paths[tid] = save_path
-        self._set_progress(tid, "Saved!")
-        self._rerender_if_active(key)
-
-    def on_mobile_file_offer(self, session, tid: str, filename: str, size: int) -> None:
-        key = f"mobile:{session.sid}"
-        self._offer_states[tid] = "pending"
-        self._add_file_entry(key, "file_in_offer", tid, filename, size, from_ip=session.ip)
-        if not (key == self._active and self._visible):
-            if self._notifications_enabled:
-                self.activity.emit(key)
-            else:
-                self._toasts.notify(f"{session.name} 📱", f"📎 Wants to send: {filename}", key)
-
-    def on_mobile_file_progress(self, session, tid: str, received: int) -> None:
-        self._set_progress(tid, f"Receiving... {_fmt_size(received)}")
-
-    def on_mobile_download(self, sid: str, tid: str) -> None:
-        """Mobile user started/finished downloading a file offered by desktop."""
-        key = f"mobile:{sid}"
-        self._set_progress(tid, "Sent!")
-        self._rerender_if_active(key)
-
-    def _make_mobile_req_bubble(self, entry: dict) -> QWidget:
-        sid = entry.get("sid", "")
-        sess = self._mobile_sessions.get(sid)
-        state = sess.state if sess else "disconnected"
-        card = QFrame()
-        card.setObjectName("card2")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(6)
-        hd = QLabel(f"📱 {entry.get('sender', 'Mobile')} wants to join")
-        hd.setStyleSheet("font-weight:700; font-size:13px;")
-        v.addWidget(hd)
-        ip = entry.get("from_ip", "")
-        dev = entry.get("device", "")
-        if ip:
-            info = QLabel(f"From: {ip}" + (f"  ·  {dev[:40]}" if dev else ""))
-            info.setObjectName("muted")
-            v.addWidget(info)
-        if state == "pending":
-            brow = QHBoxLayout()
-            acc = QPushButton("Approve")
-            acc.setProperty("variant", "success")
-            acc.clicked.connect(lambda: self._approve_mobile(sid))
-            rej = QPushButton("Reject")
-            rej.clicked.connect(lambda: self._reject_mobile(sid))
-            blk = QPushButton("Block")
-            blk.setProperty("variant", "danger")
-            blk.clicked.connect(lambda: self._block_mobile(sid))
-            brow.addWidget(acc); brow.addWidget(rej); brow.addWidget(blk)
-            brow.addStretch(1)
-            v.addLayout(brow)
-        elif state == "approved":
-            lbl = QLabel("✓ Approved — chatting now")
-            lbl.setStyleSheet("color:%s;" % theme.color("success"))
-            v.addWidget(lbl)
-        elif state == "blocked":
-            lbl = QLabel("Blocked")
-            lbl.setStyleSheet("color:%s;" % theme.color("danger"))
-            v.addWidget(lbl)
-        else:
-            lbl = QLabel("Rejected / Disconnected")
-            lbl.setObjectName("muted")
-            v.addWidget(lbl)
-        return card
-
-    def _approve_mobile(self, sid: str) -> None:
-        sess = self._mobile_sessions.get(sid)
-        if not sess or not self._mobile:
-            return
-        key = f"mobile:{sid}"
-        
-        # Save to registry approved devices list
-        from ..config import load_approved_mobile_devices, save_approved_mobile_devices
-        approved = load_approved_mobile_devices()
-        if sid not in approved:
-            approved.append(sid)
-            save_approved_mobile_devices(approved)
-
-        history = list(self._conversations.get(key, []))
-        self._mobile.approve(sid, history)
-        self._sys(key, f"{sess.name} has been approved and joined the chat.")
-        self._rerender_if_active(key)
-        self.update_roster(self.chat.peers())
-
-    def _reject_mobile(self, sid: str) -> None:
-        sess = self._mobile_sessions.get(sid)
-        if not sess or not self._mobile:
-            return
-        self._mobile.reject(sid)
-        key = f"mobile:{sid}"
-        self._sys(key, f"{sess.name} was rejected.")
-        self._rerender_if_active(key)
-
-    def _block_mobile(self, sid: str) -> None:
-        sess = self._mobile_sessions.get(sid)
-        if not sess or not self._mobile:
-            return
-        self._mobile.block(sid)
-        key = f"mobile:{sid}"
-        
-        # Remove from registry approved devices list
-        from ..config import load_approved_mobile_devices, save_approved_mobile_devices
-        approved = load_approved_mobile_devices()
-        if sid in approved:
-            approved.remove(sid)
-            save_approved_mobile_devices(approved)
-
-        self._sys(key, f"{sess.name} ({sess.ip}) has been blocked.")
-        self._rerender_if_active(key)
-        self._log(f"Mobile IP {sess.ip} blocked.")
-
-    def _show_qr_dialog(self) -> None:
-        from PyQt6.QtGui import QPixmap
-
-        if not self._mobile:
-            QMessageBox.information(self, "Mobile Access",
-                                    "Mobile server is not configured.")
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Mobile Access")
-        dlg.setMinimumWidth(360)
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(20, 20, 20, 20)
-        v.setSpacing(10)
-
-        # ── server not available (aiohttp missing) ──────────────────────────
-        if not self._mobile.running:
-            err = QLabel(
-                "Mobile server is not available.\n\n"
-                "Install required packages and restart:\n"
-                "    pip install aiohttp qrcode pillow"
-            )
-            err.setWordWrap(True)
-            err.setStyleSheet("color:#ef4444;font-weight:bold;")
-            v.addWidget(err)
-            ok = QPushButton("Close")
-            ok.clicked.connect(dlg.close)
-            v.addWidget(ok)
-            dlg.exec()
-            return
-
-        # ── server failed to start (port conflict, etc.) ────────────────────
-        if self._mobile.start_error:
-            err = QLabel(f"Server failed to start:\n{self._mobile.start_error}")
-            err.setWordWrap(True)
-            err.setStyleSheet("color:#ef4444;font-weight:bold;")
-            v.addWidget(err)
-            ok = QPushButton("Close")
-            ok.clicked.connect(dlg.close)
-            v.addWidget(ok)
-            dlg.exec()
-            return
-
-        # ── QR code ─────────────────────────────────────────────────────────
-        qr_url = self._mobile.get_qr_url()
-        if qr_url:
-            try:
-                from ..mobile import make_qr_png
-                png = make_qr_png(qr_url)
-                if png:
-                    v.addWidget(QLabel("Scan with your phone camera to join:"),
-                                alignment=Qt.AlignmentFlag.AlignCenter)
-                    pm = QPixmap()
-                    pm.loadFromData(png)
-                    ql = QLabel()
-                    ql.setPixmap(pm.scaled(240, 240,
-                                           Qt.AspectRatioMode.KeepAspectRatio,
-                                           Qt.TransformationMode.SmoothTransformation))
-                    ql.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    v.addWidget(ql)
-                else:
-                    hint = QLabel("QR unavailable — install: pip install qrcode pillow")
-                    hint.setObjectName("muted")
-                    hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    v.addWidget(hint)
-            except Exception:
-                pass
-
-        # ── URL list ─────────────────────────────────────────────────────────
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        v.addWidget(sep)
-
-        lbl_hdr = QLabel("Open in phone browser:")
-        lbl_hdr.setStyleSheet("font-weight:bold;")
-        v.addWidget(lbl_hdr)
-
-        labeled = self._mobile.get_access_urls_labeled()
-        if not labeled:
-            labeled = [("Network", qr_url)] if qr_url else []
-
-        for net_label, url in labeled:
-            row = QWidget()
-            row_h = QHBoxLayout(row)
-            row_h.setContentsMargins(0, 0, 0, 0)
-            row_h.setSpacing(8)
-            tag = QLabel(net_label)
-            tag.setObjectName("muted")
-            tag.setFixedWidth(100)
-            url_lbl = QLabel(url)
-            url_lbl.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse)
-            url_lbl.setStyleSheet("font-weight:bold;font-size:13px;")
-            row_h.addWidget(tag)
-            row_h.addWidget(url_lbl, 1)
-            v.addWidget(row)
-
-        # ── firewall tip ──────────────────────────────────────────────────────
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        v.addWidget(sep2)
-
-        fw = QLabel(
-            "If your phone says \"site can't be reached\", Windows Firewall is\n"
-            "blocking port 8765. Run this once as Administrator:\n\n"
-            f"netsh advfirewall firewall add rule name=\"NST Mobile\"\n"
-            f" dir=in action=allow protocol=TCP localport={MOBILE_HTTP_PORT}"
-        )
-        fw.setObjectName("muted")
-        fw.setWordWrap(True)
-        fw.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        fw.setStyleSheet("font-size:11px;")
-        v.addWidget(fw)
-
-        ok = QPushButton("Close")
-        ok.clicked.connect(dlg.close)
-        v.addWidget(ok)
-        dlg.adjustSize()
-        dlg.exec()
-
     # ── typing indicators ─────────────────────────────────────────────────────
     def _on_typing_edit(self, _text: str) -> None:
         key = self._active
-        if not key or key == DemoBot.IP or self._is_mobile(key) or not self._entry.text().strip():
+        if not key or key == DemoBot.IP or not self._entry.text().strip():
             return
         now = time.time()
         if not self._typing_active or now - self._typing_last_sent > 2.0:
@@ -1882,18 +1544,6 @@ class ChatWindow(QWidget):
 
     def _delete_peer(self, ip) -> None:
         name = self._display_name(ip)
-        if self._is_mobile(ip):
-            sid = ip[7:]
-            if self._mobile:
-                self._mobile.disconnect(sid)
-            self._mobile_sessions.pop(sid, None)
-            self._drop_index(ip)
-            for d in (self._conversations, self._unread, self._names, self._typers):
-                d.pop(ip, None)
-            if self._active == ip:
-                self._reset_active()
-            self.update_roster(self.chat.peers())
-            return
         if QMessageBox.question(self, "Remove peer",
                                 f"Remove {name} and delete its chat history?") \
                 != QMessageBox.StandardButton.Yes:
@@ -2133,20 +1783,9 @@ class ChatWindow(QWidget):
         size = os.path.getsize(path)
 
         tid = uuid.uuid4().hex[:12]
-        if self._is_mobile(ip):
-            self._transfer_paths[tid] = None
-            self._progress_text[tid] = "Waiting for mobile to download..."
-        else:
-            self._transfer_paths[tid] = None
-            self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
+        self._transfer_paths[tid] = None
+        self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
         self._add_file_entry(ip, "file_out", tid, filename, size)
-
-        if self._is_mobile(ip):
-            sid = ip[7:]
-            if self._mobile:
-                self._mobile.register_pending_file(tid, path)
-                self._mobile.send_file_offer(sid, tid, filename, size)
-            return
 
         threading.Thread(target=self._offer_worker,
                          args=(ip, path, filename, size, tid), daemon=True).start()
@@ -2230,11 +1869,6 @@ class ChatWindow(QWidget):
         self._set_progress(tid, "Connecting…")
         self._rerender_if_active(from_ip)
 
-        if self._is_mobile(from_ip) and self._mobile:
-            sid = from_ip[7:]
-            self._mobile.accept_file(sid, tid)
-            return
-
         def progress(done, total, speed, elapsed, eta):
             pct = int(done * 100 / total) if total else 0
             def main_prog():
@@ -2269,20 +1903,11 @@ class ChatWindow(QWidget):
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Rejected")
         self._rerender_if_active(from_ip)
-        
-        if self._is_mobile(from_ip) and self._mobile:
-            sid = from_ip[7:]
-            self._mobile.reject_file(sid, tid)
-            return
 
         threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
 
     def _cancel_file(self, tid) -> None:
         self._ft.cancel_transfer(tid)
-        ip = self._active
-        if ip and self._is_mobile(ip) and self._mobile:
-            sid = ip[7:]
-            self._mobile.cancel_file_offer(sid, tid)
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Cancelled")
         if self._active:
