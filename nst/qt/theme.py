@@ -114,7 +114,7 @@ class QtTheme(QObject):
         }}
         QPlainTextEdit#composer {{
             background: {p['entry_bg']}; border: 1px solid {p['border']};
-            border-radius: 12px; padding: 8px 11px;
+            border-radius: 12px;
         }}
         QPlainTextEdit#composer:focus {{ border: 1px solid {p['accent']}; }}
 

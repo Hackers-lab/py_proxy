@@ -1,10 +1,10 @@
 """The dedicated, categorised Settings window (update.md "Settings Module").
 
 A lightweight left-nav + stacked-pages dialog covering General, Notifications,
-Storage, Network, Privacy & User Management, File Transfer and About. Every
-control reads/writes :mod:`nst.config` (so changes persist across restarts) and
-applies immediately where possible, calling back into the chat window only for
-things that need a live UI refresh.
+Storage, Network, Privacy & Users, File Transfer and About. Edits are *staged*
+in the controls and only written to :mod:`nst.config` when **Save** is pressed;
+**Cancel** discards them. Explicit actions (Clear history, Unblock, Test sound)
+run immediately, since they aren't settings.
 """
 
 import os
@@ -57,10 +57,17 @@ class SettingsDialog(QDialog):
         self.cw = chat_window
         self.chat = chat_window.chat
         self.setWindowTitle("Settings — LAN Chat")
-        self.resize(720, 560)
-        self.setMinimumSize(620, 460)
+        self.resize(720, 580)
+        self.setMinimumSize(620, 480)
+        # staged download folder (committed on Save; "" = unchanged)
+        self._pending_dir = ""
 
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        body = QWidget()
+        root = QHBoxLayout(body)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -89,6 +96,29 @@ class SettingsDialog(QDialog):
                         self._page_about):
             self._pages.addWidget(self._scroll(builder()))
         root.addWidget(self._pages, 1)
+        outer.addWidget(body, 1)
+        outer.addWidget(hline())
+
+        # bottom Save / Cancel bar
+        bar = QHBoxLayout()
+        bar.setContentsMargins(14, 10, 16, 12)
+        bar.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        savebtn = QPushButton("Save")
+        savebtn.setProperty("variant", "accent")
+        savebtn.setDefault(True)
+        savebtn.clicked.connect(self._save)
+        bar.addWidget(cancel)
+        bar.addWidget(savebtn)
+        outer.addLayout(bar)
+
+        # keep the duplicated "max file size" spin-boxes in sync as the user types
+        self._maxmb.valueChanged.connect(
+            lambda v: self._ft_maxmb.value() != v and self._ft_maxmb.setValue(v))
+        self._ft_maxmb.valueChanged.connect(
+            lambda v: self._maxmb.value() != v and self._maxmb.setValue(v))
+
         self._nav.setCurrentRow(0)
 
     # ── layout helpers ─────────────────────────────────────────────────────────
@@ -117,6 +147,11 @@ class SettingsDialog(QDialog):
         lbl.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
         return lbl
 
+    def _section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("section")
+        return lbl
+
     def _on_nav(self, row: int) -> None:
         if row < 0:
             return
@@ -128,60 +163,72 @@ class SettingsDialog(QDialog):
         elif row == 4:
             self._refresh_blocked()
 
+    # ── Save / Cancel ──────────────────────────────────────────────────────────
+    def _save(self) -> None:
+        """Commit every staged control value to config, then close."""
+        # General
+        name = self._name_edit.text().strip()[:32]
+        if name and name != self.chat.my_name:
+            self.cw.apply_display_name(name)
+        want_invisible = self._cb_invisible.isChecked()
+        if want_invisible != (self.chat.my_status == "invisible"):
+            self.cw.set_status("invisible" if want_invisible else "online")
+        if self._cb_autostart.isChecked() != config.is_autostart_enabled():
+            ok, msg = config.set_autostart(self._cb_autostart.isChecked())
+            if not ok:
+                QMessageBox.warning(self, "Autostart", msg)
+        config.save_minimize_to_tray(self._cb_tray.isChecked())
+        config.save_restore_session(self._cb_restore.isChecked())
+
+        # Notifications
+        config.save_notifications_enabled(self._cb_notif_all.isChecked())
+        config.save_mute_all(self._cb_mute.isChecked())
+        config.save_do_not_disturb(self._cb_dnd.isChecked())
+        config.save_sound_volume(self._vol.value())
+        prefs = config.load_notify_prefs()
+        for (scope, ch), cb in self._notif_boxes.items():
+            prefs.setdefault(scope, {})[ch] = cb.isChecked()
+        config.save_notify_prefs(prefs)
+
+        # Storage + File transfer
+        config.save_retention_days(self._retention.currentData())
+        config.save_max_file_mb(self._maxmb.value())
+        config.save_file_expiry_min(self._ft_expiry.value())
+        if self._pending_dir:
+            config.save_download_dir(self._pending_dir)
+
+        self.cw.on_settings_changed()
+        self.accept()
+
     # ── General ─────────────────────────────────────────────────────────────────
     def _page_general(self) -> QWidget:
         w, v = self._page("General")
 
         v.addWidget(QLabel("Display name"))
-        row = QHBoxLayout()
         self._name_edit = QLineEdit(self.chat.my_name)
         self._name_edit.setMaxLength(32)
-        save = QPushButton("Save")
-        save.setProperty("variant", "accent")
-        save.clicked.connect(self._save_name)
-        row.addWidget(self._name_edit, 1)
-        row.addWidget(save)
-        v.addLayout(row)
+        v.addWidget(self._name_edit)
         v.addWidget(self._hint(
             f"Shown to peers as “{self.chat.my_name} | {self.chat.my_device} | {self.chat.my_ip}”."))
 
         self._cb_invisible = QCheckBox("Invisible mode (appear offline but still receive messages)")
         self._cb_invisible.setChecked(self.chat.my_status == "invisible")
-        self._cb_invisible.toggled.connect(self._toggle_invisible)
         v.addWidget(self._cb_invisible)
 
         self._cb_autostart = QCheckBox("Start application with Windows")
         self._cb_autostart.setChecked(config.is_autostart_enabled())
-        self._cb_autostart.toggled.connect(self._toggle_autostart)
         v.addWidget(self._cb_autostart)
 
         self._cb_tray = QCheckBox("Minimise to system tray when closed")
         self._cb_tray.setChecked(config.load_minimize_to_tray())
-        self._cb_tray.toggled.connect(
-            lambda on: config.save_minimize_to_tray(on))
         v.addWidget(self._cb_tray)
 
         self._cb_restore = QCheckBox("Restore previous conversation on startup")
         self._cb_restore.setChecked(config.load_restore_session())
-        self._cb_restore.toggled.connect(
-            lambda on: config.save_restore_session(on))
         v.addWidget(self._cb_restore)
 
         v.addStretch(1)
         return w
-
-    def _save_name(self) -> None:
-        name = self._name_edit.text().strip()[:32]
-        if name:
-            self.cw.apply_display_name(name)
-
-    def _toggle_invisible(self, on: bool) -> None:
-        self.cw.set_status("invisible" if on else "online")
-
-    def _toggle_autostart(self, on: bool) -> None:
-        ok, msg = config.set_autostart(on)
-        if not ok:
-            QMessageBox.warning(self, "Autostart", msg)
 
     # ── Notifications ─────────────────────────────────────────────────────────
     def _page_notifications(self) -> QWidget:
@@ -190,17 +237,14 @@ class SettingsDialog(QDialog):
         v.addWidget(self._section_label("GLOBAL"))
         self._cb_notif_all = QCheckBox("Enable all notifications")
         self._cb_notif_all.setChecked(config.load_notifications_enabled())
-        self._cb_notif_all.toggled.connect(self._toggle_notif_all)
         v.addWidget(self._cb_notif_all)
 
         self._cb_mute = QCheckBox("Mute all notification sounds")
         self._cb_mute.setChecked(config.load_mute_all())
-        self._cb_mute.toggled.connect(lambda on: config.save_mute_all(on))
         v.addWidget(self._cb_mute)
 
         self._cb_dnd = QCheckBox("Do Not Disturb (suppress popups, flashing & sound)")
         self._cb_dnd.setChecked(config.load_do_not_disturb())
-        self._cb_dnd.toggled.connect(lambda on: config.save_do_not_disturb(on))
         v.addWidget(self._cb_dnd)
 
         volrow = QHBoxLayout()
@@ -208,8 +252,8 @@ class SettingsDialog(QDialog):
         self._vol = QSlider(Qt.Orientation.Horizontal)
         self._vol.setRange(0, 100)
         self._vol.setValue(config.load_sound_volume())
-        self._vol.valueChanged.connect(self._on_volume)
         self._vol_lbl = QLabel(f"{self._vol.value()}%")
+        self._vol.valueChanged.connect(lambda val: self._vol_lbl.setText(f"{val}%"))
         test = QPushButton("Test")
         test.clicked.connect(lambda: sound.play_sound(self._vol.value()))
         volrow.addWidget(self._vol, 1)
@@ -243,7 +287,6 @@ class SettingsDialog(QDialog):
             for c, (_label, ch) in enumerate(channels):
                 cb = QCheckBox()
                 cb.setChecked(bool(prefs.get(scope, {}).get(ch, True)))
-                cb.toggled.connect(self._save_notif_prefs)
                 self._notif_boxes[(scope, ch)] = cb
                 grid.addWidget(cb, r + 1, c + 1, alignment=Qt.AlignmentFlag.AlignCenter)
         gw = QWidget()
@@ -251,25 +294,6 @@ class SettingsDialog(QDialog):
         v.addWidget(gw)
         v.addStretch(1)
         return w
-
-    def _section_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("section")
-        return lbl
-
-    def _toggle_notif_all(self, on: bool) -> None:
-        config.save_notifications_enabled(on)
-        self.cw.on_settings_changed()
-
-    def _on_volume(self, val: int) -> None:
-        self._vol_lbl.setText(f"{val}%")
-        config.save_sound_volume(val)
-
-    def _save_notif_prefs(self, *_args) -> None:
-        prefs = config.load_notify_prefs()
-        for (scope, ch), cb in self._notif_boxes.items():
-            prefs.setdefault(scope, {})[ch] = cb.isChecked()
-        config.save_notify_prefs(prefs)
 
     # ── Storage ─────────────────────────────────────────────────────────────────
     def _page_storage(self) -> QWidget:
@@ -282,7 +306,6 @@ class SettingsDialog(QDialog):
             self._retention.addItem(label, days)
             if days == cur:
                 self._retention.setCurrentIndex(i)
-        self._retention.currentIndexChanged.connect(self._save_retention)
         v.addWidget(self._retention)
         v.addWidget(self._hint(
             "Older messages are pruned from local history on the next launch. "
@@ -303,7 +326,6 @@ class SettingsDialog(QDialog):
         self._maxmb = QSpinBox()
         self._maxmb.setRange(0, 1024 * 50)
         self._maxmb.setValue(config.load_max_file_mb())
-        self._maxmb.valueChanged.connect(lambda val: config.save_max_file_mb(val))
         szrow.addStretch(1)
         szrow.addWidget(self._maxmb)
         v.addLayout(szrow)
@@ -324,15 +346,14 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return w
 
-    def _save_retention(self, _idx: int) -> None:
-        config.save_retention_days(self._retention.currentData())
-
     def _browse_download(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self, "Choose download folder", config.load_download_dir())
         if folder:
-            config.save_download_dir(folder)
-            self._dl_edit.setText(config.load_download_dir())
+            self._pending_dir = folder           # committed on Save
+            self._dl_edit.setText(folder)
+            if hasattr(self, "_ft_dl"):
+                self._ft_dl.setText(folder)
 
     def _refresh_storage_stats(self) -> None:
         hist = config.get_peer_chat_dir()
@@ -445,7 +466,7 @@ class SettingsDialog(QDialog):
         self._ft_dl = QLineEdit(config.load_download_dir())
         self._ft_dl.setReadOnly(True)
         browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse_ft_download)
+        browse.clicked.connect(self._browse_download)
         drow.addWidget(self._ft_dl, 1)
         drow.addWidget(browse)
         v.addLayout(drow)
@@ -455,7 +476,6 @@ class SettingsDialog(QDialog):
         self._ft_maxmb = QSpinBox()
         self._ft_maxmb.setRange(0, 1024 * 50)
         self._ft_maxmb.setValue(config.load_max_file_mb())
-        self._ft_maxmb.valueChanged.connect(lambda val: config.save_max_file_mb(val))
         szrow.addStretch(1)
         szrow.addWidget(self._ft_maxmb)
         v.addLayout(szrow)
@@ -465,7 +485,6 @@ class SettingsDialog(QDialog):
         self._ft_expiry = QSpinBox()
         self._ft_expiry.setRange(1, 1440)
         self._ft_expiry.setValue(config.load_file_expiry_min())
-        self._ft_expiry.valueChanged.connect(lambda val: config.save_file_expiry_min(val))
         exrow.addStretch(1)
         exrow.addWidget(self._ft_expiry)
         v.addLayout(exrow)
@@ -475,15 +494,6 @@ class SettingsDialog(QDialog):
             "and there is no central storage. Offline file transfer isn't supported."))
         v.addStretch(1)
         return w
-
-    def _browse_ft_download(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "Choose download folder", config.load_download_dir())
-        if folder:
-            config.save_download_dir(folder)
-            self._ft_dl.setText(config.load_download_dir())
-            if hasattr(self, "_dl_edit"):
-                self._dl_edit.setText(config.load_download_dir())
 
     # ── About ─────────────────────────────────────────────────────────────────
     def _page_about(self) -> QWidget:

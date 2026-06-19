@@ -297,6 +297,9 @@ class _Composer(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTabChangesFocus(True)
+        # Inner inset on all sides (vertical centring + comfortable left margin),
+        # so the height maths below can fit a line without clipping it.
+        self.document().setDocumentMargin(7)
         self._max_lines = max_lines
         self.textChanged.connect(self._auto_height)
         self._auto_height()
@@ -317,10 +320,30 @@ class _Composer(QPlainTextEdit):
             return
         super().keyPressEvent(e)
 
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._auto_height()
+
     def _auto_height(self) -> None:
-        lh = self.fontMetrics().lineSpacing()
-        lines = min(self._max_lines, max(1, self.document().blockCount()))
-        self.setFixedHeight(int(lines * lh + 16))
+        # Grow with the number of (wrapped) lines, capped at max_lines. For a
+        # QPlainTextEdit document().size().height() is the LINE COUNT, not
+        # pixels, so multiply by the line height. The scrollbar stays off until
+        # the content genuinely overflows — so one line never clips or shows the
+        # stray scrollbar.
+        doc = self.document()
+        if self.viewport().width() > 0:
+            doc.setTextWidth(self.viewport().width())
+        line = self.fontMetrics().lineSpacing()
+        dm = int(doc.documentMargin())
+        fr = self.frameWidth()
+        visual_lines = max(1.0, doc.size().height())
+        shown = min(visual_lines, self._max_lines)
+        target = int(round(shown * line)) + 2 * dm + 2 * fr + 4
+        if self.height() != target:
+            self.setFixedHeight(target)
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if visual_lines > self._max_lines + 0.01
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def sizeHint(self) -> QSize:
         return QSize(super().sizeHint().width(), self.height())
