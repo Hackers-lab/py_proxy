@@ -211,13 +211,23 @@ class ChatService:
         self._emit_roster()
 
     def approve_ip(self, ip: str) -> None:
-        """Approve an external IP and deliver any buffered messages."""
+        """Approve an external IP and deliver any buffered messages.
+
+        The IP is also added to the manual set so the reaper never drops it and
+        the manual-probe loop keeps checking its online status — otherwise a
+        cross-subnet peer would appear offline shortly after the chat request is
+        accepted (their UDP beacon never reaches us through the subnet filter).
+        """
         with self._lock:
             self._approved_ips.add(ip)
             self._blocked_ips.discard(ip)
             pending = self._pending_requests.pop(ip, [])
+            if ip not in self._peers:
+                self._peers[ip] = Peer(ip=ip, name=ip, last_seen=0.0)
+            self._manual.add(ip)
         for msg in pending:
             self._dispatch_msg(msg, ip, msg.get("from_name", ip))
+        threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
 
     def block_ip(self, ip: str) -> None:
         """Block an external IP and discard buffered messages."""
@@ -240,6 +250,14 @@ class ChatService:
     def pending_request_ips(self) -> list[str]:
         with self._lock:
             return sorted(self._pending_requests.keys())
+
+    def is_local_ip(self, ip: str) -> bool:
+        """True if *ip* shares a subnet with any of our local interfaces.
+
+        Used by the UI to decide whether to show a peer under LOCAL or IP/MANUAL
+        — based on actual network topology, not on how they were added.
+        """
+        return self._is_same_subnet(ip)
 
     def _is_same_subnet(self, remote_ip: str) -> bool:
         """True if remote_ip shares a subnet with ANY local interface.

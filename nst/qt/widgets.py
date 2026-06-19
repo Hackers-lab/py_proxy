@@ -67,6 +67,51 @@ class Avatar(QLabel):
         self.setPixmap(avatar_pixmap(name or "?", self._size))
 
 
+class AvatarWithStatus(QAbstractButton):
+    """Circular avatar with a presence-indicator dot overlaid at the bottom-right.
+
+    The dot ring is drawn in the theme's panel color so it appears to "cut"
+    cleanly from the avatar regardless of the row background.
+    """
+
+    def __init__(self, name: str = "?", size: int = 34,
+                 status: str = "offline", parent=None) -> None:
+        super().__init__(parent)
+        self._name = name or "?"
+        self._av_size = size
+        self._status = status
+        self._dot_r = max(6, size // 5)
+        total = size + self._dot_r // 2 + 1
+        self.setFixedSize(total, total)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_name(self, name: str) -> None:
+        self._name = name or "?"
+        self.update()
+
+    def set_status(self, status: str) -> None:
+        self._status = status
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        pr = QPainter(self)
+        pr.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pr.drawPixmap(0, 0, avatar_pixmap(self._name, self._av_size))
+        d = self._dot_r
+        x = float(self._av_size - d // 2 - 1)
+        y = float(self._av_size - d // 2 - 1)
+        pr.setPen(Qt.PenStyle.NoPen)
+        # ring — drawn in panel color to visually separate dot from avatar edge
+        pr.setBrush(QBrush(QColor(theme.color("panel"))))
+        pr.drawEllipse(QRectF(x - 2, y - 2, d + 4, d + 4))
+        pr.setBrush(QBrush(QColor(_dot_color(self._status))))
+        pr.drawEllipse(QRectF(x, y, d, d))
+        pr.end()
+
+    def sizeHint(self) -> QSize:
+        return QSize(self.width(), self.height())
+
+
 class Dot(QLabel):
     def __init__(self, status=False, size: int = 10, parent=None) -> None:
         super().__init__(parent)

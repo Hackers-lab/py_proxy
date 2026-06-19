@@ -1,5 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+import re
 from PyInstaller.utils.hooks import collect_submodules
+
+# Keep the EXE name in lock-step with the package version so each build/release
+# is named NetSplitTunnel_v<version>.exe automatically.
+with open('nst/__init__.py', encoding='utf-8') as _f:
+    _VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', _f.read()).group(1)
 
 datas = [('icon.ico', '.'), ('icon.png', '.')]
 binaries = []
@@ -30,11 +36,14 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='NetSplitTunnel_v4.9.1',
+    name=f'NetSplitTunnel_v{_VERSION}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX is disabled on purpose: in a one-file build every compressed binary has
+    # to be decompressed into a temp dir on each launch, which noticeably slows
+    # cold start. Skipping UPX trades a larger .exe for a faster startup.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

@@ -13,8 +13,8 @@ import threading
 import time
 import uuid
 
-from PyQt6.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QPixmap
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor, QDragEnterEvent, QDragLeaveEvent, QDropEvent, QPixmap
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
                              QFrame, QHBoxLayout, QInputDialog, QLabel,
                              QLineEdit, QListWidget, QListWidgetItem, QMenu,
@@ -29,11 +29,11 @@ from ..netinfo import check_host_reachable, is_valid_ipv4
 from . import sound
 from .settings_dialog import SettingsDialog
 from .theme import theme
-from .widgets import Avatar, Dot, ToggleSwitch, hline
+from .widgets import Avatar, AvatarWithStatus, Dot, ToggleSwitch, hline
 
-_PLACEHOLDER = "Type a message…"
+_PLACEHOLDER = "Type a message..."
 _MAX_HISTORY = 200
-_BUBBLE_MAX = 420
+_BUBBLE_MAX = 420  # fallback before the window is realized
 
 
 def _fmt_size(b: int) -> str:
@@ -71,7 +71,7 @@ def _fmt_progress(verb: str, done: int, total: int,
 
 
 def _xfer_fail_text(msg: str) -> str:
-    """Friendly terminal status for a failed transfer ('Cancelled' vs 'Failed: …')."""
+    """Friendly terminal status for a failed transfer ('Cancelled' vs 'Failed: ...')."""
     low = (msg or "").lower()
     if "cancel" in low or "interrupt" in low:
         return "Cancelled"
@@ -79,16 +79,26 @@ def _xfer_fail_text(msg: str) -> str:
 
 
 def _reveal_in_explorer(path: str) -> None:
-    """Open Explorer with *path* selected, without flashing a console window.
-
-    ``shell=True`` routes through cmd.exe and flashes a black console; calling
-    explorer.exe directly (a GUI process) with CREATE_NO_WINDOW avoids it.
-    """
+    """Open Explorer with *path* selected, without flashing a console window."""
     try:
-        subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"],
+        norm = os.path.normpath(path)
+        subprocess.Popen(["explorer", f"/select,{norm}"],
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         pass
+
+
+def _open_file(path: str) -> None:
+    """Open *path* with its default application; show a message if missing."""
+    try:
+        os.startfile(path)
+    except FileNotFoundError:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(None, "File not found",
+                            f"The file could not be found:\n{path}")
+    except Exception as exc:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(None, "Cannot open file", str(exc))
 
 
 def _fmt_last_seen(ts: float) -> str:
@@ -188,7 +198,7 @@ class _Scroll(QScrollArea):
             item = self.box.takeAt(0)
             w = item.widget()
             if w is not None:
-                # NB: do NOT setParent(None) here — that momentarily promotes the
+                # NB: do NOT setParent(None) here -- that momentarily promotes the
                 # (still-visible) child to a top-level window, which flashes on
                 # screen before deleteLater() runs. hide() + deleteLater() keeps
                 # the parent intact so nothing is ever shown as its own window.
@@ -223,59 +233,63 @@ class _RosterRow(QFrame):
         self.customContextMenuRequested.connect(
             lambda pos: self.menu.emit(self.key, self.mapToGlobal(pos)))
         is_room = kind in ("group", "channel")
+
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(9)
+        lay.setContentsMargins(9, 2, 8, 2)
+        lay.setSpacing(8)
 
-        av = Avatar(title, 38)
-        lay.addWidget(av)
-
-        mid = QVBoxLayout()
-        mid.setSpacing(1)
-        name = QLabel(title)
-        name.setStyleSheet("font-weight:700;")
-        mid.addWidget(name)
-        sub = QHBoxLayout()
-        sub.setSpacing(4)
         if is_room:
-            emoji = "📢" if kind == "channel" else "👥"
-            g = QLabel(f"{emoji} {subtitle}")
-            g.setObjectName("muted")
-            g.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
-            sub.addWidget(g)
+            av = Avatar(title, 26)
+            lay.addWidget(av)
         else:
-            sub.addWidget(Dot(status, 9))
-            s = QLabel(subtitle)
-            s.setObjectName("muted")
-            s.setStyleSheet("font-size:11px; color:%s;" % theme.color("text_sec"))
-            sub.addWidget(s)
-        sub.addStretch(1)
-        mid.addLayout(sub)
-        lay.addLayout(mid, 1)
+            self._av_status = AvatarWithStatus(title, 26, status)
+            lay.addWidget(self._av_status)
+
+        name_lbl = QLabel(title)
+        name_lbl.setStyleSheet("font-weight:600; font-size:12px; background:transparent;")
+        lay.addWidget(name_lbl, 1)
+        if is_room:
+            tag = QLabel("📢" if kind == "channel" else "👥")
+            tag.setStyleSheet("font-size:11px; background:transparent;")
+            lay.addWidget(tag)
 
         if unread:
-            b = QLabel(str(unread))
+            b = QLabel(str(unread) if unread < 100 else "99+")
             b.setObjectName("unread")
             b.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(b)
+
+        self._del_btn: QPushButton | None = None
         if deletable:
             x = QPushButton("✕")
-            x.setFixedSize(22, 22)
+            x.setFixedSize(20, 20)
             x.setCursor(Qt.CursorShape.PointingHandCursor)
-            x.setToolTip("Remove")
-            # Explicit style: the base button padding (8px 14px) would otherwise
-            # squeeze the glyph out of this 22px box and make it look invisible.
             x.setStyleSheet(
                 "QPushButton{background:transparent; border:none; padding:0;"
-                " font-size:13px; font-weight:700; color:%s;}"
-                "QPushButton:hover{color:#fff; background:%s; border-radius:11px;}"
+                " font-size:11px; font-weight:700; color:%s;}"
+                "QPushButton:hover{color:#fff; background:%s; border-radius:10px;}"
                 % (theme.color("text_sec"), theme.color("danger")))
             x.clicked.connect(lambda: self.deleted.emit(self.key))
+            x.hide()
             lay.addWidget(x)
+            self._del_btn = x
+
+        if subtitle:
+            self.setToolTip(subtitle)
 
     def set_active(self, active: bool) -> None:
         self.setProperty("active", "true" if active else "false")
         _repolish(self)
+
+    def enterEvent(self, e) -> None:
+        if self._del_btn:
+            self._del_btn.show()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        if self._del_btn:
+            self._del_btn.hide()
+        super().leaveEvent(e)
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
@@ -328,7 +342,7 @@ class _Composer(QPlainTextEdit):
         # Grow with the number of (wrapped) lines, capped at max_lines. For a
         # QPlainTextEdit document().size().height() is the LINE COUNT, not
         # pixels, so multiply by the line height. The scrollbar stays off until
-        # the content genuinely overflows — so one line never clips or shows the
+        # the content genuinely overflows -- so one line never clips or shows the
         # stray scrollbar.
         doc = self.document()
         if self.viewport().width() > 0:
@@ -349,17 +363,55 @@ class _Composer(QPlainTextEdit):
         return QSize(super().sizeHint().width(), self.height())
 
 
+class _SectionHeader(QFrame):
+    """Clickable, collapsible section header (LOCAL / GROUPS / IP / OFFLINE)."""
+
+    toggled = pyqtSignal(str)
+
+    def __init__(self, label: str, count: int = 0, collapsed: bool = False):
+        super().__init__()
+        self.label = label
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(8, 5, 10, 1)
+        h.setSpacing(5)
+        self._chev = QLabel("▸" if collapsed else "▾")
+        self._chev.setStyleSheet(
+            "font-size:9px; color:%s; background:transparent;" % theme.color("text_sec"))
+        h.addWidget(self._chev)
+        lbl = QLabel(label)
+        lbl.setObjectName("section")
+        lbl.setStyleSheet("font-size:9px; font-weight:800; letter-spacing:1px;")
+        h.addWidget(lbl)
+        if count:
+            cnt = QLabel(str(count))
+            cnt.setStyleSheet(
+                "font-size:9px; font-weight:700; color:%s;"
+                " background:%s; border-radius:6px; padding:0 4px;"
+                % (theme.color("accent"), theme.color("panel2")))
+            h.addWidget(cnt)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setObjectName("hdivider")
+        h.addWidget(line, 1)
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit(self.label)
+        super().mousePressEvent(e)
+
+
 class ChatWindow(QWidget):
     """Standalone chat window. Closing hides it so conversations persist."""
 
     activity = pyqtSignal(str)     # background message arrived on this key
     # File-transfer callbacks fire on worker threads; these signals marshal them
     # back onto the GUI thread (QTimer.singleShot from a worker thread never
-    # fires — the worker has no Qt event loop).
+    # fires -- the worker has no Qt event loop).
     _xfer_progress = pyqtSignal(str, str)            # tid, status text
     _xfer_finished = pyqtSignal(str, str, str, str)  # tid, ip, path(""=failed), status text
-    _sys_sig = pyqtSignal(str, str)                  # key, text — post a system line
-    _queued_sig = pyqtSignal(str)                    # mid — message held in offline queue
+    _sys_sig = pyqtSignal(str, str)                  # key, text -- post a system line
+    _queued_sig = pyqtSignal(str)                    # mid -- message held in offline queue
 
     def __init__(self, chat_service, toasts,
                  log_fn=lambda m: None) -> None:
@@ -367,7 +419,7 @@ class ChatWindow(QWidget):
         self.chat = chat_service
         self._toasts = toasts
         self._log = log_fn
-        self.setWindowTitle("LAN Chat — Net Split-Tunneler")
+        self.setWindowTitle("LAN Chat -- Net Split-Tunneler")
         self.resize(900, 600)
         self.setMinimumSize(720, 480)
 
@@ -383,11 +435,12 @@ class ChatWindow(QWidget):
         self._active: str | None = None
         self._visible = False
         self._peer_filter = ""
+        self._collapsed: set[str] = set()   # roster sections the user folded away
         self._reply_to: dict | None = None
         self._notifications_enabled = config.load_notifications_enabled()
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
-        # Peers the user deleted — hidden from the roster until they contact us.
+        # Peers the user deleted -- hidden from the roster until they contact us.
         self._hidden: set[str] = set(config.load_hidden_peers())
 
         # message-id bookkeeping (receipts, delete-for-everyone, reactions)
@@ -523,7 +576,7 @@ class ChatWindow(QWidget):
         s.addLayout(phrow)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search peers…")
+        self._search.setPlaceholderText("🔍  Search peers...")
         self._search.textChanged.connect(self._on_search)
         s.addWidget(self._search)
 
@@ -581,6 +634,32 @@ class ChatWindow(QWidget):
         self._messages = _Scroll(autostick=True)
         r.addWidget(self._messages, 1)
 
+        # Drop-zone overlay parented to _messages so it sits on top of it.
+        self._drop_overlay = QFrame(self._messages)
+        self._drop_overlay.setObjectName("dropZone")
+        drop_v = QVBoxLayout(self._drop_overlay)
+        drop_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_icon = QLabel("📂")
+        drop_icon.setStyleSheet("font-size:40px; background:transparent;")
+        drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_v.addWidget(drop_icon)
+        drop_lbl = QLabel("Drop file to send")
+        drop_lbl.setObjectName("dropZoneLabel")
+        drop_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_v.addWidget(drop_lbl)
+        self._drop_lbl_peer = QLabel("")
+        self._drop_lbl_peer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._drop_lbl_peer.setStyleSheet(
+            "font-size:12px; color:%s; background:transparent;" % theme.color("text_sec"))
+        drop_v.addWidget(self._drop_lbl_peer)
+        self._drop_overlay.hide()
+        self.setAcceptDrops(True)
+        # The scroll area + its viewport sit above the window, so they must accept
+        # drops and forward the events to us via the installed event filter.
+        for w in (self._messages, self._messages.viewport()):
+            w.setAcceptDrops(True)
+            w.installEventFilter(self)
+
         # typing indicator
         self._typing_lbl = QLabel("")
         self._typing_lbl.setObjectName("muted")
@@ -635,8 +714,13 @@ class ChatWindow(QWidget):
         self._entry.submit.connect(self._send)
         self._entry.textChanged.connect(self._on_typing_edit)
         comp.addWidget(self._entry, 1)
+        self._btn_emoji = QPushButton("😊")
+        self._btn_emoji.setFixedWidth(38)
+        self._btn_emoji.setToolTip("Open emoji picker  (Win + .)")
+        self._btn_emoji.clicked.connect(self._open_emoji_picker)
+        comp.addWidget(self._btn_emoji, alignment=Qt.AlignmentFlag.AlignBottom)
         self._btn_file = QPushButton("📎")
-        self._btn_file.setFixedWidth(44)
+        self._btn_file.setFixedWidth(38)
         self._btn_file.clicked.connect(self._attach_file)
         comp.addWidget(self._btn_file, alignment=Qt.AlignmentFlag.AlignBottom)
         self._btn_send = QPushButton("Send")
@@ -652,6 +736,13 @@ class ChatWindow(QWidget):
         self._set_composer_visible(False)
 
     # ── helpers ───────────────────────────────────────────────────────────────
+    def _bubble_max(self) -> int:
+        """Maximum bubble width: ~78 % of the chat viewport, clamped 280-760 px."""
+        vp = self._messages.viewport().width()
+        if vp < 10:
+            return _BUBBLE_MAX  # not yet realized -- use module fallback
+        return max(280, min(760, int(vp * 0.78)))
+
     @staticmethod
     def _is_group(key: str) -> bool:
         return bool(key) and key.startswith("group:")
@@ -690,12 +781,22 @@ class ChatWindow(QWidget):
                 "members": members, "admins": admins}
 
     def _is_admin(self, key: str) -> bool:
-        """True if the local user may post / manage this conversation."""
+        """True if the local user may *manage* (rename/kick/delete) this conversation."""
         if self._is_group(key):
             return self.chat.my_ip in self._group_meta(key[6:])["admins"]
         if self._is_channel(key):
             return self.chat.my_ip in self._channel_meta(key[8:])["admins"]
         return True   # private chats / demo: always postable
+
+    def _can_post(self, key: str) -> bool:
+        """True if the local user may send a message here.
+
+        Groups are many-to-many: every member posts. Channels are broadcast:
+        only admins may post. Private chats are always postable.
+        """
+        if self._is_channel(key):
+            return self.chat.my_ip in self._channel_meta(key[8:])["admins"]
+        return True
 
     def _last_activity(self, key: str) -> float:
         msgs = self._conversations.get(key)
@@ -729,7 +830,6 @@ class ChatWindow(QWidget):
         super().hideEvent(e)
 
     def changeEvent(self, e) -> None:
-        from PyQt6.QtCore import QEvent
         if e.type() == QEvent.Type.ActivationChange:
             self._visible = self.isActiveWindow() and self.isVisible()
             # Only rebuild the roster when there was actually unread to clear.
@@ -759,7 +859,7 @@ class ChatWindow(QWidget):
 
     def _open_settings(self) -> None:
         m = QMenu(self)
-        m.addAction("⚙  Settings…", self._open_full_settings)
+        m.addAction("⚙  Settings...", self._open_full_settings)
         m.addSeparator()
         status = self.chat.my_status
         m.addAction("● Online" + (" ✓" if status == "online" else ""), lambda: self.set_status("online"))
@@ -767,9 +867,9 @@ class ChatWindow(QWidget):
         m.addAction("○ Invisible (appear offline)" + (" ✓" if status == "invisible" else ""), lambda: self.set_status("invisible"))
         m.addSeparator()
         if self._notifications_enabled:
-            m.addAction("🔔 Notifications on — pause", lambda: self._set_notify(False))
+            m.addAction("🔔 Notifications on -- pause", lambda: self._set_notify(False))
         else:
-            m.addAction("🔕 Notifications paused — enable", lambda: self._set_notify(True))
+            m.addAction("🔕 Notifications paused -- enable", lambda: self._set_notify(True))
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
     def _open_full_settings(self) -> None:
@@ -870,7 +970,7 @@ class ChatWindow(QWidget):
 
     def _visible_peers(self, peers) -> set[str]:
         """Peers to list: everyone currently seen, plus anyone we have history
-        with (shown offline with a last-seen) — never groups, ourselves, or
+        with (shown offline with a last-seen) -- never groups, ourselves, or
         peers the user deleted (hidden until they contact us again)."""
         cands = {p.ip for p in peers}
         cands |= {c for c in self._conversations if not self._is_room(c)}
@@ -879,7 +979,7 @@ class ChatWindow(QWidget):
         return cands
 
     def _unhide(self, ip: str) -> None:
-        """A hidden (deleted) peer made contact — bring it back into the roster."""
+        """A hidden (deleted) peer made contact -- bring it back into the roster."""
         if ip in self._hidden:
             self._hidden.discard(ip)
             config.save_hidden_peers(list(self._hidden))
@@ -925,38 +1025,79 @@ class ChatWindow(QWidget):
 
         if not groups and not channels and not peers_f:
             hint = QLabel("No matches." if self._peer_filter
-                          else "Looking for people on your network…\nOpen the app on another PC, or Try Demo Chat.")
+                          else "Looking for people on your network...\nOpen the app on another PC, or Try Demo Chat.")
             hint.setObjectName("muted")
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setWordWrap(True)
             self._roster.add(hint)
             return
 
-        for key in sorted(channels, key=lambda x: (-self._last_activity(x),
-                                                   self._display_name(x).lower())):
-            n = len(self._channel_meta(key[8:]).get("members", []))
-            badge = "read-only" if not self._is_admin(key) else f"{n} members"
-            self._add_row(key, self._display_name(key), badge,
-                          "online", self._unread.get(key, 0), "channel", True)
+        grp_channels = sorted(channels, key=lambda x: (-self._last_activity(x),
+                                                       self._display_name(x).lower()))
+        grp_groups = sorted(groups, key=lambda x: (-self._last_activity(x),
+                                                   self._display_name(x).lower()))
+        if (grp_channels or grp_groups) and not self._add_section(
+                "GROUPS", len(grp_channels) + len(grp_groups)):
+            for key in grp_channels:
+                n = len(self._channel_meta(key[8:]).get("members", []))
+                badge = "read-only" if not self._is_admin(key) else f"{n} members"
+                self._add_row(key, self._display_name(key), badge,
+                              "online", self._unread.get(key, 0), "channel", True)
+            for key in grp_groups:
+                gid = key[6:]
+                n = len(self._group_meta(gid).get("members", []))
+                self._add_row(key, self._display_name(key), f"{n} members",
+                              "online", self._unread.get(key, 0), "group", True)
 
-        for key in sorted(groups, key=lambda x: (-self._last_activity(x),
-                                                 self._display_name(x).lower())):
-            gid = key[6:]
-            n = len(self._group_meta(gid).get("members", []))
-            self._add_row(key, self._display_name(key), f"{n} members",
-                          "online", self._unread.get(key, 0), "group", True)
-
-        # Online/away first, then offline; within a group, most-recent first.
         _rank = {"online": 0, "away": 1, "offline": 2}
-        for ip in sorted(peers_f, key=lambda x: (_rank.get(self._status_of(x), 2),
-                                                 -self._last_activity(x),
-                                                 self._display_name(x).lower())):
-            status = self._status_of(ip)
-            self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
-                          status, self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
+        def _peer_sort(x):
+            return (0 if self._unread.get(x, 0) else 1,
+                    -self._unread.get(x, 0),
+                    _rank.get(self._status_of(x), 2),
+                    -self._last_activity(x),
+                    self._display_name(x).lower())
+
+        # Online/away peers go in LOCAL / IP-MANUAL; everything offline (no matter
+        # the origin) collapses into a single OFFLINE section at the bottom.
+        online_f = [ip for ip in peers_f if self._status_of(ip) != "offline"]
+        offline_f = [ip for ip in peers_f if self._status_of(ip) == "offline"]
+        local_peers = [ip for ip in online_f if self.chat.is_local_ip(ip)]
+        manual_peers = [ip for ip in online_f if not self.chat.is_local_ip(ip)]
+
+        if local_peers and not self._add_section("LOCAL", len(local_peers)):
+            for ip in sorted(local_peers, key=_peer_sort):
+                status = self._status_of(ip)
+                self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
+                              status, self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
+
+        if manual_peers and not self._add_section("IP / MANUAL", len(manual_peers)):
+            for ip in sorted(manual_peers, key=_peer_sort):
+                status = self._status_of(ip)
+                self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
+                              status, self._unread.get(ip, 0), "peer", True)
+
+        if offline_f and not self._add_section("OFFLINE", len(offline_f)):
+            for ip in sorted(offline_f, key=_peer_sort):
+                self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, "offline"),
+                              "offline", self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
 
         if self._active:
             self._update_header_sub(peers)
+
+    def _add_section(self, label: str, count: int) -> bool:
+        """Add a collapsible section header; return True if it is collapsed."""
+        collapsed = label in self._collapsed
+        hdr = _SectionHeader(label, count, collapsed)
+        hdr.toggled.connect(self._toggle_section)
+        self._roster.add(hdr)
+        return collapsed
+
+    def _toggle_section(self, label: str) -> None:
+        if label in self._collapsed:
+            self._collapsed.discard(label)
+        else:
+            self._collapsed.add(label)
+        self.update_roster(self.chat.peers())
 
     def _add_row(self, key, title, sub, status, unread, kind, deletable) -> None:
         row = _RosterRow(key, title, sub, status, unread, kind, deletable)
@@ -1013,8 +1154,9 @@ class ChatWindow(QWidget):
         self._btn_add.setVisible(is_room and can_post)
         self._btn_manage.setVisible(is_room)
         self._btn_save.setVisible(not is_room and key != DemoBot.IP)
-        # File send: 1:1 peers only (channel/group file fan-out isn't supported).
+        # File send and emoji: 1:1 peers only.
         self._btn_file.setVisible(not is_room)
+        self._btn_emoji.setVisible(not is_room)
         self._set_composer_visible(True)
         # Broadcast channels are post-only for admins; members read.
         read_only = is_chan and not can_post
@@ -1110,7 +1252,7 @@ class ChatWindow(QWidget):
         if kind == "chat_req":
             return self._make_req_bubble(entry)
         if kind == "sys":
-            lbl = QLabel(f"— {entry.get('text', '')} —")
+            lbl = QLabel(f"-- {entry.get('text', '')} --")
             lbl.setObjectName("muted")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("font-style:italic; padding:3px; color:%s;" % theme.color("text_sec"))
@@ -1125,13 +1267,13 @@ class ChatWindow(QWidget):
         h.setContentsMargins(4, 2, 4, 2)
         bubble = QFrame()
         bubble.setProperty("bubble", "out" if is_out else "in")
-        bubble.setMaximumWidth(_BUBBLE_MAX)
+        bubble.setMaximumWidth(self._bubble_max())
         bv = QVBoxLayout(bubble)
         bv.setContentsMargins(12, 8, 12, 6)
         bv.setSpacing(2)
         txcol = theme.color("bubble_out_tx" if is_out else "bubble_in_tx")
 
-        # Right-click menu (reply / delete) — not on tombstones.
+        # Right-click menu (reply / delete) -- not on tombstones.
         if not deleted:
             bubble.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             bubble.customContextMenuRequested.connect(
@@ -1160,7 +1302,7 @@ class ChatWindow(QWidget):
             bv.addWidget(fl)
         if isinstance(reply, dict) and reply.get("text"):
             # Colour the nested quote to contrast with its own bubble: white on
-            # the blue outgoing bubble, accent on the light incoming bubble —
+            # the blue outgoing bubble, accent on the light incoming bubble --
             # never blue-on-blue.
             if is_out:
                 q_bg, q_stripe = "rgba(255,255,255,0.20)", "rgba(255,255,255,0.85)"
@@ -1184,7 +1326,7 @@ class ChatWindow(QWidget):
             who = QLabel(reply.get("sender", ""))
             who.setStyleSheet("color:%s; font-weight:700; font-size:10px;" % q_who)
             snip = reply["text"]
-            snip = snip if len(snip) <= 80 else snip[:77] + "…"
+            snip = snip if len(snip) <= 80 else snip[:77] + "..."
             qt = QLabel(snip)
             qt.setStyleSheet("color:%s; font-size:11px;" % q_tx)
             qt.setWordWrap(True)
@@ -1246,7 +1388,7 @@ class ChatWindow(QWidget):
         if mid:
             self._reaction_rows[mid] = reaction_row
         v_wrap = QWidget()
-        v_wrap.setMaximumWidth(_BUBBLE_MAX)
+        v_wrap.setMaximumWidth(self._bubble_max())
         vv = QVBoxLayout(v_wrap)
         vv.setContentsMargins(0, 0, 0, 0)
         vv.setSpacing(2)
@@ -1265,7 +1407,7 @@ class ChatWindow(QWidget):
     def _set_reply(self, sender: str, text: str) -> None:
         self._reply_to = {"sender": sender, "text": text}
         self._reply_who.setText(f"↩ Replying to {sender}")
-        self._reply_prev.setText(text if len(text) <= 80 else text[:77] + "…")
+        self._reply_prev.setText(text if len(text) <= 80 else text[:77] + "...")
         self._reply_bar.show()
         self._entry.setFocus()
 
@@ -1279,7 +1421,7 @@ class ChatWindow(QWidget):
         text = self._entry.text().strip()
         if not key or not text:
             return
-        if not self._is_admin(key):
+        if not self._can_post(key):
             return   # broadcast channel: only admins may post
         self._entry.clear()
         self._stop_typing()
@@ -1331,7 +1473,7 @@ class ChatWindow(QWidget):
         """Alert for a background message, honouring the per-type toggles.
 
         "Show window" (popup) raises the chat window without switching the active
-        conversation — the unread badge in the roster tells you who sent. If the
+        conversation -- the unread badge in the roster tells you who sent. If the
         window is already visible (you're in another chat), we show a toast
         instead so you aren't interrupted. Toast fires unconditionally when the
         popup toggle is off. Sound/taskbar are independent of both.
@@ -1341,13 +1483,13 @@ class ChatWindow(QWidget):
 
         if sound.should_notify(scope, "popup"):
             if window_up:
-                # Already visible in another chat — raising does nothing; show a
+                # Already visible in another chat -- raising does nothing; show a
                 # toast so the user sees who messaged without hijacking their view.
                 if notifs_ok:
                     self._toasts.notify(title, body, key)
             else:
                 # Raise the window to the *current* active chat; do not switch to
-                # the sender — the roster badge is the cue for who needs attention.
+                # the sender -- the roster badge is the cue for who needs attention.
                 self.showNormal()
                 self.raise_()
                 self.activateWindow()
@@ -1371,7 +1513,7 @@ class ChatWindow(QWidget):
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
-            prev = text if len(text) <= 120 else text[:117] + "…"
+            prev = text if len(text) <= 120 else text[:117] + "..."
             self._notify_background("private", ip, name, prev)
 
     def on_group_message(self, group, ip, name, text, ts, reply=None, mid="") -> None:
@@ -1406,7 +1548,7 @@ class ChatWindow(QWidget):
         else:
             self._unread[key] = self._unread.get(key, 0) + 1
             self.update_roster(self.chat.peers())
-            prev = text if len(text) <= 100 else text[:97] + "…"
+            prev = text if len(text) <= 100 else text[:97] + "..."
             self._notify_background("group", key, f"{g['name']} (group)", f"{name}: {prev}")
 
     def on_channel_message(self, channel, ip, name, text, ts, reply=None, mid="") -> None:
@@ -1439,7 +1581,7 @@ class ChatWindow(QWidget):
         else:
             self._unread[key] = self._unread.get(key, 0) + 1
             self.update_roster(self.chat.peers())
-            prev = text if len(text) <= 100 else text[:97] + "…"
+            prev = text if len(text) <= 100 else text[:97] + "..."
             self._notify_background("broadcast", key, f"📢 {c['name']}", f"{name}: {prev}")
 
     # ── offline queue + group removal callbacks ───────────────────────────────
@@ -1491,7 +1633,7 @@ class ChatWindow(QWidget):
             self._reset_active()
         self.update_roster(self.chat.peers())
         self._toasts.notify("Removed from group",
-                            f"You were removed from “{name}”.", "")
+                            f'You were removed from "{name}".', "")
 
     # ── receipts / read tracking ──────────────────────────────────────────────
     def on_receipt(self, ip, mid, state) -> None:
@@ -1759,7 +1901,7 @@ class ChatWindow(QWidget):
             self._reaction_rows.pop(mid, None)
 
     def on_reaction(self, from_ip: str, mid: str, emoji: str) -> None:
-        """Incoming reaction from a peer — toggle their entry in the reactions map."""
+        """Incoming reaction from a peer -- toggle their entry in the reactions map."""
         loc = self._mid_index.get(mid)
         if not loc:
             return
@@ -1900,11 +2042,11 @@ class ChatWindow(QWidget):
         if self._is_group(key):
             if len(live) == 1:
                 who = self._aliases.get(live[0]) or self._names.get(live[0], live[0])
-                txt = f"{who} is typing…"
+                txt = f"{who} is typing..."
             else:
-                txt = f"{len(live)} people are typing…"
+                txt = f"{len(live)} people are typing..."
         else:
-            txt = "typing…"
+            txt = "typing..."
         self._typing_lbl.setText(txt)
         self._typing_lbl.show()
 
@@ -1912,7 +2054,7 @@ class ChatWindow(QWidget):
     def _start_demo(self) -> None:
         if not self.chat.has_demo():
             self.chat.add_demo_bot()
-            self._log("Demo chat started — say hi to the Demo Bot.")
+            self._log("Demo chat started -- say hi to the Demo Bot.")
         QTimer.singleShot(150, lambda: self.select_peer(DemoBot.IP))
 
     # ── manual IP ─────────────────────────────────────────────────────────────
@@ -1921,7 +2063,7 @@ class ChatWindow(QWidget):
         if not ip:
             return
         if not is_valid_ipv4(ip):
-            self._log(f"Invalid IP: {ip!r} — enter a valid IPv4 address (e.g. 192.168.1.20).")
+            self._log(f"Invalid IP: {ip!r} -- enter a valid IPv4 address (e.g. 192.168.1.20).")
             return
         if ip == self.chat.my_ip:
             self._log("Cannot chat with yourself.")
@@ -1940,7 +2082,7 @@ class ChatWindow(QWidget):
     def _probe_manual(self, ip) -> None:
         if not check_host_reachable(ip, CHAT_TCP_PORT):
             self._sys_sig.emit(
-                ip, "Not reachable — make sure the app is running on that PC.")
+                ip, "Not reachable -- make sure the app is running on that PC.")
 
     # ── alias / delete ────────────────────────────────────────────────────────
     def _edit_alias(self) -> None:
@@ -2062,7 +2204,7 @@ class ChatWindow(QWidget):
         self._log(f"Group \"{name.strip()}\" created with {len(members)} member(s).")
 
     def _add_group_members(self) -> None:
-        """Header ＋ Add — works for both groups and channels (admins only)."""
+        """Header ＋ Add -- works for both groups and channels (admins only)."""
         key = self._active
         if self._is_channel(key):
             return self._add_channel_members(key[8:])
@@ -2232,10 +2374,10 @@ class ChatWindow(QWidget):
         g["members"] = [m for m in g.get("members", []) if m != ip]
         g["admins"] = [a for a in g.get("admins", []) if a != ip]
         self._ensure_group_admin(gid)
-        # Tell the removed member (they lose the group + history, #7) …
+        # Tell the removed member (they lose the group + history, #7) ...
         threading.Thread(target=lambda: self.chat.send_group_kick(ip, gid),
                          daemon=True).start()
-        # … and sync the smaller roster to everyone who remains.
+        # ... and sync the smaller roster to everyone who remains.
         self._broadcast_group_meta(gid, f"{self._display_name(ip)} was removed")
         self._save_group(gid)
         self._update_header_sub(self.chat.peers())
@@ -2487,7 +2629,7 @@ class ChatWindow(QWidget):
         dlg.resize(540, 500)
         v = QVBoxLayout(dlg)
         field = QLineEdit()
-        field.setPlaceholderText("🔍  Search message text and file names…")
+        field.setPlaceholderText("🔍  Search message text and file names...")
         v.addWidget(field)
         results = QListWidget()
         v.addWidget(results, 1)
@@ -2519,8 +2661,8 @@ class ChatWindow(QWidget):
                     who = "You" if kind == "out" else e.get("sender", cname)
                     ts = time.strftime("%b %d %H:%M", time.localtime(e.get("ts", 0)))
                     icon = "📎" if kind.startswith("file") else "💬"
-                    snip = hay if len(hay) <= 64 else hay[:61] + "…"
-                    it = QListWidgetItem(f"{icon}  {cname} — {who}: {snip}\n        {ts}")
+                    snip = hay if len(hay) <= 64 else hay[:61] + "..."
+                    it = QListWidgetItem(f"{icon}  {cname} -- {who}: {snip}\n        {ts}")
                     it.setData(Qt.ItemDataRole.UserRole, key)
                     results.addItem(it)
                     count += 1
@@ -2575,7 +2717,7 @@ class ChatWindow(QWidget):
         h.setContentsMargins(4, 2, 4, 2)
         bubble = QFrame()
         bubble.setProperty("bubble", "out" if is_out else "in")
-        bubble.setMaximumWidth(_BUBBLE_MAX)
+        bubble.setMaximumWidth(self._bubble_max())
         bv = QVBoxLayout(bubble)
         bv.setContentsMargins(12, 8, 12, 8)
         bv.setSpacing(3)
@@ -2587,7 +2729,8 @@ class ChatWindow(QWidget):
         bv.addWidget(QLabel(_fmt_size(meta["size"])))
 
         state = self._offer_states.get(tid, "pending")
-        if kind == "file_in_offer" and state == "pending" and (time.time() - ts <= 60):
+        expiry_secs = config.load_file_expiry_min() * 60
+        if kind == "file_in_offer" and state == "pending" and (time.time() - ts <= expiry_secs):
             brow = QHBoxLayout()
             acc = QPushButton("Accept")
             acc.setProperty("variant", "success")
@@ -2601,7 +2744,7 @@ class ChatWindow(QWidget):
             brow.addStretch(1)
             bv.addLayout(brow)
         else:
-            prog = QLabel(self._progress_text.get(tid, "…"))
+            prog = QLabel(self._progress_text.get(tid, "..."))
             prog.setStyleSheet("color:%s; font-size:11px;" % txcol)
             bv.addWidget(prog)
             self._progress_lbls[tid] = prog
@@ -2617,7 +2760,7 @@ class ChatWindow(QWidget):
                     bv.addWidget(thumb)
                 orow = QHBoxLayout()
                 of = QPushButton("Open File")
-                of.clicked.connect(lambda: os.startfile(done))
+                of.clicked.connect(lambda _=False, p=done: _open_file(p))
                 ofd = QPushButton("Open Folder")
                 ofd.clicked.connect(lambda _=False, p=done: _reveal_in_explorer(p))
                 orow.addWidget(of)
@@ -2637,7 +2780,7 @@ class ChatWindow(QWidget):
     def _make_thumbnail(self, path: str) -> QLabel | None:
         """Return a clickable image preview for *path*, or None if not an image.
 
-        Uses Qt's built-in image readers (png/jpg/gif/bmp/webp) — no extra deps.
+        Uses Qt's built-in image readers (png/jpg/gif/bmp/webp) -- no extra deps.
         """
         if not path or not path.lower().endswith(_IMAGE_EXTS):
             return None
@@ -2661,12 +2804,32 @@ class ChatWindow(QWidget):
             except RuntimeError:
                 self._progress_lbls.pop(tid, None)
 
+    def _open_emoji_picker(self) -> None:
+        """Trigger the Windows built-in emoji picker (Win + .) focused on the composer."""
+        import ctypes
+        self._entry.setFocus()
+        VK_LWIN, VK_PERIOD = 0x5B, 0xBE
+        KEYEVENTF_KEYUP = 0x0002
+        kbi = ctypes.windll.user32.keybd_event
+        kbi(VK_LWIN, 0, 0, 0)
+        kbi(VK_PERIOD, 0, 0, 0)
+        kbi(VK_PERIOD, 0, KEYEVENTF_KEYUP, 0)
+        kbi(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+
     def _attach_file(self) -> None:
         ip = self._active
         if not ip or self._is_room(ip):
             return
         path, _ = QFileDialog.getOpenFileName(self, "Send file")
-        if not path:
+        if path:
+            self._attach_file_path(path)
+
+    def _attach_file_path(self, path: str) -> None:
+        """Send a file by path (used by both file picker and drag-and-drop)."""
+        ip = self._active
+        if not ip or self._is_room(ip):
+            return
+        if not os.path.isfile(path):
             return
         filename = os.path.basename(path)
         size = os.path.getsize(path)
@@ -2675,20 +2838,94 @@ class ChatWindow(QWidget):
         if max_mb and size > max_mb * 1024 * 1024:
             QMessageBox.warning(
                 self, "File too large",
-                f"“{filename}” is {_fmt_size(size)}, over the {max_mb} MB limit set "
-                "in Settings → File Transfer.")
+                f'"{filename}" is {_fmt_size(size)}, over the {max_mb} MB limit set '
+                "in Settings -> File Transfer.")
             return
 
         tid = uuid.uuid4().hex[:12]
         self._transfer_paths[tid] = None
-        self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept…"
+        self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept..."
         self._add_file_entry(ip, "file_out", tid, filename, size)
 
         threading.Thread(target=self._offer_worker,
                          args=(ip, path, filename, size, tid), daemon=True).start()
 
+    # -- drag & drop -------------------------------------------------------
+    def _can_drop(self) -> bool:
+        return bool(self._active) and not self._is_room(self._active)
+
+    def _show_drop_overlay(self) -> None:
+        name = self._display_name(self._active)
+        self._drop_lbl_peer.setText(f"->  {name}")
+        self._drop_overlay.resize(self._messages.viewport().size())
+        self._drop_overlay.move(0, 0)
+        self._drop_overlay.show()
+        self._drop_overlay.raise_()
+
+    def _handle_drag_enter(self, e) -> bool:
+        if e.mimeData().hasUrls() and self._can_drop():
+            e.setDropAction(Qt.DropAction.CopyAction)
+            e.accept()
+            self._show_drop_overlay()
+            return True
+        e.ignore()
+        return False
+
+    def _handle_drop(self, e) -> bool:
+        self._drop_overlay.hide()
+        md = e.mimeData()
+        if md.hasUrls() and self._can_drop():
+            for url in md.urls():
+                if url.isLocalFile():
+                    self._attach_file_path(url.toLocalFile())
+                    break
+            e.setDropAction(Qt.DropAction.CopyAction)
+            e.accept()
+            return True
+        e.ignore()
+        return False
+
+    # Drag events are delivered to the inner scroll-area / viewport (which sit on
+    # top of this window), so we capture them with an event filter rather than the
+    # window-level drag*Event overrides (those never fire while a child is hovered).
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == QEvent.Type.DragEnter:
+            if self._handle_drag_enter(e):
+                return True
+        elif t == QEvent.Type.DragMove:
+            if e.mimeData().hasUrls() and self._can_drop():
+                e.setDropAction(Qt.DropAction.CopyAction)
+                e.accept()
+                return True
+            e.ignore()
+        elif t == QEvent.Type.DragLeave:
+            self._drop_overlay.hide()
+        elif t == QEvent.Type.Drop:
+            if self._handle_drop(e):
+                return True
+        return super().eventFilter(obj, e)
+
+    # Keep window-level handlers too, for drops that land on the window chrome.
+    def dragEnterEvent(self, e: QDragEnterEvent) -> None:
+        self._handle_drag_enter(e)
+
+    def dragMoveEvent(self, e) -> None:
+        if e.mimeData().hasUrls() and self._can_drop():
+            e.setDropAction(Qt.DropAction.CopyAction)
+            e.accept()
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e: QDragLeaveEvent) -> None:
+        self._drop_overlay.hide()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e: QDropEvent) -> None:
+        self._handle_drop(e)
+
     def _offer_worker(self, ip, path, filename, size, tid) -> None:
-        # Callbacks run on a transfer worker thread — emit signals (queued to the
+        # Callbacks run on a transfer worker thread -- emit signals (queued to the
         # GUI thread) rather than touching widgets or using QTimer here.
         throttle = {"t": 0.0, "pct": -1}
 
@@ -2707,7 +2944,7 @@ class ChatWindow(QWidget):
             self._xfer_finished.emit(tid, ip, "", _xfer_fail_text(msg))
 
         def expire():
-            self._xfer_finished.emit(tid, ip, "", "No response — expired")
+            self._xfer_finished.emit(tid, ip, "", "No response -- expired")
 
         try:
             self._ft.offer_file(ip, path, tid=tid, progress_cb=progress, done_cb=done,
@@ -2758,10 +2995,10 @@ class ChatWindow(QWidget):
             return
         self._offer_states[tid] = "accepted"
         self._transfer_paths[tid] = None
-        self._set_progress(tid, "Connecting…")
+        self._set_progress(tid, "Connecting...")
         self._render(from_ip)  # show the progress bubble immediately
 
-        # Callbacks run on a transfer worker thread — emit signals (queued to the
+        # Callbacks run on a transfer worker thread -- emit signals (queued to the
         # GUI thread) rather than touching widgets or using QTimer here.
         throttle = {"t": 0.0, "pct": -1}
 
@@ -2807,7 +3044,7 @@ class ChatWindow(QWidget):
             self._render(self._active)
 
     def on_file_accepted(self, ip, name, msg) -> None:
-        self._set_progress(msg["transfer_id"], f"{name} accepted — sending…")
+        self._set_progress(msg["transfer_id"], f"{name} accepted -- sending...")
         self._render(ip)  # Always render to show updated status
 
     def on_file_rejected(self, ip, name, msg) -> None:
@@ -2844,11 +3081,11 @@ class ChatWindow(QWidget):
             brow.addWidget(acc); brow.addWidget(blk); brow.addStretch(1)
             v.addLayout(brow)
         elif state == "accepted":
-            ok = QLabel("Accepted — messages will now appear normally.")
+            ok = QLabel("Accepted -- messages will now appear normally.")
             ok.setStyleSheet("color:%s;" % theme.color("success"))
             v.addWidget(ok)
         else:
-            bl = QLabel("Blocked — messages from this IP are discarded.")
+            bl = QLabel("Blocked -- messages from this IP are discarded.")
             bl.setStyleSheet("color:%s;" % theme.color("danger"))
             v.addWidget(bl)
         return card
@@ -2869,7 +3106,7 @@ class ChatWindow(QWidget):
         else:
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
-        self._notify_background("private", ip, name, "Wants to chat — tap to respond")
+        self._notify_background("private", ip, name, "Wants to chat -- tap to respond")
 
     def _accept_chat(self, ip) -> None:
         self._chat_req_states[ip] = "accepted"
@@ -2959,7 +3196,7 @@ class ChatWindow(QWidget):
                     elif data.get("blocked"):
                         self.chat.block_ip(ip)
                         self._chat_req_states[ip] = "blocked"
-                    # Restore last-seen so the peer shows "last seen …" until it
+                    # Restore last-seen so the peer shows "last seen ..." until it
                     # comes back online; fall back to the newest message time.
                     ls = data.get("last_seen") or 0.0
                     if not ls:
@@ -2976,7 +3213,7 @@ class ChatWindow(QWidget):
 
     def _seed_transfer_state(self, key) -> None:
         """Restore the live transfer dicts from persisted file entries on load,
-        so reloaded file bubbles render their final state (Open / Cancelled / …)."""
+        so reloaded file bubbles render their final state (Open / Cancelled / ...)."""
         for e in self._conversations.get(key, []):
             if not (isinstance(e, dict) and e.get("kind") in ("file_out", "file_in_offer")):
                 continue

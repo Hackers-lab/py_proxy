@@ -168,12 +168,36 @@ class QtTheme(QObject):
         QScrollBar:horizontal {{ height: 0; }}
 
         /* roster rows */
-        QFrame#rosterRow {{ background: transparent; border-radius: 9px; }}
-        QFrame#rosterRow:hover {{ background: {p['hover']}; }}
-        QFrame#rosterRow[active="true"] {{ background: {p['select_bg']}; }}
+        QFrame#rosterRow {{
+            background: transparent;
+            border-radius: 8px;
+            border: none;
+            border-left: 3px solid transparent;
+        }}
+        QFrame#rosterRow:hover {{
+            background: {p['hover']};
+        }}
+        QFrame#rosterRow[active="true"] {{
+            background: {p['select_bg']};
+            border-left: 3px solid {p['accent']};
+        }}
 
-        QLabel#unread {{ background: {p['danger']}; color: #fff; font-size: 10px;
-                         font-weight: 700; border-radius: 8px; padding: 1px 6px; }}
+        QLabel#unread {{
+            background: {p['accent']}; color: #fff; font-size: 10px;
+            font-weight: 700; border-radius: 9px; padding: 1px 7px;
+            min-width: 18px;
+        }}
+
+        /* drag-drop overlay */
+        QFrame#dropZone {{
+            background: rgba(59,130,246,0.13);
+            border: 2px dashed {p['accent']};
+            border-radius: 14px;
+        }}
+        QLabel#dropZoneLabel {{
+            color: {p['accent']}; font-size: 18px; font-weight: 700;
+            background: transparent; border: none;
+        }}
 
         /* chat bubbles */
         QFrame[bubble="out"] {{ background: {p['bubble_out']}; border-radius: 14px; }}

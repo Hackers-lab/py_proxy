@@ -8,9 +8,10 @@ import time
 import psutil
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                             QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-                             QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+                             QLineEdit, QMainWindow, QMenu, QMessageBox,
+                             QPlainTextEdit, QPushButton, QStackedWidget,
+                             QVBoxLayout, QWidget)
 
 from .. import __version__, config
 from ..beacon import ClientScanner, HostBeacon
@@ -237,9 +238,36 @@ class MainWindow(QMainWindow):
         self._lbl_down.setStyleSheet(_MONO + f"color:{theme.color('success')};")
         self._lbl_up = QLabel("Upload    :  0.0 KB/s")
         self._lbl_up.setStyleSheet(_MONO + f"color:{theme.color('warning')};")
-        row.addWidget(self._lbl_down, 1); row.addWidget(self._lbl_up, 1)
+        row.addWidget(self._lbl_down, 1)
+        row.addWidget(self._lbl_up, 1)
+        self._unit_combo = QComboBox()
+        self._unit_combo.addItems(
+            ["Auto", "bps", "B/s", "KiB/s", "KB/s", "MiB/s", "MB/s", "Kbps", "Mbps"])
+        self._unit_combo.setFixedWidth(80)
+        self._unit_combo.setToolTip("Display unit for network speed")
+        row.addWidget(self._unit_combo)
         v.addLayout(row)
         return card
+
+    def _fmt_traffic(self, bps: float) -> str:
+        unit = self._unit_combo.currentText()
+        if unit == "bps":
+            return f"{bps * 8:.0f} bps"
+        if unit == "B/s":
+            return f"{bps:.1f} B/s"
+        if unit == "KiB/s":
+            return f"{bps / 1024:.2f} KiB/s"
+        if unit == "KB/s":
+            return f"{bps / 1000:.2f} KB/s"
+        if unit == "MiB/s":
+            return f"{bps / 1048576:.3f} MiB/s"
+        if unit == "MB/s":
+            return f"{bps / 1_000_000:.3f} MB/s"
+        if unit == "Kbps":
+            return f"{bps * 8 / 1000:.1f} Kbps"
+        if unit == "Mbps":
+            return f"{bps * 8 / 1_000_000:.3f} Mbps"
+        return format_speed(bps)  # Auto
 
     def _build_log(self) -> QWidget:
         card, v = self._card("EVENT LOG")
@@ -405,7 +433,7 @@ class MainWindow(QMainWindow):
             if dt > 0:
                 up = (cur.bytes_sent - self._last_net.bytes_sent) / dt
                 down = (cur.bytes_recv - self._last_net.bytes_recv) / dt
-                up_s, down_s = format_speed(up), format_speed(down)
+                up_s, down_s = self._fmt_traffic(up), self._fmt_traffic(down)
                 self._lbl_down.setText(f"Download  :  {down_s}")
                 self._lbl_up.setText(f"Upload    :  {up_s}")
                 if self._act_speed.isChecked():

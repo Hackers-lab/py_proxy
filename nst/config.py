@@ -296,11 +296,11 @@ def save_max_file_mb(mb: int) -> bool:
 
 
 def load_file_expiry_min() -> int:
-    """Minutes a sender keeps an unanswered file offer alive (default 1)."""
+    """Minutes a sender keeps an unanswered file offer alive (default 3)."""
     try:
-        return max(1, int(_read_value("FileExpiryMin", 1)))
+        return max(1, int(_read_value("FileExpiryMin", 3)))
     except (TypeError, ValueError):
-        return 1
+        return 3
 
 
 def save_file_expiry_min(minutes: int) -> bool:
