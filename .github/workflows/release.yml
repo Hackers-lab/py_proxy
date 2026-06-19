@@ -1,0 +1,42 @@
+name: Build & Release
+
+# Triggers when you push a version tag: git tag v4.9.1 && git push origin v4.9.1
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install psutil PyQt6 pyinstaller
+
+      - name: Read version from package
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path "nst\__init__.py" -Pattern '__version__\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build executable
+        run: pyinstaller NetSplitTunnel.spec --noconfirm
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Net Split-Tunneler v${{ steps.ver.outputs.VERSION }}"
+          body_path: README.md
+          files: dist/NetSplitTunnel_v*.exe
+          draft: false
+          prerelease: false
