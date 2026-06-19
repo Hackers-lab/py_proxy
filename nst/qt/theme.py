@@ -112,6 +112,11 @@ class QtTheme(QObject):
             border-radius: 10px; padding: 6px;
             selection-background-color: {p['accent']};
         }}
+        QPlainTextEdit#composer {{
+            background: {p['entry_bg']}; border: 1px solid {p['border']};
+            border-radius: 12px;
+        }}
+        QPlainTextEdit#composer:focus {{ border: 1px solid {p['accent']}; }}
 
         QPushButton {{
             background: {p['panel2']}; color: {p['text_pri']};
@@ -175,6 +180,37 @@ class QtTheme(QObject):
         QFrame[bubble="in"]  {{ background: {p['bubble_in']};  border-radius: 14px; }}
         QFrame#replyBar {{ background: {p['panel2']}; border-radius: 10px; }}
         QFrame#quote {{ background: rgba(127,127,127,0.12); border-radius: 7px; }}
+
+        /* combo / spin / slider / tabs / lists (settings) */
+        QComboBox, QSpinBox {{
+            background: {p['entry_bg']}; border: 1px solid {p['border']};
+            border-radius: 9px; padding: 6px 10px; min-height: 18px;
+        }}
+        QComboBox:focus, QSpinBox:focus {{ border: 1px solid {p['accent']}; }}
+        QComboBox::drop-down {{ border: none; width: 22px; }}
+        QComboBox QAbstractItemView {{
+            background: {p['panel2']}; border: 1px solid {p['border']};
+            border-radius: 8px; selection-background-color: {p['accent']};
+            selection-color: #fff; outline: 0;
+        }}
+        QSlider::groove:horizontal {{ height: 5px; background: {p['border']};
+                                      border-radius: 2px; }}
+        QSlider::sub-page:horizontal {{ background: {p['accent']}; border-radius: 2px; }}
+        QSlider::handle:horizontal {{ background: {p['accent']}; width: 15px;
+                                      margin: -6px 0; border-radius: 7px; }}
+
+        QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 10px;
+                            top: -1px; }}
+        QTabBar::tab {{ background: transparent; color: {p['text_sec']};
+                        padding: 8px 14px; border-radius: 8px; margin: 2px; }}
+        QTabBar::tab:selected {{ background: {p['panel']}; color: {p['accent']};
+                                 font-weight: 700; }}
+        QTabBar::tab:hover {{ background: {p['hover']}; }}
+
+        QListWidget {{ background: {p['entry_bg']}; border: 1px solid {p['border']};
+                       border-radius: 10px; padding: 4px; }}
+        QListWidget::item {{ border-radius: 6px; padding: 2px; }}
+        QListWidget::item:selected {{ background: {p['select_bg']}; color: {p['text_pri']}; }}
         """
 
 

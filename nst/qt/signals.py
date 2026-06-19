@@ -17,10 +17,13 @@ class ChatSignals(QObject):
     file_reject = pyqtSignal(str, str, object)
     chat_request = pyqtSignal(str, str, object)
     group_message = pyqtSignal(object, str, str, str, float, object, str)  # group, ip, name, text, ts, reply, mid
+    channel_message = pyqtSignal(object, str, str, str, float, object, str)  # channel, ip, name, text, ts, reply, mid
     receipt = pyqtSignal(str, str, str)        # ip, mid, state ("delivered"|"read")
     deleted = pyqtSignal(str, str)             # from_ip, mid (delete-for-everyone)
     typing = pyqtSignal(str, str, object, bool)  # ip, name, gid|None, is_typing
     reaction = pyqtSignal(str, str, str)       # from_ip, mid, emoji
+    queue_flush = pyqtSignal(str, object)      # ip, [mid, ...] delivered from offline queue
+    group_kick = pyqtSignal(str, str)          # from_ip, gid — we were removed from a group
 
 
 

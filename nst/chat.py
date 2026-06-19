@@ -63,10 +63,13 @@ class ChatService:
                  on_file_reject=None,
                  on_chat_request=None,
                  on_group_message=None,
+                 on_channel_message=None,
                  on_receipt=None,
                  on_delete=None,
                  on_typing=None,
-                 on_reaction=None) -> None:
+                 on_reaction=None,
+                 on_queue_flush=None,
+                 on_group_kick=None) -> None:
         """
         on_roster_change(peers: list[Peer])          -- roster changed.
         on_message(ip, name, text, ts, reply, mid)   -- incoming chat message.
@@ -79,6 +82,7 @@ class ChatService:
         on_delete(from_ip, mid)                      -- peer deleted a message for everyone.
         on_typing(ip, name, gid, is_typing)          -- peer started/stopped typing.
         on_reaction(from_ip, mid, emoji)             -- peer added/toggled a reaction.
+        on_queue_flush(ip, mids)                     -- queued messages finally delivered.
         All callbacks are invoked from background threads; marshal to main thread.
         """
         self.my_name = my_name
@@ -92,10 +96,18 @@ class ChatService:
         self._on_file_reject = on_file_reject
         self._on_chat_request = on_chat_request
         self._on_group_message = on_group_message
+        self._on_channel_message = on_channel_message
         self._on_receipt = on_receipt
         self._on_delete = on_delete
         self._on_typing = on_typing
         self._on_reaction = on_reaction
+        self._on_queue_flush = on_queue_flush
+        self._on_group_kick = on_group_kick
+
+        # Offline sender-retained queues (update.md #14): undelivered text/group
+        # messages are held in memory and retried when the peer is reachable.
+        # Lost if we shut down before delivery (no central server, by design).
+        self._outbox: dict[str, list[dict]] = {}   # ip -> [{payload, mid, ts}]
 
         # Manual status: 'online', 'away', or 'invisible'.
         # 'invisible' stops advertising presence so peers reap us.
@@ -127,6 +139,7 @@ class ChatService:
         threading.Thread(target=self._server_loop, daemon=True).start()
         threading.Thread(target=self._reaper_loop, daemon=True).start()
         threading.Thread(target=self._manual_probe_loop, daemon=True).start()
+        threading.Thread(target=self._outbox_loop, daemon=True).start()
 
     def stop(self) -> None:
         self.running = False
@@ -194,6 +207,7 @@ class ChatService:
             self._approved_ips.discard(ip)
             self._blocked_ips.discard(ip)
             self._pending_requests.pop(ip, None)
+            self._outbox.pop(ip, None)
         self._emit_roster()
 
     def approve_ip(self, ip: str) -> None:
@@ -211,6 +225,21 @@ class ChatService:
             self._blocked_ips.add(ip)
             self._approved_ips.discard(ip)
             self._pending_requests.pop(ip, None)
+            self._outbox.pop(ip, None)
+
+    def unblock_ip(self, ip: str) -> None:
+        """Lift a block on *ip* (does not auto-approve — first contact re-prompts)."""
+        with self._lock:
+            self._blocked_ips.discard(ip)
+            self._pending_requests.pop(ip, None)
+
+    def blocked_ips(self) -> list[str]:
+        with self._lock:
+            return sorted(self._blocked_ips)
+
+    def pending_request_ips(self) -> list[str]:
+        with self._lock:
+            return sorted(self._pending_requests.keys())
 
     def _is_same_subnet(self, remote_ip: str) -> bool:
         """True if remote_ip shares a subnet with ANY local interface.
@@ -475,10 +504,13 @@ class ChatService:
             # Control messages reference something we already own (an offer we
             # made, a message id we sent, an ephemeral typing ping) so they're
             # always trusted and bypass the first-contact approval gate.
-            _trusted = ("file_accept", "file_reject", "receipt", "delete", "typing", "reaction")
+            _trusted = ("file_accept", "file_reject", "receipt", "delete",
+                        "typing", "reaction", "group_kick")
             if msg_type not in _trusted:
+                if ip in self._blocked_ips:
+                    return  # silently drop — applies to LAN and external alike
                 if not self._is_same_subnet(ip) and ip not in self._approved_ips:
-                    if not self.ip_chat_enabled or ip in self._blocked_ips:
+                    if not self.ip_chat_enabled:
                         return  # silently drop
                     # First contact from external IP — buffer and request approval
                     with self._lock:
@@ -516,6 +548,10 @@ class ChatService:
         elif msg_type == "delete":
             if self._on_delete:
                 self._on_delete(ip, str(msg.get("mid", "")))
+        elif msg_type == "group_kick":
+            gid = str(msg.get("gid", ""))
+            if gid and self._on_group_kick:
+                self._on_group_kick(ip, gid)
         elif msg_type == "typing":
             gid = msg.get("gid") or None
             if self._on_typing:
@@ -539,6 +575,17 @@ class ChatService:
             mid = str(msg.get("mid", ""))
             if self._on_group_message:
                 self._on_group_message(group, ip, name, text, ts, reply, mid)
+        elif msg_type in ("channel", "channel_meta"):
+            channel = msg.get("channel")
+            if not isinstance(channel, dict) or not channel.get("cid"):
+                return
+            self._touch_peer(ip, name)
+            text = str(msg.get("text", ""))
+            ts = float(msg.get("ts", time.time()))
+            reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
+            mid = str(msg.get("mid", ""))
+            if self._on_channel_message:
+                self._on_channel_message(channel, ip, name, text, ts, reply, mid)
         else:
             text = str(msg.get("text", ""))
             ts = float(msg.get("ts", time.time()))
@@ -555,7 +602,7 @@ class ChatService:
     # ── messaging: outgoing ───────────────────────────────────────────────────
     def send(self, ip: str, text: str, reply: dict | None = None,
              group: dict | None = None, msg_type: str = "chat",
-             mid: str = "") -> bool:
+             mid: str = "", channel: dict | None = None) -> bool:
         """Deliver a message synchronously. Returns True on success.
 
         ``reply`` is an optional ``{"sender", "text"}`` snippet of the message
@@ -582,11 +629,72 @@ class ChatService:
         if group:
             msg["group"] = group
             msg["type"] = msg_type if msg_type in ("group", "group_invite") else "group"
+        elif channel:
+            msg["channel"] = channel
+            msg["type"] = msg_type if msg_type in ("channel", "channel_meta") else "channel"
         payload = json.dumps(msg).encode("utf-8") + b"\n"
+        if self._deliver(ip, payload):
+            return True
+        # Peer unreachable — retain locally and retry when they reappear.
+        self._enqueue(ip, payload, mid)
+        return False
+
+    # ── offline sender-retained queue (update.md #14) ─────────────────────────
+    def _deliver(self, ip: str, payload: bytes) -> bool:
+        """Open a short-lived connection and push one framed message. No queueing."""
         try:
             with socket.create_connection((ip, CHAT_TCP_PORT), timeout=3.0) as s:
                 s.sendall(payload)
             return True
+        except Exception:
+            return False
+
+    def _enqueue(self, ip: str, payload: bytes, mid: str) -> None:
+        key = mid or str(hash(payload))
+        with self._lock:
+            q = self._outbox.setdefault(ip, [])
+            if any(item["key"] == key for item in q):
+                return
+            q.append({"payload": payload, "key": key, "mid": mid, "ts": time.time()})
+
+    def pending_count(self) -> int:
+        """Total messages waiting to be delivered across all peers."""
+        with self._lock:
+            return sum(len(q) for q in self._outbox.values())
+
+    def _outbox_loop(self) -> None:
+        while self.running:
+            time.sleep(3)
+            with self._lock:
+                targets = list(self._outbox.keys())
+            for ip in targets:
+                if not self.is_peer_online(ip) and not self._reachable(ip):
+                    continue
+                with self._lock:
+                    items = list(self._outbox.get(ip, []))
+                delivered: list[str] = []
+                for item in items:
+                    if self._deliver(ip, item["payload"]):
+                        if item["mid"]:
+                            delivered.append(item["mid"])
+                        keep_key = item["key"]
+                        with self._lock:
+                            q = self._outbox.get(ip, [])
+                            self._outbox[ip] = [i for i in q if i["key"] != keep_key]
+                            if not self._outbox[ip]:
+                                del self._outbox[ip]
+                    else:
+                        break   # peer flaky again — leave the rest queued
+                if delivered and self._on_queue_flush:
+                    try:
+                        self._on_queue_flush(ip, delivered)
+                    except Exception:
+                        pass
+
+    def _reachable(self, ip: str) -> bool:
+        try:
+            with socket.create_connection((ip, CHAT_TCP_PORT), timeout=1.0):
+                return True
         except Exception:
             return False
 
@@ -604,6 +712,22 @@ class ChatService:
         results: dict[str, bool] = {}
         for ip in members:
             results[ip] = self.send(ip, text, reply=reply, group=group,
+                                    msg_type=msg_type, mid=mid)
+        return results
+
+    def send_channel(self, channel: dict, text: str, reply: dict | None = None,
+                     msg_type: str = "channel", mid: str = "") -> dict[str, bool]:
+        """Broadcast a channel post to every subscriber except ourselves.
+
+        Channels are admin-post / member-read (update.md #8); membership routing
+        works exactly like a group. Returns ``{ip: delivered}``.
+        """
+        members = [ip for ip in channel.get("members", []) if ip and ip != self.my_ip]
+        with self._lock:
+            self._approved_ips.update(members)
+        results: dict[str, bool] = {}
+        for ip in members:
+            results[ip] = self.send(ip, text, reply=reply, channel=channel,
                                     msg_type=msg_type, mid=mid)
         return results
 
@@ -641,6 +765,15 @@ class ChatService:
             return False
         return self._send_json(ip, {
             "type": "typing", "is_typing": bool(is_typing), "gid": gid,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        })
+
+    def send_group_kick(self, ip: str, gid: str) -> bool:
+        """Tell *ip* they have been removed from group *gid* (they lose it locally)."""
+        if not gid or ip in self._virtual:
+            return False
+        return self._send_json(ip, {
+            "type": "group_kick", "gid": gid,
             "from_name": self.my_name, "from_ip": self.my_ip,
         })
 

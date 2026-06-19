@@ -42,10 +42,25 @@ Click **💬 LAN Chat**. Every PC running the app discovers the others on the sa
 (UDP presence broadcast — only this app's instances appear, no ping scanning).
 
 - Set your display name (defaults to the PC name) and pick a peer to chat.
-- Group chats, replies, reactions, typing indicators, read receipts.
-- **Notifications** pop up bottom-right for messages in conversations you aren't viewing;
-  click to jump there. Unread badges show in the peer list.
+- **Groups** with full admin controls — any user can create one and becomes its admin;
+  admins add/remove members, promote/demote admins and rename the group. Ownership
+  transfers automatically if the last admin leaves, and a removed member loses the group.
+- **Broadcast channels** (＋ New → channel) — admins post, members read only.
+- Replies, reactions, forwarding, typing indicators, read receipts, and group seen-counts.
+- **Emoji & multi-line** input: **Enter** sends, **Shift+Enter** adds a new line.
+- **Offline delivery** — messages to an offline peer are held locally and delivered
+  automatically when they come back online (lost only if you quit first).
+- **Search** (🔍 in the chat header) across all message text and file names.
+- **Notifications** — bottom-right popups, a notification sound, taskbar flashing and a
+  system-tray unread badge, each configurable per chat type in Settings.
 - Chat history is saved and restored across restarts.
+
+**Settings** (⚙ next to *YOU*, or the gear) — a categorised window for General
+(display name, invisible mode, start-with-Windows, tray/session behaviour), Notifications
+(global + per-type sound/popup/flash/badge, volume, DND, mute), Storage & retention
+(7/30/90/180 days or forever, clear history, download folder, max file size, usage),
+Network (interfaces, IPs, ports, peers online), Privacy (blocked-user management) and
+File Transfer (download folder, size limit, offer expiry).
 
 **Connect by IP (cross-subnet)** — discovery only spans one subnet. To reach a different
 `10.x.x.x` subnet, enter the peer's IP in **Connect by IP** and press ➤. The app probes

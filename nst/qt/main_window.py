@@ -485,7 +485,11 @@ class MainWindow(QMainWindow):
             "Developed by Pramod Verma")
 
     def closeEvent(self, e) -> None:
-        # Minimise to tray instead of quitting.
+        # Minimise to tray instead of quitting — unless the user disabled it.
+        if not config.load_minimize_to_tray():
+            e.accept()
+            self._on_quit()
+            return
         e.ignore()
         self.hide()
         if self._tray:
