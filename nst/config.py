@@ -1,57 +1,68 @@
 """Registry-backed persistent settings.
 
-Autostart lives under the standard ``...\\CurrentVersion\\Run`` key; everything
-else lives under ``HKCU\\Software\\NetSplitTunnel``.
+Autostart uses Windows Task Scheduler (not the Run registry key) because the
+app requests administrator privileges via its UAC manifest. Windows silently
+skips Run-key entries that require elevation at logon (no interactive desktop
+is available to show the UAC prompt). A scheduled task with "Run with highest
+privileges" is the correct workaround for portable admin-level executables.
+
+Everything else lives under ``HKCU\\Software\\NetSplitTunnel``.
 """
 
 import json
 import os
 import socket
+import subprocess
 import sys
 import uuid
 import winreg
 
-from .constants import REG_APP_PATH, REG_RUN_PATH, RUN_VALUE_NAME
+from .constants import REG_APP_PATH, RUN_VALUE_NAME
 
-# ── Autostart ─────────────────────────────────────────────────────────────────
+_TASK_NAME = RUN_VALUE_NAME   # "NetSplitTunnel"
+
+# ── Autostart (Task Scheduler) ────────────────────────────────────────────────
 
 def set_autostart(enabled: bool) -> tuple[bool, str]:
-    try:
-        if getattr(sys, "frozen", False):
-            path = f'"{sys.executable}"'
-        else:
-            path = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+    """Register or remove a logon-triggered scheduled task that runs elevated.
 
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_RUN_PATH,
-                             0, winreg.KEY_SET_VALUE)
-        if enabled:
-            winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ, path)
-            msg = "Autostart enabled in registry."
+    The HKCU Run key cannot auto-elevate, so apps with a UAC requireAdministrator
+    manifest are silently skipped at login. A Task Scheduler entry with
+    /rl HIGHEST bypasses the UAC prompt and reliably starts the app.
+    """
+    if enabled:
+        if getattr(sys, "frozen", False):
+            exe = sys.executable
         else:
-            try:
-                winreg.DeleteValue(key, RUN_VALUE_NAME)
-                msg = "Autostart disabled in registry."
-            except FileNotFoundError:
-                msg = "Autostart was already disabled."
-        winreg.CloseKey(key)
-        return True, msg
-    except Exception as e:
-        return False, f"Registry update failed: {e}"
+            exe = f"{sys.executable} {os.path.abspath(sys.argv[0])}"
+        # /f  — overwrite if the task already exists
+        # /sc onlogon — trigger: when the current user logs on
+        # /rl highest — run with highest available privileges (no UAC prompt)
+        # /delay 0000:30 — 30-second delay so the desktop is ready
+        cmd = (
+            f'schtasks /create /f'
+            f' /tn "{_TASK_NAME}"'
+            f' /tr "{exe}"'
+            f' /sc onlogon'
+            f' /rl highest'
+            f' /delay 0000:30'
+        )
+    else:
+        cmd = f'schtasks /delete /f /tn "{_TASK_NAME}"'
+
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode == 0:
+        return True, f"Autostart {'enabled' if enabled else 'disabled'} via Task Scheduler."
+    err = (result.stderr or result.stdout or "unknown error").strip()
+    return False, f"Task Scheduler error: {err}"
 
 
 def is_autostart_enabled() -> bool:
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_RUN_PATH,
-                             0, winreg.KEY_READ)
-        try:
-            winreg.QueryValueEx(key, RUN_VALUE_NAME)
-            enabled = True
-        except FileNotFoundError:
-            enabled = False
-        winreg.CloseKey(key)
-        return enabled
-    except Exception:
-        return False
+    result = subprocess.run(
+        f'schtasks /query /tn "{_TASK_NAME}"',
+        shell=True, capture_output=True, text=True
+    )
+    return result.returncode == 0
 
 # ── Generic app-key helpers ───────────────────────────────────────────────────
 
