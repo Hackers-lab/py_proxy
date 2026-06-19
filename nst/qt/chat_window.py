@@ -330,7 +330,6 @@ class ChatWindow(QWidget):
     """Standalone chat window. Closing hides it so conversations persist."""
 
     activity = pyqtSignal(str)     # background message arrived on this key
-    unread_total = pyqtSignal(int)  # total unread across all chats (drives tray badge)
     # File-transfer callbacks fire on worker threads; these signals marshal them
     # back onto the GUI thread (QTimer.singleShot from a worker thread never
     # fires — the worker has no Qt event loop).
@@ -400,7 +399,6 @@ class ChatWindow(QWidget):
         self._load_history()
         theme.changed.connect(self._on_theme)
         self.update_roster(self.chat.peers())
-        self._emit_unread_total()
         # Restore the previously open conversation (update.md General settings).
         if config.load_restore_session():
             last = config.load_last_active_chat()
@@ -718,7 +716,6 @@ class ChatWindow(QWidget):
             if self._visible and self._active:
                 if self._unread.get(self._active):
                     self._unread[self._active] = 0
-                    self._emit_unread_total()
                     self.update_roster(self.chat.peers())
                     self._render(self._active)
                 self._mark_read(self._active)
@@ -781,7 +778,6 @@ class ChatWindow(QWidget):
         """Re-read live-affecting settings after the Settings dialog changes them."""
         self._notifications_enabled = config.load_notifications_enabled()
         self._self_dot.set_status(self.chat.my_status)
-        self._emit_unread_total()
 
     def clear_all_history(self) -> int:
         """Clear every local conversation (keeps peers, drops messages). Returns count."""
@@ -798,7 +794,6 @@ class ChatWindow(QWidget):
                 self._conversations.pop(key, None)
                 self._save_peer(key)
             self._unread.pop(key, None)
-        self._emit_unread_total()
         if self._active:
             self._render(self._active)
         self.update_roster(self.chat.peers())
@@ -982,7 +977,6 @@ class ChatWindow(QWidget):
         prev = self._active
         self._active = key
         self._unread[key] = 0
-        self._emit_unread_total()
         self._cancel_reply()
         for k, row in self._rows.items():
             row.set_active(k == key)
@@ -1311,31 +1305,21 @@ class ChatWindow(QWidget):
             self._append(entry)
 
     def _notify_background(self, scope: str, key: str, title: str, body: str) -> None:
-        """Fire the allowed alert channels for a background message.
+        """Alert for a background message, honouring the per-type toggles.
 
-        Honours the global master switch, DND, mute and per-scope toggles from
-        the Settings module: desktop popup, sound, taskbar flash and tray badge.
-        If "raise window on new message" is on, the window is brought to the
-        front (and the popup card is suppressed) instead.
+        The per-type "Show window" toggle (stored as the "popup" channel) and the
+        bottom-right toast are opposites: if showing the window is enabled we
+        raise it (and skip the toast); otherwise we show the toast. Both respect
+        the master switch and Do-Not-Disturb; sound/taskbar are independent.
         """
-        master_on = config.load_notifications_enabled()
-        raise_win = config.load_raise_on_message()
-        if master_on and raise_win and not config.load_do_not_disturb():
-            self.open(key)                       # raise + jump to the chat; no popup
-        elif sound.should_notify(scope, "popup"):
+        if sound.should_notify(scope, "popup"):
+            self.open(key)                       # bring window to front, no toast
+        elif config.load_notifications_enabled() and not config.load_do_not_disturb():
             self._toasts.notify(title, body, key)
+            if sound.should_notify(scope, "taskbar") and not self.isActiveWindow():
+                QApplication.alert(self, 3000)
         if sound.should_notify(scope, "sound"):
             sound.play_sound()
-        if (not raise_win and sound.should_notify(scope, "taskbar")
-                and not self.isActiveWindow()):
-            QApplication.alert(self, 3000)
-        self._emit_unread_total()
-
-    def _emit_unread_total(self) -> None:
-        """Push the total unread count (honouring tray toggles) to the tray badge."""
-        total = sum(n for k, n in self._unread.items()
-                    if n > 0 and sound.should_notify(sound.scope_of(k), "tray"))
-        self.unread_total.emit(total)
 
     def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
         self._unhide(ip)
@@ -1468,7 +1452,6 @@ class ChatWindow(QWidget):
         if self._active == key:
             self._reset_active()
         self.update_roster(self.chat.peers())
-        self._emit_unread_total()
         self._toasts.notify("Removed from group",
                             f"You were removed from “{name}”.", "")
 
@@ -2247,7 +2230,6 @@ class ChatWindow(QWidget):
         self._delete_history_file(key)
         if self._active == key:
             self._reset_active()
-        self._emit_unread_total()
         self.update_roster(self.chat.peers())
         self._log(f"Left group \"{name}\".")
 
@@ -2424,7 +2406,6 @@ class ChatWindow(QWidget):
         self._delete_history_file(key)
         if self._active == key:
             self._reset_active()
-        self._emit_unread_total()
         self.update_roster(self.chat.peers())
         self._log(f"{verb}d channel \"{name}\".")
 

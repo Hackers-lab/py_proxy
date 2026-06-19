@@ -203,12 +203,6 @@ class SettingsDialog(QDialog):
         self._cb_dnd.toggled.connect(lambda on: config.save_do_not_disturb(on))
         v.addWidget(self._cb_dnd)
 
-        self._cb_raise = QCheckBox("Bring chat window to front on new message "
-                                   "(no popup card when on)")
-        self._cb_raise.setChecked(config.load_raise_on_message())
-        self._cb_raise.toggled.connect(lambda on: config.save_raise_on_message(on))
-        v.addWidget(self._cb_raise)
-
         volrow = QHBoxLayout()
         volrow.addWidget(QLabel("Sound volume"))
         self._vol = QSlider(Qt.Orientation.Horizontal)
@@ -226,14 +220,15 @@ class SettingsDialog(QDialog):
         v.addWidget(hline())
         v.addWidget(self._section_label("PER CONVERSATION TYPE"))
         v.addWidget(self._hint(
-            "Independently enable each alert type for private chats, groups and "
-            "broadcast channels."))
+            "Set each alert type for private chats, groups and broadcast channels. "
+            "“Show window” on = bring the chat window to the front on a new "
+            "message; off = show a bottom-right popup instead."))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(8)
-        channels = [("Sound", "sound"), ("Desktop popup", "popup"),
-                    ("Taskbar flash", "taskbar"), ("Tray badge", "tray")]
+        channels = [("Sound", "sound"), ("Show window", "popup"),
+                    ("Taskbar flash", "taskbar")]
         for col, (label, _key) in enumerate(channels):
             h = QLabel(label)
             h.setStyleSheet("font-size:11px; font-weight:700;")

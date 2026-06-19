@@ -5,10 +5,12 @@ slider) and played asynchronously via :mod:`winsound`, so there are no audio
 dependencies and the volume control has a real effect.
 
 :func:`should_notify` is the single place that decides whether a given
-notification *channel* (sound / popup / taskbar flash / tray badge) is allowed
-for a conversation *scope* (private / group / broadcast). It folds together the
-global master switch, Do-Not-Disturb, mute-all and the per-scope toggles from
-:mod:`nst.config`, so callers never have to re-derive that logic.
+notification *channel* (sound / popup / taskbar flash) is allowed for a
+conversation *scope* (private / group / broadcast). The "popup" channel means
+"bring the chat window to the front"; when it is off the caller shows a
+bottom-right toast instead. It folds together the global master switch,
+Do-Not-Disturb, mute-all and the per-scope toggles from :mod:`nst.config`, so
+callers never have to re-derive that logic.
 """
 
 import io
@@ -73,7 +75,7 @@ def should_notify(scope: str, channel: str) -> bool:
     """True if *channel* may fire for a *scope* conversation right now.
 
     scope:   'private' | 'group' | 'broadcast'
-    channel: 'sound' | 'popup' | 'taskbar' | 'tray'
+    channel: 'sound' | 'popup' (raise the window) | 'taskbar'
     """
     prefs = config.load_notify_prefs()
     scope_prefs = prefs.get(scope, {})

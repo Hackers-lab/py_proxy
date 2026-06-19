@@ -16,7 +16,7 @@ from .main_window import MainWindow
 from .signals import ChatSignals
 from .theme import theme
 from .toast import ToastManager
-from .tray import SpeedOverlay, TrayManager
+from .tray import SpeedOverlay, TrayManager, chat_icon
 
 
 def run() -> None:
@@ -62,6 +62,9 @@ def run() -> None:
     _log_holder = {"main": None}
     chat_window = ChatWindow(chat, toasts,
                              log_fn=lambda m: _log_holder["main"] and _log_holder["main"].log(m))
+    # Give the chat window the green message-bubble icon (matches the tray chat
+    # icon) so it's distinct from the proxy/splitter window's app icon.
+    chat_window.setWindowIcon(chat_icon())
 
     sig.roster_changed.connect(chat_window.update_roster)
     sig.message.connect(chat_window.receive_message)
@@ -111,7 +114,6 @@ def run() -> None:
     overlay = SpeedOverlay()
     main.set_tray(tray)
     main.set_overlay(overlay)
-    chat_window.unread_total.connect(tray.set_chat_unread)
     tray.show()
 
     chat.start()

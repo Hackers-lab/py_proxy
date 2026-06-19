@@ -325,7 +325,9 @@ def save_last_active_chat(key: str) -> bool:
 # ── Notification preferences (update.md #16, settings module) ──────────────────
 
 # Notification "channels" that can be toggled per conversation scope.
-NOTIFY_CHANNELS = ("sound", "popup", "taskbar", "tray")
+# "popup" means "bring the main window to the front"; when it is off, a
+# bottom-right toast is shown instead (the two are opposites, auto-decided).
+NOTIFY_CHANNELS = ("sound", "popup", "taskbar")
 # Conversation scopes that carry independent notification settings.
 NOTIFY_SCOPES = ("private", "group", "broadcast")
 
@@ -378,19 +380,6 @@ def load_do_not_disturb() -> bool:
 
 def save_do_not_disturb(enabled: bool) -> bool:
     return _write_value("DoNotDisturb", winreg.REG_DWORD, 1 if enabled else 0)
-
-
-def load_raise_on_message() -> bool:
-    """Bring the chat window to the front on a new background message.
-
-    When on, the window is raised and the bottom-right popup is suppressed;
-    when off, the popup card shows instead (default off — non-intrusive).
-    """
-    return bool(_read_value("RaiseOnMessage", 0))
-
-
-def save_raise_on_message(enabled: bool) -> bool:
-    return _write_value("RaiseOnMessage", winreg.REG_DWORD, 1 if enabled else 0)
 
 # ── Blocked users (update.md #12) ──────────────────────────────────────────────
 
