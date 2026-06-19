@@ -203,6 +203,12 @@ class SettingsDialog(QDialog):
         self._cb_dnd.toggled.connect(lambda on: config.save_do_not_disturb(on))
         v.addWidget(self._cb_dnd)
 
+        self._cb_raise = QCheckBox("Bring chat window to front on new message "
+                                   "(no popup card when on)")
+        self._cb_raise.setChecked(config.load_raise_on_message())
+        self._cb_raise.toggled.connect(lambda on: config.save_raise_on_message(on))
+        v.addWidget(self._cb_raise)
+
         volrow = QHBoxLayout()
         volrow.addWidget(QLabel("Sound volume"))
         self._vol = QSlider(Qt.Orientation.Horizontal)

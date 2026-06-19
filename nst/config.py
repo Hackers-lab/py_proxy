@@ -379,6 +379,19 @@ def load_do_not_disturb() -> bool:
 def save_do_not_disturb(enabled: bool) -> bool:
     return _write_value("DoNotDisturb", winreg.REG_DWORD, 1 if enabled else 0)
 
+
+def load_raise_on_message() -> bool:
+    """Bring the chat window to the front on a new background message.
+
+    When on, the window is raised and the bottom-right popup is suppressed;
+    when off, the popup card shows instead (default off — non-intrusive).
+    """
+    return bool(_read_value("RaiseOnMessage", 0))
+
+
+def save_raise_on_message(enabled: bool) -> bool:
+    return _write_value("RaiseOnMessage", winreg.REG_DWORD, 1 if enabled else 0)
+
 # ── Blocked users (update.md #12) ──────────────────────────────────────────────
 
 def load_blocked_users() -> list[dict]:

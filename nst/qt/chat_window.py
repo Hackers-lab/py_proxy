@@ -1315,12 +1315,19 @@ class ChatWindow(QWidget):
 
         Honours the global master switch, DND, mute and per-scope toggles from
         the Settings module: desktop popup, sound, taskbar flash and tray badge.
+        If "raise window on new message" is on, the window is brought to the
+        front (and the popup card is suppressed) instead.
         """
-        if sound.should_notify(scope, "popup"):
+        master_on = config.load_notifications_enabled()
+        raise_win = config.load_raise_on_message()
+        if master_on and raise_win and not config.load_do_not_disturb():
+            self.open(key)                       # raise + jump to the chat; no popup
+        elif sound.should_notify(scope, "popup"):
             self._toasts.notify(title, body, key)
         if sound.should_notify(scope, "sound"):
             sound.play_sound()
-        if sound.should_notify(scope, "taskbar") and not self.isActiveWindow():
+        if (not raise_win and sound.should_notify(scope, "taskbar")
+                and not self.isActiveWindow()):
             QApplication.alert(self, 3000)
         self._emit_unread_total()
 
