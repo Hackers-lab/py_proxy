@@ -1330,14 +1330,29 @@ class ChatWindow(QWidget):
     def _notify_background(self, scope: str, key: str, title: str, body: str) -> None:
         """Alert for a background message, honouring the per-type toggles.
 
-        The per-type "Show window" toggle (stored as the "popup" channel) and the
-        bottom-right toast are opposites: if showing the window is enabled we
-        raise it (and skip the toast); otherwise we show the toast. Both respect
-        the master switch and Do-Not-Disturb; sound/taskbar are independent.
+        "Show window" (popup) raises the chat window without switching the active
+        conversation — the unread badge in the roster tells you who sent. If the
+        window is already visible (you're in another chat), we show a toast
+        instead so you aren't interrupted. Toast fires unconditionally when the
+        popup toggle is off. Sound/taskbar are independent of both.
         """
+        notifs_ok = config.load_notifications_enabled() and not config.load_do_not_disturb()
+        window_up = self.isVisible() and not self.isMinimized()
+
         if sound.should_notify(scope, "popup"):
-            self.open(key)                       # bring window to front, no toast
-        elif config.load_notifications_enabled() and not config.load_do_not_disturb():
+            if window_up:
+                # Already visible in another chat — raising does nothing; show a
+                # toast so the user sees who messaged without hijacking their view.
+                if notifs_ok:
+                    self._toasts.notify(title, body, key)
+            else:
+                # Raise the window to the *current* active chat; do not switch to
+                # the sender — the roster badge is the cue for who needs attention.
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+                self._visible = True
+        elif notifs_ok:
             self._toasts.notify(title, body, key)
             if sound.should_notify(scope, "taskbar") and not self.isActiveWindow():
                 QApplication.alert(self, 3000)

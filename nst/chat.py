@@ -507,8 +507,10 @@ class ChatService:
             _trusted = ("file_accept", "file_reject", "receipt", "delete",
                         "typing", "reaction", "group_kick")
             if msg_type not in _trusted:
+                if ip in self._blocked_ips:
+                    return  # silently drop — applies to LAN and external alike
                 if not self._is_same_subnet(ip) and ip not in self._approved_ips:
-                    if not self.ip_chat_enabled or ip in self._blocked_ips:
+                    if not self.ip_chat_enabled:
                         return  # silently drop
                     # First contact from external IP — buffer and request approval
                     with self._lock:
