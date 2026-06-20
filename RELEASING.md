@@ -9,20 +9,26 @@ a mistake here can put every user into an update loop.
 ## TL;DR checklist
 
 1. [ ] Bump the version in **both** places (see below). They must match.
-2. [ ] Add a new section to [CHANGELOG.md](CHANGELOG.md) describing *what changed*.
-3. [ ] Commit everything to `main`.
-4. [ ] Tag the commit `vX.Y.Z` (same number as the version) and push the tag.
-5. [ ] Watch the Action go green: https://github.com/Hackers-lab/py_proxy/actions
-6. [ ] Confirm the release has **exactly one** `NetSplitTunnel_Setup_vX.Y.Z.exe` asset.
+2. [ ] **Update [README.md](README.md)** so it describes the current feature set — new tabs, features, or behaviour changes. The GitHub release notes are generated from the README, so this is what users read.
+3. [ ] Add a new section to [CHANGELOG.md](CHANGELOG.md) describing *what changed*.
+4. [ ] Commit everything to `main`.
+5. [ ] Tag the commit `vX.Y.Z` (same number as the version) and push the tag.
+6. [ ] Watch the Action go green: https://github.com/Hackers-lab/py_proxy/actions
+7. [ ] Confirm the release has **exactly one** `NetSplitTunnel_Setup_vX.Y.Z.exe` asset.
 
 ```bash
-# after editing the two version files + CHANGELOG.md:
+# after editing the two version files + README.md + CHANGELOG.md:
 git add -A
 git commit -m "vX.Y.Z: <one-line summary>"
 git push origin main
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
+
+> **Always update README.md before tagging a release.** The release notes shown
+> on GitHub come straight from the README (`body_path:` in
+> `.github/workflows/release.yml`), so a stale README means a stale-looking
+> release. If you added or changed a feature, it must be reflected here first.
 
 ---
 

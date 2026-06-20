@@ -1,14 +1,26 @@
 # Net Split-Tunneler  v4.9
 
-A Windows desktop tool that does three things: **split the network** so one PC shares internet while keeping LAN access intact, **proxy-share** that internet to other PCs, and run a **full-featured LAN chat** between every PC on the network — all without any server, cloud account, or router config.
+A Windows desktop tool for the messy reality of office networks: **share internet without losing the LAN**, **reach the intranet and the internet at the same time**, **flip between saved IP setups in one click**, and run a **full-featured LAN chat** between every PC on the network — all without any server, cloud account, or router config.
 
 Windows 10/11 · Python 3.10+ · PyQt6
 
 > [!NOTE]
-> Run as **Administrator** — the app edits the Windows routing table.
-> Accept the UAC prompt on launch.
+> Most features just work as a normal user. The actions that change Windows
+> networking (routes, secondary IP, switching adapter settings) ask for a
+> one-time **UAC / administrator** approval when you click them.
 
 ---
+
+## The main window — four tabs
+
+Everything in the main window is organised into four tabs, plus the LAN Chat that opens in its own window.
+
+| Tab | What it's for |
+|---|---|
+| 🖥️ **Host Mode** | This PC shares its internet to other PCs and keeps LAN access local |
+| 🔗 **Client Mode** | This PC borrows another PC's internet over the LAN |
+| 🌐 **Dual Access** | Use the corporate intranet **and** the internet at the same time, on one cable |
+| 🔀 **IP Switch** | Save up to 4 network setups and switch between them with one click |
 
 ## Features at a glance
 
@@ -16,6 +28,8 @@ Windows 10/11 · Python 3.10+ · PyQt6
 |---|---|
 | 🔀 | **Split-Tunneler** — internet via host, LAN stays local |
 | 🌐 | **Proxy Sharing** — one PC shares internet to all others |
+| 🌐 | **Dual Access** — intranet + internet together, with split DNS |
+| 🔀 | **IP Switch** — one-click static/DHCP network profiles |
 | 💬 | **LAN Chat** — private messages, groups, broadcast channels |
 | 📎 | **File Transfer** — send files with live progress |
 | 🔔 | **Notifications** — sound, toast, window-raise or taskbar flash |
@@ -59,6 +73,40 @@ The proxy server is a standard HTTP/HTTPS tunnel (CONNECT method), compatible wi
 - Works with VPN, mobile hotspot, or any internet source on the Host
 - The **Network traffic monitor** shows live download/upload speeds for the proxy connection
 - **Show Speed in Taskbar** pins a live speed pill next to the clock, visible even when the main window is hidden
+
+---
+
+## Dual Access — intranet *and* internet at once
+
+The everyday office problem: your desk cable gives you the **corporate intranet** (a `10.x` address, internal sites, SAP/ERP, file servers) but **no internet** — or a Wi-Fi/hotspot gives you internet but cuts you off from the intranet. Normally you switch back and forth all day.
+
+**Dual Access gives you both at the same time, over the same network adapter.**
+
+In one click it:
+- Adds a second **internet IP** to your adapter (alongside your intranet IP)
+- Sends internet traffic out the internet gateway, and keeps intranet traffic (`10.0.0.0/8`) on the corporate network — adding the intranet route automatically if it isn't there
+- Sets up **split DNS** so internal hostnames (e.g. `*.yourcompany.in`) resolve through the corporate DNS servers, while everything else uses public DNS
+
+**How to use it:**
+1. Open **Dual Access**
+2. The **Internet IP** is auto-filled from your adapter's saved DHCP address — or click **Auto** to detect it, or type it in
+3. (Optional) Adjust the **NRPT Domains** — the internal domains that should resolve via corporate DNS. Your intranet DNS servers are read automatically from the adapter.
+4. Click **▶ Enable Dual Access** and approve the UAC prompt
+
+The four status rows (Intranet Route, Secondary IP, Internet Route, Split DNS) turn green as each piece comes up. **Disable** reverses everything and restores your adapter to its original state.
+
+---
+
+## IP Switch — saved network profiles, one click
+
+If you regularly move a laptop between networks — office static IP, home DHCP, a lab subnet, a client site — IP Switch saves each setup and lets you apply it instantly instead of digging through Windows adapter settings.
+
+- **Four profile buttons.** Each shows your chosen name and a status icon: **green ■** when that profile is currently active, **▶** when it's ready to apply. Click a button to switch.
+- **Configure once.** Click **⚙ Configure Profiles** to open a tabbed editor (Profile 1–4). For each profile set:
+  - **Name** — what the button shows (e.g. "Office Intranet", "Home Wi-Fi")
+  - **Network Adapter** — picked from the adapters on this PC
+  - **Address Mode** — a **Static / Auto (DHCP)** toggle. Choose **Auto** and Windows obtains everything automatically (the IP fields disappear); choose **Static** and fill in IP, subnet mask, gateway and DNS.
+- Applying a profile asks for a one-time UAC approval, then reconfigures the adapter in seconds.
 
 ---
 
