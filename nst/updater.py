@@ -188,21 +188,15 @@ class UpdateManager(QObject):
             self._apply(version, path)
 
     def _apply(self, version: str, path: str) -> None:
-        self._countdown(version, path, 5)
-
-    def _countdown(self, version: str, path: str, secs: int) -> None:
         self.status.emit(
-            f"Updating to {version} — restarting in {secs}s…")
-        if secs > 0:
-            QTimer.singleShot(1000, lambda: self._countdown(version, path, secs - 1))
-        else:
-            self._launch_and_quit(version, path)
+            f"Update {version} ready — restarting in 5 seconds…")
+        QTimer.singleShot(5000, lambda: self._launch_and_quit(version, path))
 
     def _launch_and_quit(self, version: str, path: str) -> None:
         if not os.path.exists(path):
             self.status.emit(
-                f"Update {version}: installer not found (antivirus may have removed "
-                f"it from Temp). Restart the app to re-download.")
+                f"Update {version}: installer not found (may have been removed "
+                f"by antivirus). Restart the app to re-download.")
             return
         if _launch_installer(path):
             config.clear_staged_update()
