@@ -10,7 +10,7 @@
 ; relaunch it.
 
 #ifndef AppVersion
-  #define AppVersion "4.9.3"
+  #define AppVersion "4.9.4"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"
