@@ -32,7 +32,8 @@ from .signals import MainSignals
 from .theme import theme
 from .widgets import hline
 
-_MONO = "font-family:'Consolas','Cascadia Mono',monospace; font-size:12px;"
+_MONO       = "font-family:'Consolas','Cascadia Mono',monospace; font-size:12px;"
+_MONO_INPUT = _MONO + "padding: 3px 5px; min-height: 22px;"
 
 
 def _derive_internet_gw(ip: str) -> str:
@@ -265,7 +266,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("Internet IP"))
         ip_row = QHBoxLayout()
         self._dual_ip_edit = QLineEdit(config.load_dual_internet_ip())
-        self._dual_ip_edit.setStyleSheet(_MONO)
+        self._dual_ip_edit.setStyleSheet(_MONO_INPUT)
         self._dual_ip_edit.setPlaceholderText("e.g. 192.168.1.50")
         self._dual_ip_edit.textChanged.connect(
             lambda t: config.save_dual_internet_ip(t.strip()))
@@ -279,7 +280,7 @@ class MainWindow(QMainWindow):
         # Domains row
         v.addWidget(QLabel("NRPT Domains  (comma-separated)"))
         self._dual_dom_edit = QLineEdit(",".join(config.load_dual_domains()))
-        self._dual_dom_edit.setStyleSheet(_MONO)
+        self._dual_dom_edit.setStyleSheet(_MONO_INPUT)
         self._dual_dom_edit.setPlaceholderText("e.g. corp.local,company.in")
         self._dual_dom_edit.textChanged.connect(
             lambda t: config.save_dual_domains(
@@ -323,20 +324,49 @@ class MainWindow(QMainWindow):
         return card
 
     def _update_dual_status(self) -> None:
+        """Kick off a background thread to check dual-access status.
+
+        All subprocess calls (route print, powershell NRPT) run off the main
+        thread to avoid freezing the UI. Only started when the Dual Access tab
+        is visible and no check is already running.
+        """
+        if self._stack.currentIndex() != 2:
+            return
+        if getattr(self, "_dual_checking", False):
+            return
+        self._dual_checking = True
+        # Read Qt widget values on the main thread before handing off
         internet_ip = self._dual_ip_edit.text().strip()
         internet_gw = _derive_internet_gw(internet_ip)
-        domains     = config.load_dual_domains()
+        domains     = list(config.load_dual_domains())
+        threading.Thread(
+            target=self._check_dual_status_bg,
+            args=(internet_ip, internet_gw, domains),
+            daemon=True,
+        ).start()
+
+    def _check_dual_status_bg(self, internet_ip: str,
+                               internet_gw: str, domains: list) -> None:
+        """Background thread: run all the slow status checks."""
+        intranet_ok = check_intranet_route()
+        sec_ip_ok   = check_secondary_ip(internet_ip) if internet_ip else False
+        inet_ok     = check_internet_route(internet_gw) if internet_gw else False
+        nrpt_ok     = any(check_nrpt(d) for d in domains) if domains else False
+        # Post results back to the main thread
+        QTimer.singleShot(0, lambda: self._apply_dual_status(
+            intranet_ok, sec_ip_ok, inet_ok, nrpt_ok, internet_ip))
+
+    def _apply_dual_status(self, intranet_ok: bool, sec_ip_ok: bool,
+                            inet_ok: bool, nrpt_ok: bool,
+                            internet_ip: str) -> None:
+        """Main thread: apply status results to UI labels."""
+        self._dual_checking = False
 
         def _mark(lbl, active, text):
             lbl.setText(text)
             lbl.setStyleSheet(_MONO + (
                 f"color:{theme.color('success')};" if active
                 else f"color:{theme.color('danger')};"))
-
-        intranet_ok = check_intranet_route()
-        sec_ip_ok   = check_secondary_ip(internet_ip) if internet_ip else False
-        inet_ok     = check_internet_route(internet_gw) if internet_gw else False
-        nrpt_ok     = any(check_nrpt(d) for d in domains) if domains else False
 
         _mark(self._lbl_da_intranet, intranet_ok,
               f"Intranet Route  :  {'ACTIVE' if intranet_ok else 'INACTIVE'}")
@@ -385,6 +415,7 @@ class MainWindow(QMainWindow):
             ok, msg = enable_dual_access(self._detected_ip, internet_ip, domains)
 
         self.log(msg)
+        self._dual_checking = False   # allow an immediate recheck
         self._update_dual_status()
 
     def _build_traffic(self) -> QWidget:
