@@ -7,5 +7,4 @@ build/
 
 # Build outputs (produced by CI / local builds — never commit)
 dist/
-Output/
 build.log
