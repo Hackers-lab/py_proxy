@@ -11,6 +11,7 @@ the _do_* primitives are called from the elevated CLI in net_tunnel.py.
 
 import socket
 import subprocess
+import winreg
 
 import psutil
 
@@ -32,6 +33,70 @@ def get_adapter_for_ip(ip: str) -> str | None:
             if addr.family == socket.AF_INET and addr.address == ip:
                 return iface
     return None
+
+
+def _get_adapter_guid(adapter_name: str) -> str | None:
+    """Look up the registry GUID for a named adapter."""
+    net_key = r"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, net_key) as nk:
+            i = 0
+            while True:
+                try:
+                    guid = winreg.EnumKey(nk, i); i += 1
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                            rf"{net_key}\{guid}\Connection") as ck:
+                            name, _ = winreg.QueryValueEx(ck, "Name")
+                            if name == adapter_name:
+                                return guid
+                    except OSError:
+                        pass
+                except OSError:
+                    break
+    except OSError:
+        pass
+    return None
+
+
+def get_dhcp_cached_ip(adapter_name: str) -> str | None:
+    """Return the last DHCP-assigned IP for *adapter_name* from the registry.
+
+    Windows caches this even after the adapter is switched to static,
+    so we can suggest the internet IP without any network disruption.
+    """
+    guid = _get_adapter_guid(adapter_name)
+    if not guid:
+        return None
+    key = rf"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{guid}"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+            ip, _ = winreg.QueryValueEx(k, "DhcpIPAddress")
+            return ip if ip and ip not in ("0.0.0.0", "") else None
+    except OSError:
+        return None
+
+
+def suggest_internet_ip(intranet_ip: str) -> str:
+    """Return the most likely internet IP for the user, or empty string.
+
+    Checks the DHCP cache first; falls back to any other non-intranet IP
+    visible on any adapter.
+    """
+    adapter = get_adapter_for_ip(intranet_ip)
+    if adapter:
+        cached = get_dhcp_cached_ip(adapter)
+        if cached and cached != intranet_ip:
+            return cached
+    # Secondary fallback: any non-intranet IPv4 on any adapter
+    for iface, addrs in psutil.net_if_addrs().items():
+        for addr in addrs:
+            if (addr.family == socket.AF_INET
+                    and not addr.address.startswith(("127.", "169.254."))
+                    and addr.address != intranet_ip):
+                return addr.address
+    return ""
+
 
 
 def get_adapter_dns_servers(adapter: str) -> list[str]:
@@ -155,6 +220,19 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str) -> int:
 # ── Public helpers (call from UI; elevate on demand) ─────────────────────────
 
 import sys   # noqa: E402  (after the primitives so circular-import risk is low)
+
+
+def detect_internet_ip(intranet_ip: str) -> tuple[str, str]:
+    """Return (ip, message) for the most likely internet IP.
+
+    Reads the Windows DHCP cache for the adapter — instant, no network
+    disruption. Works even when the adapter is currently set to static,
+    as Windows keeps the last DHCP-assigned IP in the registry.
+    """
+    ip = suggest_internet_ip(intranet_ip)
+    if ip:
+        return ip, f"Internet IP auto-detected: {ip}"
+    return "", "Could not auto-detect — enter the internet IP manually."
 
 
 def enable_dual_access(intranet_ip: str, internet_ip: str,

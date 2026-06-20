@@ -23,6 +23,7 @@ from ..proxy_registry import clear_proxy, read_current_proxy, set_proxy
 from ..proxy_server import ProxyServer
 from ..dual_access import (check_secondary_ip, check_internet_route,
                            check_intranet_route, check_nrpt,
+                           detect_internet_ip,
                            enable_dual_access, disable_dual_access)
 from ..routing import (add_intranet_route, check_route_exists,
                        delete_intranet_route, _network_from_ip)
@@ -266,12 +267,18 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout()
         left.setSpacing(3)
         left.addWidget(QLabel("Internet IP"))
+        ip_row = QHBoxLayout()
         self._dual_ip_edit = QLineEdit(config.load_dual_internet_ip())
         self._dual_ip_edit.setStyleSheet(_MONO)
         self._dual_ip_edit.setPlaceholderText("e.g. 192.168.1.50")
         self._dual_ip_edit.textChanged.connect(
             lambda t: config.save_dual_internet_ip(t.strip()))
-        left.addWidget(self._dual_ip_edit)
+        ip_row.addWidget(self._dual_ip_edit, 1)
+        self._btn_dual_detect = QPushButton("Auto-detect")
+        self._btn_dual_detect.setFixedWidth(90)
+        self._btn_dual_detect.clicked.connect(self._detect_internet_ip)
+        ip_row.addWidget(self._btn_dual_detect)
+        left.addLayout(ip_row)
 
         right = QVBoxLayout()
         right.setSpacing(3)
@@ -355,6 +362,19 @@ class MainWindow(QMainWindow):
             self._set_btn(self._btn_dual, "■  Disable Dual Access", "danger")
         else:
             self._set_btn(self._btn_dual, "▶  Enable Dual Access", "success")
+
+    def _detect_internet_ip(self) -> None:
+        if not self._detected_ip:
+            self.log("No intranet IP detected — connect to the intranet first.")
+            return
+        self._btn_dual_detect.setEnabled(False)
+        self._btn_dual_detect.setText("…")
+        ip, msg = detect_internet_ip(self._detected_ip)
+        self._btn_dual_detect.setEnabled(True)
+        self._btn_dual_detect.setText("Auto-detect")
+        if ip:
+            self._dual_ip_edit.setText(ip)
+        self.log(msg)
 
     def _toggle_dual(self) -> None:
         internet_ip = self._dual_ip_edit.text().strip()
@@ -581,6 +601,11 @@ class MainWindow(QMainWindow):
             self._route_network = _network_from_ip(ip)
             if self._beacon.running:
                 self._beacon.ip = ip
+            # Auto-fill internet IP once from DHCP cache if field is empty
+            if not self._dual_ip_edit.text().strip():
+                suggested, _ = detect_internet_ip(ip)
+                if suggested:
+                    self._dual_ip_edit.setText(suggested)
         else:
             self._lbl_ip.setText("Intranet IP   :  Not detected")
             self._lbl_ip.setStyleSheet(_MONO + f"color:{theme.color('warning')};")
