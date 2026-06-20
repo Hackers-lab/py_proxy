@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
                              QMessageBox, QPlainTextEdit, QPushButton,
                              QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import config
+from .. import __version__, config
 from ..chat import DemoBot
 from ..constants import CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
@@ -419,7 +419,7 @@ class ChatWindow(QWidget):
         self.chat = chat_service
         self._toasts = toasts
         self._log = log_fn
-        self.setWindowTitle("LAN Chat -- Net Split-Tunneler")
+        self.setWindowTitle(f"LAN Chat — Net Split-Tunneler v{__version__}")
         self.resize(900, 600)
         self.setMinimumSize(720, 480)
 

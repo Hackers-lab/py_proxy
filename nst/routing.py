@@ -14,49 +14,62 @@ from .netinfo import run_cmd
 from .win_utils import ELEVATION_CANCELLED, is_admin, run_elevated_and_wait
 
 
-def check_route_exists() -> bool:
-    """True if a 10.0.0.0 mask 255.0.0.0 route is present."""
-    _, out, _ = run_cmd(["route", "print", "10.0.0.0"])
-    return "255.0.0.0" in out and "10.0.0.0" in out
+def _network_from_ip(ip: str) -> str:
+    """Return the /8 network address for *ip* (e.g. '15.3.4.68' → '15.0.0.0')."""
+    return ip.split(".")[0] + ".0.0.0"
+
+
+def check_route_exists(network: str = "") -> bool:
+    """True if a /8 persistent route for *network* is present.
+
+    If *network* is empty the current intranet IP is auto-detected.
+    """
+    if not network:
+        from .netinfo import get_intranet_ip
+        ip = get_intranet_ip()
+        network = _network_from_ip(ip) if ip else "10.0.0.0"
+    _, out, _ = run_cmd(["route", "print", network])
+    return "255.0.0.0" in out and network in out
 
 
 # ── Privileged primitives (must run elevated) ─────────────────────────────────
 
-def _do_add_route(gateway: str) -> int:
-    """Add the persistent route. Returns the ``route`` exit code."""
+def _do_add_route(gateway: str, network: str) -> int:
+    """Add the persistent /8 route. Returns the ``route`` exit code."""
     code, _, _ = run_cmd(
-        ["route", "add", "10.0.0.0", "mask", "255.0.0.0", gateway, "-p"]
+        ["route", "add", network, "mask", "255.0.0.0", gateway, "-p"]
     )
     return code
 
 
-def _do_del_route() -> int:
-    """Delete the persistent route. Returns the ``route`` exit code."""
-    code, _, _ = run_cmd(["route", "delete", "10.0.0.0"])
+def _do_del_route(network: str) -> int:
+    """Delete the persistent /8 route. Returns the ``route`` exit code."""
+    code, _, _ = run_cmd(["route", "delete", network])
     return code
 
 
 # ── Public helpers (elevate on demand) ────────────────────────────────────────
 
-def add_intranet_route(gateway: str) -> tuple[bool, str]:
+def add_intranet_route(gateway: str, network: str) -> tuple[bool, str]:
     if is_admin():
-        code = _do_add_route(gateway)
+        code = _do_add_route(gateway, network)
     else:
-        code = run_elevated_and_wait([sys.executable, "--add-route", gateway])
+        code = run_elevated_and_wait(
+            [sys.executable, "--add-route", gateway, network])
     if code == 0:
-        return True, f"Route 10.0.0.0/8 → {gateway} added (persistent)."
+        return True, f"Route {network}/8 → {gateway} added (persistent)."
     if code == ELEVATION_CANCELLED:
         return False, "Route add cancelled (administrator approval required)."
     return False, f"route add failed (exit {code})."
 
 
-def delete_intranet_route() -> tuple[bool, str]:
+def delete_intranet_route(network: str) -> tuple[bool, str]:
     if is_admin():
-        code = _do_del_route()
+        code = _do_del_route(network)
     else:
-        code = run_elevated_and_wait([sys.executable, "--del-route"])
+        code = run_elevated_and_wait([sys.executable, "--del-route", network])
     if code == 0:
-        return True, "Route 10.0.0.0/8 removed."
+        return True, f"Route {network}/8 removed."
     if code == ELEVATION_CANCELLED:
         return False, "Route removal cancelled (administrator approval required)."
     return False, f"route delete failed (exit {code})."

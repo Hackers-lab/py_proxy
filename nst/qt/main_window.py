@@ -22,7 +22,7 @@ from ..netinfo import (calculate_gateway, check_host_reachable,
 from ..proxy_registry import clear_proxy, read_current_proxy, set_proxy
 from ..proxy_server import ProxyServer
 from ..routing import (add_intranet_route, check_route_exists,
-                       delete_intranet_route)
+                       delete_intranet_route, _network_from_ip)
 from ..win_utils import is_admin
 from .signals import MainSignals
 from .theme import theme
@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self._client_host = proxy_server.split(":")[0] if proxy_server else ""
         self._detected_ip = None
         self._detected_gw = None
+        self._route_network: str = "10.0.0.0"  # updated when route is added
         self._last_net = psutil.net_io_counters()
         self._last_net_t = time.time()
 
@@ -338,17 +339,19 @@ class MainWindow(QMainWindow):
     # ── host toggles ──────────────────────────────────────────────────────────
     def _toggle_route(self) -> None:
         if self._route_active:
-            ok, msg = delete_intranet_route()
+            ok, msg = delete_intranet_route(self._route_network)
             if ok:
                 self._route_active = False
         else:
-            if not self._detected_gw:
+            if not self._detected_ip or not self._detected_gw:
                 QMessageBox.critical(self, "No Intranet IP",
-                                     "Cannot detect a 10.x.x.x address on this machine.")
+                                     "Cannot detect an intranet IP address on this machine.")
                 return
-            ok, msg = add_intranet_route(self._detected_gw)
+            network = _network_from_ip(self._detected_ip)
+            ok, msg = add_intranet_route(self._detected_gw, network)
             if ok:
                 self._route_active = True
+                self._route_network = network
         self.log(msg)
         self._update_route_btn()
 
@@ -437,6 +440,7 @@ class MainWindow(QMainWindow):
             self._lbl_ip.setStyleSheet(_MONO + f"color:{theme.color('success')};")
             self._lbl_gw.setText(f"Gateway       :  {gw}")
             self._detected_ip, self._detected_gw = ip, gw
+            self._route_network = _network_from_ip(ip)
             if self._beacon.running:
                 self._beacon.ip = ip
         else:

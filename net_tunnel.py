@@ -35,9 +35,12 @@ def _route_cli() -> bool:
     if "--add-route" in sys.argv:
         i = sys.argv.index("--add-route")
         gateway = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
-        sys.exit(routing._do_add_route(gateway))
+        network = sys.argv[i + 2] if i + 2 < len(sys.argv) else "10.0.0.0"
+        sys.exit(routing._do_add_route(gateway, network))
     if "--del-route" in sys.argv:
-        sys.exit(routing._do_del_route())
+        i = sys.argv.index("--del-route")
+        network = sys.argv[i + 1] if i + 1 < len(sys.argv) else "10.0.0.0"
+        sys.exit(routing._do_del_route(network))
     return False
 
 

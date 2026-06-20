@@ -47,13 +47,19 @@ def list_local_ipv4() -> list[tuple[str, str, str]]:
 
 
 def get_all_local_ips() -> list[str]:
-    """All local private IPv4 addresses (every interface). Used by LAN chat."""
-    ips = [ip for _iface, ip, _mask in list_local_ipv4() if is_private_ipv4(ip)]
-    if not ips:
-        # No private address — fall back to whatever we can find.
-        ips = [ip for _iface, ip, _mask in list_local_ipv4()]
-    # De-dupe, preserve order.
-    return list(dict.fromkeys(ips))
+    """All local IPv4 addresses (every interface). Used by LAN chat.
+
+    Non-RFC-1918 addresses (e.g. corporate 15.x ranges) are listed first so
+    that intranet interfaces are preferred over 192.168 hotspot/home adapters.
+    RFC-1918 addresses follow, then any remaining addresses as a last resort.
+    """
+    all_entries = list_local_ipv4()
+    non_private = [ip for _, ip, _ in all_entries if not is_private_ipv4(ip)]
+    private = [ip for _, ip, _ in all_entries if is_private_ipv4(ip)]
+    combined = non_private + private
+    if not combined:
+        combined = [ip for _, ip, _ in all_entries]
+    return list(dict.fromkeys(combined))
 
 
 def get_intranet_ip() -> str | None:

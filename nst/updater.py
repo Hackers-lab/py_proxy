@@ -188,13 +188,26 @@ class UpdateManager(QObject):
             self._apply(version, path)
 
     def _apply(self, version: str, path: str) -> None:
-        # Tell the user why the app is about to close, then apply after a short
-        # grace period so the toast is actually seen.
-        self.status.emit(
-            f"Updating to version {version} — the app will restart in 5 seconds…")
-        QTimer.singleShot(5000, lambda: self._launch_and_quit(path))
+        self._countdown(version, path, 5)
 
-    def _launch_and_quit(self, path: str) -> None:
+    def _countdown(self, version: str, path: str, secs: int) -> None:
+        self.status.emit(
+            f"Updating to {version} — restarting in {secs}s…")
+        if secs > 0:
+            QTimer.singleShot(1000, lambda: self._countdown(version, path, secs - 1))
+        else:
+            self._launch_and_quit(version, path)
+
+    def _launch_and_quit(self, version: str, path: str) -> None:
+        if not os.path.exists(path):
+            self.status.emit(
+                f"Update {version}: installer not found (antivirus may have removed "
+                f"it from Temp). Restart the app to re-download.")
+            return
         if _launch_installer(path):
             config.clear_staged_update()
             self._quit_app()
+        else:
+            self.status.emit(
+                f"Update {version}: installer failed to launch. "
+                f"Restart the app to retry, or reinstall from GitHub.")

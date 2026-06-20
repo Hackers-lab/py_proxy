@@ -1,6 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import re
 from PyInstaller.utils.hooks import collect_submodules
+
+# ── Embed Windows version info (publisher, description, version numbers) ──────
+with open('nst/__init__.py', encoding='utf-8') as _f:
+    _m = re.search(r'__version__\s*=\s*"([^"]+)"', _f.read())
+_ver_str = _m.group(1) if _m else '0.0.0'
+_parts = tuple(int(x) for x in (_ver_str.split('.') + ['0', '0', '0', '0'])[:4])
+
+_vi = os.path.join(SPECPATH, 'version_info.txt')
+with open(_vi, 'w', encoding='utf-8') as _vf:
+    _vf.write(f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={_parts},
+    prodvers={_parts},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0,0)
+  ),
+  kids=[
+    StringFileInfo([StringTable(u'040904B0', [
+      StringStruct(u'CompanyName',      u'Hackers-lab'),
+      StringStruct(u'FileDescription',  u'Net Split-Tunneler & Proxy Sharing Tool'),
+      StringStruct(u'FileVersion',      u'{_ver_str}.0'),
+      StringStruct(u'InternalName',     u'NetSplitTunnel'),
+      StringStruct(u'LegalCopyright',   u'Copyright \\xa9 Hackers-lab'),
+      StringStruct(u'OriginalFilename', u'NetSplitTunnel.exe'),
+      StringStruct(u'ProductName',      u'Net Split-Tunneler'),
+      StringStruct(u'ProductVersion',   u'{_ver_str}.0'),
+    ])]),
+    VarFileInfo([VarStruct(u'Translation', [0x0409, 1200])])
+  ]
+)
+""")
 
 # One-folder (onedir) build: the app is distributed via the per-user installer,
 # so there is no need for a single self-extracting exe. onedir avoids the
@@ -78,6 +110,7 @@ exe = EXE(
     # only for the split-tunnel route (see nst/routing.py).
     uac_admin=False,
     icon=['icon.ico'],
+    version=_vi,             # Windows PE version info: CompanyName, FileVersion, etc.
 )
 
 coll = COLLECT(
