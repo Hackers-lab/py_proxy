@@ -1,16 +1,15 @@
 ; Inno Setup script for Net Split-Tunneler — per-user, no-admin installer.
 ;
-; Build (after PyInstaller produces dist\NetSplitTunnel_v<ver>.exe):
-;   ISCC /DAppVersion=4.9.2 installer.iss
+; Build (after PyInstaller produces the onedir folder dist\NetSplitTunnel\):
+;   ISCC /DAppVersion=4.9.5 installer.iss
 ; Output: Output\NetSplitTunnel_Setup_v<ver>.exe
 ;
 ; Per-user (PrivilegesRequired=lowest) means no admin/UAC to install or update.
-; CloseApplications + RestartApplications + AppMutex let a silent self-update
-; (run with /VERYSILENT by nst.updater) close the running app, swap the exe and
-; relaunch it.
+; A silent self-update (run with /VERYSILENT by nst.updater) closes the running
+; app, replaces the folder and relaunches the new version via [Run].
 
 #ifndef AppVersion
-  #define AppVersion "4.9.5"
+  #define AppVersion "4.9.7"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"
@@ -36,7 +35,7 @@ WizardStyle=modern
 ; Detect/close the running instance via its single-instance mutex.
 AppMutex=NetSplitTunnel_SingleInstance_Mutex_3248
 CloseApplications=yes
-; Relaunch is handled by the [Run] entry below (works for silent self-updates
+; Relaunch is handled by the [Run] entries below (works for silent self-updates
 ; too). Restart Manager restart is disabled to avoid a double launch.
 RestartApplications=no
 
@@ -45,22 +44,27 @@ Name: "autostart"; Description: "Start {#AppName} automatically when Windows sta
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-; The versioned PyInstaller exe is installed under a stable name so shortcuts,
-; the Run key and the updater don't change between versions.
-Source: "dist\NetSplitTunnel_v{#AppVersion}.exe"; DestDir: "{app}"; DestName: "{#ExeName}"; Flags: ignoreversion
+; One-folder (onedir) PyInstaller build — copy the whole folder. The exe is
+; already named NetSplitTunnel.exe so shortcuts/Run key/updater stay stable.
+Source: "dist\NetSplitTunnel\*"; DestDir: "{app}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#ExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Registry]
-; HKCU Run-key autostart (the app's in-app toggle manages the same value).
+; HKCU Run-key autostart. The --autostart flag makes the app start to the tray
+; (no main window) at logon. The in-app toggle manages the same value.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueType: string; ValueName: "NetSplitTunnel"; \
-    ValueData: """{app}\{#ExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+    ValueData: """{app}\{#ExeName}"" --autostart"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-; Launch after install — including silent self-updates, so the new version
-; reopens itself once the old one has exited.
+; Interactive install: offer "Launch now" (opens the main window normally).
 Filename: "{app}\{#ExeName}"; Description: "Launch {#AppName} now"; \
-    Flags: nowait postinstall
+    Flags: nowait postinstall skipifsilent
+; Silent self-update: relaunch hidden (tray only) and announce the new version
+; via a toast. Runs only when Setup is silent (i.e. driven by the updater).
+Filename: "{app}\{#ExeName}"; Parameters: "--updated={#AppVersion}"; \
+    Flags: nowait postinstall; Check: WizardSilent

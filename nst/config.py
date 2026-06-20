@@ -21,10 +21,13 @@ from .constants import REG_APP_PATH, REG_RUN_PATH, RUN_VALUE_NAME
 # ── Autostart (HKCU Run key) ──────────────────────────────────────────────────
 
 def _autostart_command() -> str:
-    """The command Windows runs at logon."""
+    """The command Windows runs at logon.
+
+    The --autostart flag makes the app start to the tray (no main window).
+    """
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
-    return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+        return f'"{sys.executable}" --autostart'
+    return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}" --autostart'
 
 
 def set_autostart(enabled: bool) -> tuple[bool, str]:

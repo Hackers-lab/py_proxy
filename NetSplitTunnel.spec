@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import re
 from PyInstaller.utils.hooks import collect_submodules
 
-# Keep the EXE name in lock-step with the package version so each build/release
-# is named NetSplitTunnel_v<version>.exe automatically.
-with open('nst/__init__.py', encoding='utf-8') as _f:
-    _VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', _f.read()).group(1)
+# One-folder (onedir) build: the app is distributed via the per-user installer,
+# so there is no need for a single self-extracting exe. onedir avoids the
+# temp-dir extraction on every launch (faster restart) and, crucially, removes
+# the "Failed to load python3xx.dll from _MEI..." race that one-file builds hit
+# when they relaunch themselves during a self-update.
 
 datas = [('icon.ico', '.'), ('icon.png', '.')]
 binaries = []
@@ -17,7 +17,7 @@ hiddenimports = collect_submodules('nst')
 
 
 # Only QtCore/QtGui/QtWidgets are imported; drop the rest of Qt plus heavy
-# unused stdlib so the one-file exe shrinks (~36MB → ~18-25MB).
+# unused stdlib so the bundled folder stays small.
 excludes = [
     'PyQt6.QtNetwork', 'PyQt6.QtQml', 'PyQt6.QtQuick', 'PyQt6.QtQuickWidgets',
     'PyQt6.QtMultimedia', 'PyQt6.QtMultimediaWidgets', 'PyQt6.QtWebEngineCore',
@@ -61,19 +61,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name=f'NetSplitTunnel_v{_VERSION}',
+    exclude_binaries=True,   # onedir: binaries/datas live in the COLLECT folder
+    name='NetSplitTunnel',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX is disabled on purpose: in a one-file build every compressed binary has
-    # to be decompressed into a temp dir on each launch, which noticeably slows
-    # cold start. Skipping UPX trades a larger .exe for a faster startup.
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -84,4 +78,14 @@ exe = EXE(
     # only for the split-tunnel route (see nst/routing.py).
     uac_admin=False,
     icon=['icon.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='NetSplitTunnel',
 )

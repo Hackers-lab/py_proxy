@@ -23,6 +23,7 @@ from ..proxy_registry import clear_proxy, read_current_proxy, set_proxy
 from ..proxy_server import ProxyServer
 from ..routing import (add_intranet_route, check_route_exists,
                        delete_intranet_route)
+from ..win_utils import is_admin
 from .signals import MainSignals
 from .theme import theme
 from .widgets import hline
@@ -84,7 +85,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, self._poll_status)
 
         theme.changed.connect(self._on_theme)
-        self.log("Application started.  Administrator ✓")
+        mode = "administrator" if is_admin() else "standard user"
+        self.log(f"Application started — v{__version__} ({mode}).")
         if self._route_active:
             self.log("Existing 10.0.0.0 route detected — marked ACTIVE.")
         if self._client_connected:

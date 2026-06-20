@@ -133,7 +133,20 @@ def run() -> None:
     main.set_update_manager(updates)
 
     chat.start()
-    main.show()
+
+    # ── launch mode ───────────────────────────────────────────────────────────
+    # --autostart (logon Run key) and --updated=<ver> (relaunch after a silent
+    # self-update) start to the tray without popping the main window. A manual
+    # launch (Start Menu / double-click) has no flag and shows the window.
+    updated_ver = next((a.split("=", 1)[1] for a in sys.argv
+                        if a.startswith("--updated=")), None)
+    silent_start = updated_ver is not None or "--autostart" in sys.argv
+    if not silent_start:
+        main.show()
+    if updated_ver:
+        toasts.notify("Net Split-Tunneler",
+                      f"Updated to version {updated_ver}.", "update")
+
     updates.start()
 
     sys.exit(app.exec())

@@ -188,6 +188,13 @@ class UpdateManager(QObject):
             self._apply(version, path)
 
     def _apply(self, version: str, path: str) -> None:
+        # Tell the user why the app is about to close, then apply after a short
+        # grace period so the toast is actually seen.
+        self.status.emit(
+            f"Updating to version {version} — the app will restart in 5 seconds…")
+        QTimer.singleShot(5000, lambda: self._launch_and_quit(path))
+
+    def _launch_and_quit(self, path: str) -> None:
         if _launch_installer(path):
             config.clear_staged_update()
             self._quit_app()

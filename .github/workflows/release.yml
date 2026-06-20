@@ -33,7 +33,7 @@ jobs:
           $v = (Select-String -Path "nst\__init__.py" -Pattern '__version__\s*=\s*"([^"]+)"').Matches.Groups[1].Value
           echo "VERSION=$v" >> $env:GITHUB_OUTPUT
 
-      - name: Build executable
+      - name: Build app (onedir)
         # --clean wipes any stale PyInstaller cache so the build is reproducible
         # (a committed build/ cache previously produced wrong-named/stale exes).
         run: pyinstaller NetSplitTunnel.spec --noconfirm --clean
@@ -54,6 +54,5 @@ jobs:
           body_path: README.md
           files: |
             Output/NetSplitTunnel_Setup_v*.exe
-            dist/NetSplitTunnel_v*.exe
           draft: false
           prerelease: false
