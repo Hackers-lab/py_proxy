@@ -9,9 +9,9 @@ import psutil
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                             QFrame, QGroupBox, QHBoxLayout, QLabel,
+                             QFrame, QHBoxLayout, QLabel,
                              QLineEdit, QMainWindow, QMenu, QMessageBox,
-                             QPlainTextEdit, QPushButton, QRadioButton,
+                             QPlainTextEdit, QPushButton,
                              QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, config
@@ -37,6 +37,40 @@ from .widgets import hline
 _MONO       = "font-family:'Consolas','Cascadia Mono',monospace; font-size:12px;"
 _MONO_INPUT = _MONO + "padding: 3px 5px; min-height: 22px;"
 
+# Modern stylesheet for the IP-Switch "Configure Profiles" dialog
+_IPCFG_QSS = """
+    QDialog {{ background: {bg}; }}
+    QTabWidget::pane {{ border: 1px solid {border}; border-radius: 8px;
+                        background: {card}; top: -1px; }}
+    QTabBar::tab {{ background: transparent; color: {muted};
+                   padding: 7px 16px; margin-right: 2px;
+                   border-top-left-radius: 6px; border-top-right-radius: 6px;
+                   font-weight: 600; }}
+    QTabBar::tab:selected {{ background: {card}; color: {text};
+                            border: 1px solid {border}; border-bottom: none; }}
+    QTabBar::tab:hover:!selected {{ color: {text}; }}
+    QLabel#fieldLabel {{ color: {muted}; font-size: 10px; font-weight: 700;
+                        letter-spacing: 1px; margin-top: 2px; }}
+    QLabel#autoInfo {{ color: {success}; background: {panel2};
+                      border: 1px solid {border}; border-radius: 8px;
+                      padding: 14px; font-size: 12px; }}
+    QLineEdit {{ background: {panel2}; color: {text};
+                border: 1px solid {border}; border-radius: 6px; }}
+    QLineEdit:focus {{ border: 1px solid {accent}; }}
+    QComboBox {{ background: {panel2}; color: {text};
+                border: 1px solid {border}; border-radius: 6px;
+                padding: 4px 8px; min-height: 24px; }}
+    QComboBox:focus {{ border: 1px solid {accent}; }}
+    QPushButton#segBtn {{ background: {panel2}; color: {muted};
+                         border: 1px solid {border}; font-weight: 600; }}
+    QPushButton#segBtn[seg="left"]  {{ border-top-left-radius: 7px;
+                         border-bottom-left-radius: 7px; border-right: none; }}
+    QPushButton#segBtn[seg="right"] {{ border-top-right-radius: 7px;
+                         border-bottom-right-radius: 7px; }}
+    QPushButton#segBtn:checked {{ background: {accent}; color: #ffffff;
+                         border: 1px solid {accent}; }}
+"""
+
 
 def _derive_internet_gw(ip: str) -> str:
     parts = ip.split(".") if ip else []
@@ -59,8 +93,8 @@ class MainWindow(QMainWindow):
         self.sig = MainSignals()
 
         self.setWindowTitle("Net Split-Tunneler & Proxy Sharing Tool")
-        self.setMinimumSize(560, 600)
-        self.resize(580, 640)
+        self.setMinimumSize(580, 720)
+        self.resize(600, 780)
 
         # services
         self._host_has_internet = False
@@ -484,75 +518,108 @@ class MainWindow(QMainWindow):
     def _open_ipswitch_settings(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("IP Switch — Configure Profiles")
-        dlg.setMinimumWidth(420)
+        dlg.setMinimumWidth(440)
+        dlg.setStyleSheet(_IPCFG_QSS.format(
+            bg=theme.color("bg"), card=theme.color("panel"),
+            panel2=theme.color("panel2"),
+            text=theme.color("text_pri"), muted=theme.color("text_sec"),
+            border=theme.color("border"), accent=theme.color("accent"),
+            success=theme.color("success")))
         dlg_v = QVBoxLayout(dlg)
+        dlg_v.setSpacing(10)
 
         tabs = QTabWidget()
         editors: list[dict] = []
-
         adapters = list_adapters()
 
         for n in range(1, 5):
             p = config.load_ip_profile(n)
             page = QWidget()
             pv = QVBoxLayout(page)
-            pv.setSpacing(6)
+            pv.setContentsMargins(14, 14, 14, 14)
+            pv.setSpacing(10)
 
-            def _row(label, widget, layout=pv):
-                r = QHBoxLayout()
-                lbl = QLabel(label)
-                lbl.setFixedWidth(80)
-                r.addWidget(lbl)
-                r.addWidget(widget, 1)
-                layout.addLayout(r)
+            def _field(label, widget, layout):
+                lbl = QLabel(label.upper())
+                lbl.setObjectName("fieldLabel")
+                layout.addWidget(lbl)
+                layout.addWidget(widget)
 
-            e_name = QLineEdit(p["name"]); e_name.setPlaceholderText(f"Profile {n}")
-            _row("Name", e_name)
+            e_name = QLineEdit(p["name"])
+            e_name.setPlaceholderText(f"e.g. Office Intranet")
+            e_name.setStyleSheet(_MONO_INPUT)
+            _field("Profile Name", e_name, pv)
 
             e_adapter = QComboBox()
             e_adapter.addItems(adapters)
             if p["adapter"] in adapters:
                 e_adapter.setCurrentText(p["adapter"])
-            _row("Adapter", e_adapter)
+            _field("Network Adapter", e_adapter, pv)
 
-            mode_grp = QGroupBox("Mode")
-            mg = QHBoxLayout(mode_grp)
-            r_static = QRadioButton("Static"); r_dhcp = QRadioButton("DHCP")
-            if p["mode"] == "dhcp":
-                r_dhcp.setChecked(True)
-            else:
-                r_static.setChecked(True)
-            mg.addWidget(r_static); mg.addWidget(r_dhcp)
-            pv.addWidget(mode_grp)
+            # ── Segmented Static / Auto toggle ──────────────────────────────
+            mode_lbl = QLabel("ADDRESS MODE")
+            mode_lbl.setObjectName("fieldLabel")
+            pv.addWidget(mode_lbl)
 
-            static_box = QGroupBox()
-            static_box.setFlat(True)
+            seg = QHBoxLayout(); seg.setSpacing(0)
+            b_static = QPushButton("⚙  Static")
+            b_auto   = QPushButton("⟳  Auto (DHCP)")
+            for b in (b_static, b_auto):
+                b.setObjectName("segBtn")
+                b.setCheckable(True)
+                b.setMinimumHeight(34)
+            b_static.setProperty("seg", "left")
+            b_auto.setProperty("seg", "right")
+            seg.addWidget(b_static); seg.addWidget(b_auto)
+            pv.addLayout(seg)
+
+            # ── Static fields container ─────────────────────────────────────
+            static_box = QWidget()
             sv = QVBoxLayout(static_box)
-            sv.setSpacing(4)
+            sv.setContentsMargins(0, 4, 0, 0)
+            sv.setSpacing(8)
 
             def _srow(label, val, ph=""):
                 e = QLineEdit(val); e.setPlaceholderText(ph)
                 e.setStyleSheet(_MONO_INPUT)
-                r2 = QHBoxLayout()
-                lbl2 = QLabel(label); lbl2.setFixedWidth(80)
-                r2.addWidget(lbl2); r2.addWidget(e, 1)
-                sv.addLayout(r2)
+                lbl = QLabel(label.upper()); lbl.setObjectName("fieldLabel")
+                sv.addWidget(lbl); sv.addWidget(e)
                 return e
 
-            e_ip   = _srow("IP",      p["ip"],      "e.g. 10.0.0.50")
-            e_mask = _srow("Mask",    p["mask"],    "e.g. 255.255.255.0")
-            e_gw   = _srow("Gateway", p["gateway"], "e.g. 10.0.0.1")
-            e_dns  = _srow("DNS",     p["dns"],     "e.g. 10.0.0.1,8.8.8.8")
+            e_ip   = _srow("IP Address",  p["ip"],      "e.g. 10.0.0.50")
+            e_mask = _srow("Subnet Mask", p["mask"],    "e.g. 255.255.255.0")
+            e_gw   = _srow("Gateway",     p["gateway"], "e.g. 10.0.0.1")
+            e_dns  = _srow("DNS Servers", p["dns"],     "e.g. 10.0.0.1, 8.8.8.8")
             pv.addWidget(static_box)
 
-            def _toggle_static(checked, sb=static_box, rb=r_static):
-                sb.setEnabled(rb.isChecked())
-            r_static.toggled.connect(_toggle_static)
-            static_box.setEnabled(r_static.isChecked())
+            # ── Auto info panel (shown when Auto is selected) ───────────────
+            auto_box = QWidget()
+            av = QVBoxLayout(auto_box)
+            av.setContentsMargins(0, 8, 0, 0)
+            auto_info = QLabel("⟳  Address, gateway and DNS will be obtained "
+                               "automatically from the network (DHCP).")
+            auto_info.setObjectName("autoInfo")
+            auto_info.setWordWrap(True)
+            av.addWidget(auto_info)
+            pv.addWidget(auto_box)
+
+            pv.addStretch(1)
+
+            def _set_mode(is_static, sb=static_box, ab=auto_box,
+                          bs=b_static, ba=b_auto):
+                bs.setChecked(is_static)
+                ba.setChecked(not is_static)
+                sb.setVisible(is_static)
+                ab.setVisible(not is_static)
+                for b in (bs, ba):
+                    b.style().unpolish(b); b.style().polish(b)
+
+            b_static.clicked.connect(lambda _=False, f=_set_mode: f(True))
+            b_auto.clicked.connect(lambda _=False, f=_set_mode: f(False))
+            _set_mode(p["mode"] != "dhcp")
 
             editors.append(dict(
-                n=n, name=e_name, adapter=e_adapter,
-                r_static=r_static, r_dhcp=r_dhcp,
+                n=n, name=e_name, adapter=e_adapter, b_auto=b_auto,
                 ip=e_ip, mask=e_mask, gw=e_gw, dns=e_dns,
             ))
             tabs.addTab(page, f"Profile {n}")
@@ -570,7 +637,7 @@ class MainWindow(QMainWindow):
                     e["n"],
                     name    = e["name"].text().strip(),
                     adapter = e["adapter"].currentText(),
-                    mode    = "dhcp" if e["r_dhcp"].isChecked() else "static",
+                    mode    = "dhcp" if e["b_auto"].isChecked() else "static",
                     ip      = e["ip"].text().strip(),
                     mask    = e["mask"].text().strip(),
                     gateway = e["gw"].text().strip(),

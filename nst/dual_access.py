@@ -16,7 +16,8 @@ import winreg
 import psutil
 
 from .netinfo import run_cmd
-from .win_utils import ELEVATION_CANCELLED, is_admin, run_elevated_and_wait
+from .win_utils import (ELEVATION_CANCELLED, is_admin, run_elevated_and_wait,
+                        self_relaunch_cmd)
 
 # ── Defaults (wbsedcl specific; user can override in config) ──────────────────
 DEFAULT_DNS     = ["10.251.33.80", "10.251.33.90"]
@@ -253,7 +254,7 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
         code = _do_enable(*args)
     else:
         code = run_elevated_and_wait(
-            [sys.executable, "--dual-enable"] + args)
+            self_relaunch_cmd() + ["--dual-enable"] + args)
 
     if code == 0:
         return True, (f"Dual access enabled — internet via {internet_gw}, "
@@ -275,7 +276,7 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
         code = _do_disable(*args)
     else:
         code = run_elevated_and_wait(
-            [sys.executable, "--dual-disable"] + args)
+            self_relaunch_cmd() + ["--dual-disable"] + args)
 
     if code == 0:
         return True, "Dual access disabled — intranet only."

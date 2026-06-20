@@ -11,7 +11,8 @@ import subprocess
 import psutil
 
 from .netinfo import run_cmd
-from .win_utils import ELEVATION_CANCELLED, is_admin, run_elevated_and_wait
+from .win_utils import (ELEVATION_CANCELLED, is_admin, run_elevated_and_wait,
+                        self_relaunch_cmd)
 
 
 def list_adapters() -> list[str]:
@@ -85,7 +86,8 @@ def apply_profile(adapter: str, mode: str, ip: str, mask: str,
     if is_admin():
         code = _do_apply(*args)
     else:
-        code = run_elevated_and_wait([sys.executable, "--apply-profile"] + args)
+        code = run_elevated_and_wait(
+            self_relaunch_cmd() + ["--apply-profile"] + args)
 
     label = f"DHCP" if mode == "dhcp" else ip
     if code == 0:

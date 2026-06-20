@@ -17,6 +17,19 @@ def get_resource_path(relative_path: str) -> str:
 
 # ── Admin & single-instance elevation ─────────────────────────────────────────
 
+def self_relaunch_cmd() -> list[str]:
+    """Base command to relaunch this application.
+
+    Frozen (PyInstaller): the exe is its own launcher, so ``[exe]`` is enough.
+    From source: ``sys.executable`` is python.exe, which would treat our
+    ``--flag`` as its own option (and exit 2). So we must also pass the script
+    path: ``[python.exe, net_tunnel.py]``. CLI flags are appended by the caller.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(sys.argv[0])]
+
+
 _app_mutex = None
 
 

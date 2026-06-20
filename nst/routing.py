@@ -11,7 +11,8 @@ UAC (see :func:`nst.win_utils.run_elevated_and_wait` and the CLI dispatch in
 import sys
 
 from .netinfo import run_cmd
-from .win_utils import ELEVATION_CANCELLED, is_admin, run_elevated_and_wait
+from .win_utils import (ELEVATION_CANCELLED, is_admin, run_elevated_and_wait,
+                        self_relaunch_cmd)
 
 
 def _network_from_ip(ip: str) -> str:
@@ -55,7 +56,7 @@ def add_intranet_route(gateway: str, network: str) -> tuple[bool, str]:
         code = _do_add_route(gateway, network)
     else:
         code = run_elevated_and_wait(
-            [sys.executable, "--add-route", gateway, network])
+            self_relaunch_cmd() + ["--add-route", gateway, network])
     if code == 0:
         return True, f"Route {network}/8 → {gateway} added (persistent)."
     if code == ELEVATION_CANCELLED:
@@ -67,7 +68,8 @@ def delete_intranet_route(network: str) -> tuple[bool, str]:
     if is_admin():
         code = _do_del_route(network)
     else:
-        code = run_elevated_and_wait([sys.executable, "--del-route", network])
+        code = run_elevated_and_wait(
+            self_relaunch_cmd() + ["--del-route", network])
     if code == 0:
         return True, f"Route {network}/8 removed."
     if code == ELEVATION_CANCELLED:
