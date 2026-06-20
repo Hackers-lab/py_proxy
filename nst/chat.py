@@ -631,7 +631,7 @@ class ChatService:
         """
         bot = self._virtual.get(ip)
         if bot is not None:
-            bot.on_user_message(text)
+            bot.on_user_message(text, mid)
             return True
 
         msg: dict = {
@@ -833,10 +833,22 @@ class DemoBot:
                                          None, uuid.uuid4().hex[:16])
         threading.Timer(delay, fire).start()
 
+    def _receipt(self, mid: str, state: str, delay: float) -> None:
+        """Simulate the peer acking one of the user's messages (delivered/read)."""
+        def fire():
+            if self.service._on_receipt and self.IP in self.service._virtual:
+                self.service._on_receipt(self.IP, mid, state)
+        threading.Timer(delay, fire).start()
+
     def greet(self) -> None:
         self._say("👋 Hi! I'm a demo peer. Send me a message to see chat in action.", 1.2)
 
-    def on_user_message(self, _text: str) -> None:
+    def on_user_message(self, _text: str, mid: str = "") -> None:
+        # Walk the user's bubble through sent → delivered → read so the demo
+        # shows the receipt ticks (grey ✓, grey ✓✓, then green ✓✓).
+        if mid:
+            self._receipt(mid, "delivered", 0.5)
+            self._receipt(mid, "read", 1.5)
         reply = self._REPLIES[self._i % len(self._REPLIES)]
         self._i += 1
-        self._say(reply, 0.9)
+        self._say(reply, 1.8)
