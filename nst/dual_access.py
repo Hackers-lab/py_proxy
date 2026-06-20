@@ -108,6 +108,21 @@ def get_adapter_dns_servers(adapter: str) -> list[str]:
     return found if found else DEFAULT_DNS
 
 
+def get_adapter_dns_config(adapter: str) -> tuple[str, list[str]]:
+    """Return the adapter's *current* DNS setup as (mode, servers).
+
+    mode is "dhcp" (servers obtained automatically) or "static" (manually set).
+    Captured before enabling dual access so it can be restored exactly on
+    disable — corporate PCs usually have static intranet DNS we must not lose.
+    """
+    import re as _re
+    _, out, _ = run_cmd(
+        ["netsh", "interface", "ipv4", "show", "dnsservers", adapter])
+    servers = _re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', out)
+    mode = "static" if "statically configured" in out.lower() else "dhcp"
+    return mode, servers
+
+
 # ── Status checks ─────────────────────────────────────────────────────────────
 
 def check_secondary_ip(internet_ip: str) -> bool:
@@ -197,8 +212,10 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
     return 0
 
 
-def _do_disable(internet_ip: str, adapter: str, domain_csv: str) -> int:
-    domains = [d.strip() for d in domain_csv.split(",") if d.strip()]
+def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
+                prev_dns_mode: str = "dhcp", prev_dns_csv: str = "") -> int:
+    domains  = [d.strip() for d in domain_csv.split(",") if d.strip()]
+    prev_dns = [d.strip() for d in prev_dns_csv.split(",") if d.strip()]
 
     # 1. Remove secondary IP
     run_cmd(["netsh", "interface", "ip", "delete", "address",
@@ -212,8 +229,15 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str) -> int:
         _ps(f'Remove-DnsClientNrptRule -Namespace ".{domain}" '
             f'-Force -ErrorAction SilentlyContinue')
 
-    # 4. Restore DNS to DHCP
-    run_cmd(["netsh", "interface", "ip", "set", "dns", adapter, "dhcp"])
+    # 4. Restore DNS exactly as it was before dual access was enabled
+    if prev_dns_mode == "static" and prev_dns:
+        run_cmd(["netsh", "interface", "ip", "set", "dns",
+                 adapter, "static", prev_dns[0], "primary"])
+        for idx, srv in enumerate(prev_dns[1:], start=2):
+            run_cmd(["netsh", "interface", "ip", "add", "dns",
+                     adapter, srv, f"index={idx}"])
+    else:
+        run_cmd(["netsh", "interface", "ip", "set", "dns", adapter, "dhcp"])
 
     return 0
 
@@ -249,6 +273,11 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
     dns_csv      = ",".join(dns_servers)
     domain_csv   = ",".join(domains)
 
+    # Remember the original DNS setup so disable can restore it exactly
+    from . import config
+    prev_mode, prev_servers = get_adapter_dns_config(adapter)
+    config.save_dual_prev_dns(prev_mode, prev_servers)
+
     args = [intranet_gw, internet_ip, internet_gw, adapter, dns_csv, domain_csv]
     if is_admin():
         code = _do_enable(*args)
@@ -271,7 +300,11 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
         return False, f"Cannot find adapter for intranet IP {intranet_ip}."
 
     domain_csv = ",".join(domains)
-    args = [internet_ip, adapter, domain_csv]
+    # Restore the DNS setup captured when dual access was enabled
+    from . import config
+    prev_mode, prev_servers = config.load_dual_prev_dns()
+    prev_dns_csv = ",".join(prev_servers)
+    args = [internet_ip, adapter, domain_csv, prev_mode, prev_dns_csv]
     if is_admin():
         code = _do_disable(*args)
     else:

@@ -475,6 +475,17 @@ def load_dual_domains() -> list[str]:
 def save_dual_domains(domains: list[str]) -> bool:
     return _write_value("DualDomains", winreg.REG_SZ, ",".join(domains))
 
+def save_dual_prev_dns(mode: str, servers: list[str]) -> bool:
+    """Remember the adapter's DNS setup before dual access changed it."""
+    ok = _write_value("DualPrevDnsMode", winreg.REG_SZ, mode or "dhcp")
+    return _write_value("DualPrevDnsServers", winreg.REG_SZ,
+                        ",".join(servers)) and ok
+
+def load_dual_prev_dns() -> tuple[str, list[str]]:
+    mode = str(_read_value("DualPrevDnsMode", "dhcp")).strip() or "dhcp"
+    val  = str(_read_value("DualPrevDnsServers", "")).strip()
+    return mode, [s.strip() for s in val.split(",") if s.strip()]
+
 
 # ── IP Switch profiles ─────────────────────────────────────────────────────────
 

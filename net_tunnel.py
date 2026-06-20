@@ -58,9 +58,11 @@ def _route_cli() -> bool:
         i = sys.argv.index("--dual-disable")
         a = sys.argv
         sys.exit(dual_access._do_disable(
-            internet_ip = a[i+1] if i+1 < len(a) else "",
-            adapter     = a[i+2] if i+2 < len(a) else "",
-            domain_csv  = a[i+3] if i+3 < len(a) else "",
+            internet_ip   = a[i+1] if i+1 < len(a) else "",
+            adapter       = a[i+2] if i+2 < len(a) else "",
+            domain_csv    = a[i+3] if i+3 < len(a) else "",
+            prev_dns_mode = a[i+4] if i+4 < len(a) else "dhcp",
+            prev_dns_csv  = a[i+5] if i+5 < len(a) else "",
         ))
 
     if "--apply-profile" in sys.argv:
