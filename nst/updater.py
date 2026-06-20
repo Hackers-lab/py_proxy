@@ -26,8 +26,10 @@ from . import __version__, config
 
 GITHUB_LATEST = "https://api.github.com/repos/Hackers-lab/py_proxy/releases/latest"
 _CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000  # 24 hours
-_SILENT_FLAGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES",
-                 "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/NORESTART"]
+# /VERYSILENT  — no UI; /NORESTART — never reboot the machine.
+# The installer's own [Run] entry relaunches the app, so we don't ask Restart
+# Manager to do it (which would double-launch).
+_SILENT_FLAGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
 
 
 # ── version helpers ───────────────────────────────────────────────────────────

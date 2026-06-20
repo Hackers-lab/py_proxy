@@ -10,7 +10,7 @@
 ; relaunch it.
 
 #ifndef AppVersion
-  #define AppVersion "4.9.4"
+  #define AppVersion "4.9.5"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"
@@ -36,7 +36,9 @@ WizardStyle=modern
 ; Detect/close the running instance via its single-instance mutex.
 AppMutex=NetSplitTunnel_SingleInstance_Mutex_3248
 CloseApplications=yes
-RestartApplications=yes
+; Relaunch is handled by the [Run] entry below (works for silent self-updates
+; too). Restart Manager restart is disabled to avoid a double launch.
+RestartApplications=no
 
 [Tasks]
 Name: "autostart"; Description: "Start {#AppName} automatically when Windows starts"; GroupDescription: "Startup:"
@@ -58,7 +60,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueData: """{app}\{#ExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-; Offer to launch after an interactive install; skipped during silent self-update
-; (there, RestartApplications relaunches the app instead).
+; Launch after install — including silent self-updates, so the new version
+; reopens itself once the old one has exited.
 Filename: "{app}\{#ExeName}"; Description: "Launch {#AppName} now"; \
-    Flags: nowait postinstall skipifsilent
+    Flags: nowait postinstall
