@@ -261,12 +261,8 @@ class MainWindow(QMainWindow):
     def _build_dual(self) -> QWidget:
         card, v = self._card("DUAL ACCESS  —  LAN + Internet simultaneously")
 
-        # Two-column input row
-        cols = QHBoxLayout()
-
-        left = QVBoxLayout()
-        left.setSpacing(3)
-        left.addWidget(QLabel("Internet IP"))
+        # Internet IP row
+        v.addWidget(QLabel("Internet IP"))
         ip_row = QHBoxLayout()
         self._dual_ip_edit = QLineEdit(config.load_dual_internet_ip())
         self._dual_ip_edit.setStyleSheet(_MONO)
@@ -274,27 +270,21 @@ class MainWindow(QMainWindow):
         self._dual_ip_edit.textChanged.connect(
             lambda t: config.save_dual_internet_ip(t.strip()))
         ip_row.addWidget(self._dual_ip_edit, 1)
-        self._btn_dual_detect = QPushButton("Auto-detect")
-        self._btn_dual_detect.setFixedWidth(90)
+        self._btn_dual_detect = QPushButton("Auto")
+        self._btn_dual_detect.setFixedWidth(52)
         self._btn_dual_detect.clicked.connect(self._detect_internet_ip)
         ip_row.addWidget(self._btn_dual_detect)
-        left.addLayout(ip_row)
+        v.addLayout(ip_row)
 
-        right = QVBoxLayout()
-        right.setSpacing(3)
-        right.addWidget(QLabel("NRPT Domains  (comma-separated)"))
+        # Domains row
+        v.addWidget(QLabel("NRPT Domains  (comma-separated)"))
         self._dual_dom_edit = QLineEdit(",".join(config.load_dual_domains()))
         self._dual_dom_edit.setStyleSheet(_MONO)
         self._dual_dom_edit.setPlaceholderText("e.g. corp.local,company.in")
         self._dual_dom_edit.textChanged.connect(
             lambda t: config.save_dual_domains(
                 [s.strip() for s in t.split(",") if s.strip()]))
-        right.addWidget(self._dual_dom_edit)
-
-        cols.addLayout(left, 1)
-        cols.addSpacing(10)
-        cols.addLayout(right, 1)
-        v.addLayout(cols)
+        v.addWidget(self._dual_dom_edit)
 
         hint = QLabel("Intranet DNS is auto-read from your adapter — no extra config needed.")
         hint.setObjectName("muted")
@@ -371,7 +361,7 @@ class MainWindow(QMainWindow):
         self._btn_dual_detect.setText("…")
         ip, msg = detect_internet_ip(self._detected_ip)
         self._btn_dual_detect.setEnabled(True)
-        self._btn_dual_detect.setText("Auto-detect")
+        self._btn_dual_detect.setText("Auto")
         if ip:
             self._dual_ip_edit.setText(ip)
         self.log(msg)
