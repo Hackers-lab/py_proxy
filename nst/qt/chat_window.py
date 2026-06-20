@@ -1245,10 +1245,18 @@ class ChatWindow(QWidget):
         self._messages.scroll_to_bottom()
 
     def _tick_parts(self, status: str, is_out: bool) -> tuple[str, str]:
-        """Return (glyph, color) for a delivery-status tick on an out bubble."""
-        muted = "rgba(255,255,255,0.65)" if is_out else theme.color("text_sec")
+        """Return (glyph, color) for a delivery-status tick on an out bubble.
+
+        Three clearly distinct states on the blue outgoing bubble:
+          sent       single dim tick   ✓
+          delivered  double dim tick   ✓✓   (reached their device)
+          read       double GREEN tick ✓✓   (they opened it) -- bright green so
+                     it is unmistakable against the blue bubble and clearly
+                     different from the faded 'delivered' ticks.
+        """
+        muted = "rgba(255,255,255,0.6)" if is_out else theme.color("text_sec")
         if status == "read":
-            return "✓✓", "#a8e0ff" if is_out else theme.color("accent")
+            return "✓✓", "#3ddc84" if is_out else "#1aa260"
         if status == "delivered":
             return "✓✓", muted
         if status == "queued":
