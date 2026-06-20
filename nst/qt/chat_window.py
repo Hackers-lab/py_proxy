@@ -2901,6 +2901,20 @@ class ChatWindow(QWidget):
         key = self._active
         if not key:
             return
+        name = self._display_name(key)
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Clear chat")
+        confirm.setText(f"Clear all messages with {name}?")
+        confirm.setInformativeText(
+            "This permanently removes the local message history for this "
+            "conversation. It cannot be undone.")
+        confirm.setStandardButtons(
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        confirm.button(QMessageBox.StandardButton.Yes).setText("Clear")
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
         self._drop_index(key)
         if self._is_group(key):
             self._conversations[key] = []
