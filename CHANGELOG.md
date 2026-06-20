@@ -8,6 +8,11 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.11.1 — 2026-06-21
+- The **event log** now reports software updates as they happen: when a newer
+  version is **found**, the installer's **size**, **download progress**, and
+  completion — so a silent self-update is no longer invisible.
+
 ## v4.11.0 — 2026-06-21
 - **Fixed: the “Stop” button** on the *“X is viewing your screen”* banner did
   nothing — clicking it now actually ends the session.
