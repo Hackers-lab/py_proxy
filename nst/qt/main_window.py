@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Net Split-Tunneler & Proxy Sharing Tool")
         self.setMinimumSize(580, 720)
-        self.resize(600, 780)
+        self.resize(600, 720)
 
         # services
         self._host_has_internet = False
