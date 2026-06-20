@@ -355,6 +355,58 @@ class _ReplyButton(QAbstractButton):
         p.drawPath(shaft)
 
 
+class _ClipButton(QAbstractButton):
+    """A solid-coloured 'attach' button with a simple paperclip drawn by
+    QPainter (no font glyph). Vertically expands to match the composer."""
+
+    def __init__(self, bg: str) -> None:
+        super().__init__()
+        self._bg = QColor(bg)
+        self._hover = False
+        self.setFixedSize(44, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Attach a file")
+
+    def enterEvent(self, e) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        # Rounded coloured background.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._bg.lighter(115) if self._hover else self._bg)
+        p.drawRoundedRect(0, 0, w, h, 10, 10)
+        # Centered paperclip: one continuous rounded wire (outer loop + inner
+        # short side), scaled to a fixed icon size regardless of button height.
+        pen = QPen(QColor("#ffffff"))
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = w / 2.0, h / 2.0
+        ih = 18.0
+        top, bot = cy - ih / 2.0, cy + ih / 2.0
+        r = 3.6
+        clip = QPainterPath()
+        clip.moveTo(cx - r, top + 2)
+        clip.lineTo(cx - r, bot - r)
+        clip.cubicTo(cx - r, bot, cx + r, bot, cx + r, bot - r)
+        clip.lineTo(cx + r, top + r)
+        clip.cubicTo(cx + r, top, cx, top, cx, top + r)
+        clip.lineTo(cx, bot - r)
+        p.drawPath(clip)
+
+
 class _Composer(QPlainTextEdit):
     """Multi-line message input: Enter sends, Shift+Enter inserts a newline.
 
@@ -362,6 +414,7 @@ class _Composer(QPlainTextEdit):
     """
 
     submit = pyqtSignal()
+    heightChanged = pyqtSignal(int)   # emitted whenever the auto-height changes
 
     def __init__(self, max_lines: int = 6) -> None:
         super().__init__()
@@ -430,6 +483,7 @@ class _Composer(QPlainTextEdit):
         target = int(round(shown * line)) + 2 * dm + 2 * fr + 4
         if self.height() != target:
             self.setFixedHeight(target)
+            self.heightChanged.emit(target)
         self._place_emoji()
         self.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if visual_lines > self._max_lines + 0.01
@@ -811,24 +865,20 @@ class ChatWindow(QWidget):
         self._btn_emoji.clicked.connect(self._open_emoji_picker)
         self._entry.set_emoji_button(self._btn_emoji)
 
-        # File + Send: both solid-coloured, sized to the single-line composer.
-        self._btn_file = QPushButton("📎")
-        self._btn_file.setFixedSize(44, 40)
-        self._btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_file.setToolTip("Attach a file")
-        self._btn_file.setStyleSheet(
-            "QPushButton{background:%s; color:#fff; border:none; border-radius:10px;"
-            " font-size:16px;} QPushButton:hover{background:%s;}"
-            % (theme.color("accent2"), theme.color("accent2")))
+        # File + Send: both solid-coloured and kept exactly the composer's
+        # height (synced via the composer's heightChanged signal).
+        self._btn_file = _ClipButton(theme.color("accent2"))
         self._btn_file.clicked.connect(self._attach_file)
         comp.addWidget(self._btn_file, alignment=Qt.AlignmentFlag.AlignBottom)
 
         self._btn_send = QPushButton("➤")
-        self._btn_send.setFixedSize(44, 40)
+        self._btn_send.setFixedWidth(44)
         self._btn_send.setToolTip("Send  (Enter)")
         self._btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_send.clicked.connect(self._send)
         comp.addWidget(self._btn_send, alignment=Qt.AlignmentFlag.AlignBottom)
+        self._entry.heightChanged.connect(self._sync_composer_buttons)
+        self._sync_composer_buttons(self._entry.height())
         self._update_send_enabled()
         self._composer = QWidget()
         self._composer.setLayout(comp)
@@ -1605,6 +1655,12 @@ class ChatWindow(QWidget):
     def _cancel_reply(self) -> None:
         self._reply_to = None
         self._reply_bar.hide()
+
+    def _sync_composer_buttons(self, h: int) -> None:
+        """Keep the file + send buttons exactly as tall as the composer."""
+        h = max(36, int(h))
+        self._btn_file.setFixedSize(44, h)
+        self._btn_send.setFixedSize(44, h)
 
     def _update_send_enabled(self) -> None:
         """Light up the circular Send button only when there's text to send."""
