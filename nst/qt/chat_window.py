@@ -308,23 +308,31 @@ class _MsgRow(QWidget):
         self._grey = ""
         self._blue = ""
 
-    def attach_reply(self, btn: "QPushButton", grey: str, blue: str) -> None:
+    def attach_reply(self, btn: "QPushButton", base: str, accent: str) -> None:
         self._reply_btn = btn
-        self._grey, self._blue = grey, blue
-        self._tint(grey)
+        self._base, self._accent = base, accent
+        self._style(False)
 
-    def _tint(self, color: str) -> None:
-        if self._reply_btn is not None:
+    def _style(self, hovering: bool) -> None:
+        if self._reply_btn is None:
+            return
+        if hovering:
+            # Filled accent circle with a white arrow while the row is hovered.
+            self._reply_btn.setStyleSheet(
+                "QPushButton{border:none; border-radius:13px; font-size:16px;"
+                " background:%s; color:#ffffff;}" % self._accent)
+        else:
+            # Always-visible accent-coloured arrow (no background).
             self._reply_btn.setStyleSheet(
                 "QPushButton{border:none; background:transparent;"
-                " font-size:16px; color:%s;}" % color)
+                " font-size:17px; font-weight:700; color:%s;}" % self._base)
 
     def enterEvent(self, e) -> None:
-        self._tint(self._blue)
+        self._style(True)
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:
-        self._tint(self._grey)
+        self._style(False)
         super().leaveEvent(e)
 
 
@@ -1522,13 +1530,13 @@ class ChatWindow(QWidget):
         vv.addWidget(bubble)
         vv.addWidget(reaction_row)
 
-        # Reply affordance: always-visible grey arrow on the bubble's inner side,
-        # turning the accent colour while the row is hovered. The trailing
-        # U+FE0E forces text (not emoji) rendering so it shows as a crisp arrow
-        # rather than a coloured blob.
+        # Reply affordance: an always-visible accent-coloured arrow on the
+        # bubble's inner side, becoming a filled accent circle while the row is
+        # hovered. Plain "↩" (no emoji variation selector) renders as a crisp
+        # text arrow in Segoe UI.
         snd = "You" if is_out else sender
-        reply_btn = QPushButton("↩︎")
-        reply_btn.setFixedSize(26, 30)
+        reply_btn = QPushButton("↩")
+        reply_btn.setFixedSize(26, 26)
         reply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reply_btn.setToolTip("Reply")
         reply_btn.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
@@ -1537,7 +1545,7 @@ class ChatWindow(QWidget):
         hsl = QHBoxLayout(hslot)
         hsl.setContentsMargins(1, 0, 1, 0)
         hsl.addWidget(reply_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
-        row.attach_reply(reply_btn, theme.color("text_sec"), theme.color("accent"))
+        row.attach_reply(reply_btn, theme.color("accent"), theme.color("accent"))
 
         # Avatar beside incoming messages in a group/channel so it's clear who
         # is speaking. Grouped (consecutive) messages get a blank spacer to keep
