@@ -44,6 +44,9 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
+          # Start from a clean Output dir so no stale installer can be published
+          # alongside this build (a leftover asset breaks the auto-updater).
+          if (Test-Path Output) { Remove-Item Output -Recurse -Force }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           & $iscc "/DAppVersion=${{ steps.ver.outputs.VERSION }}" installer.iss
 
@@ -52,7 +55,9 @@ jobs:
         with:
           name: "Net Split-Tunneler v${{ steps.ver.outputs.VERSION }}"
           body_path: README.md
+          # Pin to the exact version — never a wildcard — so only this build's
+          # installer is attached.
           files: |
-            Output/NetSplitTunnel_Setup_v*.exe
+            Output/NetSplitTunnel_Setup_v${{ steps.ver.outputs.VERSION }}.exe
           draft: false
           prerelease: false

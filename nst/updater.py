@@ -47,10 +47,14 @@ def _is_newer(remote: str, local: str) -> bool:
 # ── GitHub query + download ───────────────────────────────────────────────────
 
 def _fetch_latest() -> tuple[str, str] | None:
-    """Return ``(version_tag, setup_download_url)`` of the latest release.
+    """Return ``(version, setup_download_url)`` for the newest installer asset.
 
-    Picks the release asset whose name contains 'Setup' and ends in '.exe'.
-    Returns None on any error or if no suitable asset exists.
+    A release can accidentally carry more than one ``*Setup*.exe`` (e.g. a stale
+    file from a previous build). Pick the asset with the HIGHEST version in its
+    filename and report THAT version — not the release tag — so the "is it
+    newer?" check matches the file we'd actually install. Comparing against the
+    tag while installing an older asset causes an endless update loop.
+    Returns None on any error or if no versioned installer asset exists.
     """
     req = urllib.request.Request(
         GITHUB_LATEST,
@@ -59,14 +63,21 @@ def _fetch_latest() -> tuple[str, str] | None:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    tag = str(data.get("tag_name", "")).strip()
+    best = None  # (version_tuple, version_str, url)
     for asset in data.get("assets", []):
         name = str(asset.get("name", ""))
-        if "setup" in name.lower() and name.lower().endswith(".exe"):
-            url = asset.get("browser_download_url")
-            if tag and url:
-                return tag, url
-    return None
+        url = asset.get("browser_download_url")
+        if not url or "setup" not in name.lower() or not name.lower().endswith(".exe"):
+            continue
+        m = re.search(r"(\d+(?:\.\d+)+)", name)
+        if not m:
+            continue
+        key = _parse(m.group(1))
+        if best is None or key > best[0]:
+            best = (key, m.group(1), url)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def _download(url: str, version: str) -> str:
