@@ -187,8 +187,11 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
     run_cmd(["netsh", "interface", "ip", "add", "address",
              adapter, internet_ip, "255.255.255.0"])
 
-    # 2. Add internet default route (non-persistent; removed on disable/reboot)
-    run_cmd(["route", "add", "0.0.0.0", "mask", "0.0.0.0", internet_gw])
+    # 2. Add internet default route with a low metric so it wins over the
+    #    adapter's existing default (e.g. the intranet gateway, which has no
+    #    internet). Non-persistent — removed on disable/reboot.
+    run_cmd(["route", "add", "0.0.0.0", "mask", "0.0.0.0",
+             internet_gw, "metric", "5"])
 
     # 3. Add intranet route if not already present
     _, out, _ = run_cmd(["route", "print", "10.0.0.0"])
@@ -221,8 +224,11 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
     run_cmd(["netsh", "interface", "ip", "delete", "address",
              adapter, internet_ip])
 
-    # 2. Remove internet default route
-    run_cmd(["route", "delete", "0.0.0.0", "mask", "0.0.0.0"])
+    # 2. Remove ONLY the internet default route we added (via the internet
+    #    gateway). Deleting all 0.0.0.0 routes would also wipe the adapter's
+    #    own default gateway and break connectivity until a reboot.
+    internet_gw = _derive_gw(internet_ip)
+    run_cmd(["route", "delete", "0.0.0.0", "mask", "0.0.0.0", internet_gw])
 
     # 3. Remove NRPT rules
     for domain in domains:
