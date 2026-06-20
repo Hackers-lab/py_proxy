@@ -297,6 +297,30 @@ class _RosterRow(QFrame):
         super().mousePressEvent(e)
 
 
+class _MsgRow(QWidget):
+    """A message row that reveals its reply affordance only while hovered.
+
+    The reply button keeps a fixed-width slot at all times so showing it on
+    hover never shifts the bubble layout."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._hover_btn: QWidget | None = None
+
+    def attach_hover(self, btn) -> None:
+        self._hover_btn = btn
+
+    def enterEvent(self, e) -> None:
+        if self._hover_btn is not None:
+            self._hover_btn.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        if self._hover_btn is not None:
+            self._hover_btn.setVisible(False)
+        super().leaveEvent(e)
+
+
 class _Composer(QPlainTextEdit):
     """Multi-line message input: Enter sends, Shift+Enter inserts a newline.
 
@@ -492,6 +516,11 @@ class ChatWindow(QWidget):
         self._typing_sweep = QTimer(self)
         self._typing_sweep.timeout.connect(self._typing_tick)
         self._typing_sweep.start(2000)
+        # Animated dots for the "… is typing" indicator.
+        self._typing_base = "typing"
+        self._typing_phase = 0
+        self._typing_anim = QTimer(self)
+        self._typing_anim.timeout.connect(self._typing_anim_tick)
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
@@ -709,24 +738,38 @@ class ChatWindow(QWidget):
         r.addWidget(self._readonly_lbl)
 
         comp = QHBoxLayout()
+        comp.setSpacing(6)
         self._entry = _Composer()
         self._entry.setPlaceholderText(_PLACEHOLDER + "   (Enter = send · Shift+Enter = new line)")
         self._entry.submit.connect(self._send)
         self._entry.textChanged.connect(self._on_typing_edit)
+        self._entry.textChanged.connect(self._update_send_enabled)
         comp.addWidget(self._entry, 1)
+        # Emoji + file as quiet ghost buttons so Send is the clear primary action.
+        _ghost = ("QPushButton{background:transparent; border:none; font-size:17px;"
+                  " border-radius:9px; color:%s;}"
+                  "QPushButton:hover{background:%s;}"
+                  % (theme.color("text_sec"), theme.color("hover")))
         self._btn_emoji = QPushButton("😊")
-        self._btn_emoji.setFixedWidth(38)
+        self._btn_emoji.setFixedSize(38, 38)
+        self._btn_emoji.setStyleSheet(_ghost)
         self._btn_emoji.setToolTip("Open emoji picker  (Win + .)")
         self._btn_emoji.clicked.connect(self._open_emoji_picker)
         comp.addWidget(self._btn_emoji, alignment=Qt.AlignmentFlag.AlignBottom)
         self._btn_file = QPushButton("📎")
-        self._btn_file.setFixedWidth(38)
+        self._btn_file.setFixedSize(38, 38)
+        self._btn_file.setStyleSheet(_ghost)
+        self._btn_file.setToolTip("Attach a file")
         self._btn_file.clicked.connect(self._attach_file)
         comp.addWidget(self._btn_file, alignment=Qt.AlignmentFlag.AlignBottom)
-        self._btn_send = QPushButton("Send")
-        self._btn_send.setProperty("variant", "accent")
+        # Circular accent Send button — the primary action.
+        self._btn_send = QPushButton("➤")
+        self._btn_send.setFixedSize(40, 40)
+        self._btn_send.setToolTip("Send  (Enter)")
+        self._btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_send.clicked.connect(self._send)
         comp.addWidget(self._btn_send, alignment=Qt.AlignmentFlag.AlignBottom)
+        self._update_send_enabled()
         self._composer = QWidget()
         self._composer.setLayout(comp)
         r.addWidget(self._composer)
@@ -1236,13 +1279,32 @@ class ChatWindow(QWidget):
             w.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._messages.add(w)
         else:
+            prev = None
             for entry in msgs:
-                self._messages.add(self._make_bubble(entry))
+                self._messages.add(self._make_bubble(entry, prev))
+                prev = entry
         self._messages.scroll_to_bottom()
 
     def _append(self, entry: dict) -> None:
-        self._messages.add(self._make_bubble(entry))
+        conv = self._conversations.get(self._active, [])
+        if conv and conv[-1] is entry:
+            prev = conv[-2] if len(conv) >= 2 else None
+        else:
+            prev = conv[-1] if conv else None
+        self._messages.add(self._make_bubble(entry, prev))
         self._messages.scroll_to_bottom()
+
+    def _grouped_with(self, entry: dict, prev: dict | None) -> bool:
+        """True if *entry* should visually merge with the preceding bubble:
+        same sender, same direction, both plain chat, within 5 minutes."""
+        if not prev:
+            return False
+        kind = entry.get("kind")
+        if kind not in ("in", "out") or prev.get("kind") != kind:
+            return False
+        if entry.get("sender") != prev.get("sender"):
+            return False
+        return abs(float(entry.get("ts", 0)) - float(prev.get("ts", 0))) <= 300
 
     def _tick_parts(self, status: str, is_out: bool) -> tuple[str, str]:
         """Return (glyph, color) for a delivery-status tick on an out bubble.
@@ -1263,26 +1325,42 @@ class ChatWindow(QWidget):
             return "🕓", muted   # held in offline queue, awaiting peer
         return "✓", muted   # sent
 
-    def _make_bubble(self, entry: dict) -> QWidget:
+    def _make_sys_pill(self, text: str) -> QWidget:
+        """A centered rounded 'pill' for system notices (joins, renames, etc.)."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 6, 4, 6)
+        h.addStretch(1)
+        pill = QLabel(text)
+        pill.setWordWrap(True)
+        pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pill.setStyleSheet(
+            "background:%s; color:%s; border-radius:11px; padding:4px 12px;"
+            " font-size:11px;" % (theme.color("panel2"), theme.color("text_sec")))
+        h.addWidget(pill)
+        h.addStretch(1)
+        return row
+
+    def _make_bubble(self, entry: dict, prev: dict | None = None) -> QWidget:
         kind = entry.get("kind", "sys")
         if kind in ("file_out", "file_in_offer"):
             return self._make_file_bubble(entry)
         if kind == "chat_req":
             return self._make_req_bubble(entry)
         if kind == "sys":
-            lbl = QLabel(f"-- {entry.get('text', '')} --")
-            lbl.setObjectName("muted")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("font-style:italic; padding:3px; color:%s;" % theme.color("text_sec"))
-            return lbl
+            return self._make_sys_pill(entry.get("text", ""))
 
         sender, text, ts = entry.get("sender", ""), entry.get("text", ""), entry.get("ts", 0)
         reply = entry.get("reply")
         is_out = kind == "out"
         deleted = bool(entry.get("deleted"))
-        row = QWidget()
+        grouped = self._grouped_with(entry, prev)
+        active = self._active or ""
+        in_room = self._is_group(active) or self._is_channel(active)
+        row = _MsgRow()
         h = QHBoxLayout(row)
-        h.setContentsMargins(4, 2, 4, 2)
+        h.setContentsMargins(4, 1 if grouped else 9, 4, 1)
+        h.setSpacing(6)
         bubble = QFrame()
         bubble.setProperty("bubble", "out" if is_out else "in")
         bubble.setMaximumWidth(self._bubble_max())
@@ -1290,6 +1368,8 @@ class ChatWindow(QWidget):
         bv.setContentsMargins(12, 8, 12, 6)
         bv.setSpacing(2)
         txcol = theme.color("bubble_out_tx" if is_out else "bubble_in_tx")
+        # Lower-contrast colour for timestamps/ticks so the message text leads.
+        meta_col = "rgba(255,255,255,0.6)" if is_out else theme.color("text_sec")
 
         # Right-click menu (reply / delete) -- not on tombstones.
         if not deleted:
@@ -1310,7 +1390,7 @@ class ChatWindow(QWidget):
                 h.addWidget(bubble); h.addStretch(1)
             return row
 
-        if not is_out:
+        if not is_out and not grouped:
             sl = QLabel(sender)
             sl.setStyleSheet("color:%s; font-weight:700; font-size:11px;" % theme.color("accent"))
             bv.addWidget(sl)
@@ -1360,17 +1440,10 @@ class ChatWindow(QWidget):
         bv.addWidget(msg)
 
         foot = QHBoxLayout()
-        foot.setSpacing(8)
-        rep = QPushButton("↩ Reply")
-        rep.setProperty("variant", "ghost")
-        rep.setStyleSheet("font-size:10px; color:%s; padding:0;" % txcol)
-        rep.setCursor(Qt.CursorShape.PointingHandCursor)
-        snd = "You" if is_out else sender
-        rep.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
-        stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
-        stamp.setStyleSheet("font-size:10px; color:%s;" % txcol)
-        foot.addWidget(rep)
+        foot.setSpacing(6)
         foot.addStretch(1)
+        stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
+        stamp.setStyleSheet("font-size:10px; color:%s;" % meta_col)
         foot.addWidget(stamp)
         if is_out:
             glyph, color = self._tick_parts(entry.get("status", "sent"), True)
@@ -1413,11 +1486,50 @@ class ChatWindow(QWidget):
         vv.addWidget(bubble)
         vv.addWidget(reaction_row)
 
+        # Reply affordance: a small button revealed only on row hover (a
+        # fixed-width slot keeps it from shifting the bubble when it appears).
+        snd = "You" if is_out else sender
+        hover = QPushButton("↩")
+        hover.setFixedSize(26, 26)
+        hover.setCursor(Qt.CursorShape.PointingHandCursor)
+        hover.setToolTip("Reply")
+        hover.setStyleSheet(
+            "QPushButton{border:none; border-radius:13px; font-size:13px;"
+            " background:%s; color:%s;}"
+            "QPushButton:hover{background:%s; color:#fff;}"
+            % (theme.color("panel2"), theme.color("text_sec"), theme.color("accent")))
+        hover.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
+        hover.setVisible(False)
+        hslot = QWidget()
+        hslot.setFixedWidth(28)
+        hsl = QHBoxLayout(hslot)
+        hsl.setContentsMargins(1, 0, 1, 0)
+        hsl.addWidget(hover, alignment=Qt.AlignmentFlag.AlignVCenter)
+        row.attach_hover(hover)
+
+        # Avatar beside incoming messages in a group/channel so it's clear who
+        # is speaking. Grouped (consecutive) messages get a blank spacer to keep
+        # the left edge aligned.
+        def _avatar_slot() -> QWidget:
+            if not in_room or is_out:
+                return None
+            if grouped:
+                sp = QWidget(); sp.setFixedWidth(30); return sp
+            box = QWidget(); box.setFixedWidth(30)
+            bl = QHBoxLayout(box); bl.setContentsMargins(0, 0, 0, 0)
+            bl.addWidget(Avatar(sender, 28), alignment=Qt.AlignmentFlag.AlignTop)
+            return box
+
         if is_out:
             h.addStretch(1)
+            h.addWidget(hslot, alignment=Qt.AlignmentFlag.AlignVCenter)
             h.addWidget(v_wrap)
         else:
+            av = _avatar_slot()
+            if av is not None:
+                h.addWidget(av, alignment=Qt.AlignmentFlag.AlignTop)
             h.addWidget(v_wrap)
+            h.addWidget(hslot, alignment=Qt.AlignmentFlag.AlignVCenter)
             h.addStretch(1)
         return row
 
@@ -1432,6 +1544,18 @@ class ChatWindow(QWidget):
     def _cancel_reply(self) -> None:
         self._reply_to = None
         self._reply_bar.hide()
+
+    def _update_send_enabled(self) -> None:
+        """Light up the circular Send button only when there's text to send."""
+        has_text = bool(self._entry.text().strip())
+        self._btn_send.setEnabled(has_text)
+        if has_text:
+            bg, fg = theme.color("accent"), "#ffffff"
+        else:
+            bg, fg = theme.color("panel2"), theme.color("text_sec")
+        self._btn_send.setStyleSheet(
+            "QPushButton{background:%s; color:%s; border:none; border-radius:20px;"
+            " font-size:16px; font-weight:700;}" % (bg, fg))
 
     # ── send / receive ────────────────────────────────────────────────────────
     def _send(self) -> None:
@@ -2056,17 +2180,27 @@ class ChatWindow(QWidget):
         live = [ip for ip, exp in typers.items() if exp > time.time()]
         if not live:
             self._typing_lbl.hide()
+            self._typing_anim.stop()
             return
         if self._is_group(key):
             if len(live) == 1:
                 who = self._aliases.get(live[0]) or self._names.get(live[0], live[0])
-                txt = f"{who} is typing..."
+                self._typing_base = f"{who} is typing"
             else:
-                txt = f"{len(live)} people are typing..."
+                self._typing_base = f"{len(live)} people are typing"
         else:
-            txt = "typing..."
-        self._typing_lbl.setText(txt)
+            self._typing_base = "typing"
+        self._typing_phase = 0
+        self._typing_anim_tick()
         self._typing_lbl.show()
+        if not self._typing_anim.isActive():
+            self._typing_anim.start(450)
+
+    def _typing_anim_tick(self) -> None:
+        """Cycle the trailing dots (· ·· ···) for a lively typing indicator."""
+        self._typing_phase = (self._typing_phase + 1) % 4
+        dots = "•" * self._typing_phase
+        self._typing_lbl.setText(f"{self._typing_base} {dots}")
 
     # ── demo ──────────────────────────────────────────────────────────────────
     def _start_demo(self) -> None:

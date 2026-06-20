@@ -17,7 +17,7 @@ DARK = {
     "success": "#22c55e", "danger": "#ef4444", "warning": "#f59e0b",
     "text_pri": "#f1f5f9", "text_sec": "#94a3b8", "border": "#2e3340",
     "entry_bg": "#2a2f3a", "log_bg": "#101318", "select_bg": "#2b3champ",
-    "hover": "#252b35", "bubble_in": "#262b34", "bubble_out": "#2563eb",
+    "hover": "#252b35", "bubble_in": "#2f3643", "bubble_out": "#2f6bed",
     "bubble_in_tx": "#e6edf6", "bubble_out_tx": "#ffffff", "scroll": "#39414f",
 }
 # (typo guard — keep select_bg valid)
@@ -30,7 +30,7 @@ LIGHT = {
     "success": "#16a34a", "danger": "#dc2626", "warning": "#d97706",
     "text_pri": "#0f172a", "text_sec": "#64748b", "border": "#d6dbe4",
     "entry_bg": "#f1f5f9", "log_bg": "#f8fafc", "select_bg": "#dbeafe",
-    "hover": "#eef2f7", "bubble_in": "#eef2f7", "bubble_out": "#2563eb",
+    "hover": "#eef2f7", "bubble_in": "#e4e9f1", "bubble_out": "#2563eb",
     "bubble_in_tx": "#0f172a", "bubble_out_tx": "#ffffff", "scroll": "#c3cbd9",
 }
 
