@@ -231,6 +231,7 @@ Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes t
 - **Tray behaviour** — closing the window hides to the system tray (keeps everything running). Use **File → Exit** or tray → **Quit** to fully shut down.
 - **Demo Bot** — no second PC? Click **✨ Try Demo Chat** to chat with a built-in Demo Bot and see all chat features working.
 - **Status** — set yourself as Online, Away, or Invisible from the ⚙ gear menu.
+- **Automatic updates** — the app silently self-updates from GitHub Releases, and only while the chat window is closed so a conversation is never interrupted. The main window's **event log** reports each step: when a newer version is **found**, the installer's **size**, **download progress**, and completion. Toggle auto-updates or run a manual check from the **About** menu.
 
 ---
 
