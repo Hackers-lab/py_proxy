@@ -24,7 +24,6 @@ import uuid
 
 from . import config
 from .constants import (
-    SCREEN_MAX_EDGE,
     SCREEN_TCP_PORT,
     SF_ACCEPT,
     SF_BYE,
@@ -220,7 +219,8 @@ class HostSession:
             while self._running and self._service.running:
                 t0 = time.time()
                 quality = config.load_remote_quality()
-                shot = self._grabber.grab_jpeg(SCREEN_MAX_EDGE, quality)
+                shot = self._grabber.grab_frame(config.load_remote_max_edge(), quality,
+                                                config.load_remote_lossless())
                 if shot is not None:
                     data, _w, _h = shot
                     try:
@@ -293,12 +293,16 @@ class RemoteScreenService:
                  on_request=None,
                  on_share_started=None,
                  on_share_stopped=None,
-                 on_clipboard_from_viewer=None) -> None:
+                 on_clipboard_from_viewer=None,
+                 on_server_error=None) -> None:
         """
         on_request(name, ip, respond)        -- a peer wants in; call respond(bool).
         on_share_started(session)            -- a viewer session became active.
         on_share_stopped(session)            -- an active viewer session ended.
         on_clipboard_from_viewer(text)       -- a viewer pushed us clipboard text.
+        on_server_error(message)             -- the listener failed to start (e.g.
+                                                the port is already in use), so this
+                                                PC can't be viewed until resolved.
         All callbacks fire on background threads; marshal to the GUI thread.
         """
         self._chat = chat_service
@@ -306,6 +310,7 @@ class RemoteScreenService:
         self._on_share_started = on_share_started
         self._on_share_stopped = on_share_stopped
         self._on_clipboard_from_viewer = on_clipboard_from_viewer
+        self._on_server_error = on_server_error
         self._sessions: dict[str, HostSession] = {}
         self._lock = threading.Lock()
         self.running = False
@@ -346,6 +351,18 @@ class RemoteScreenService:
             srv.bind(("0.0.0.0", SCREEN_TCP_PORT))
             srv.listen(4)
             srv.settimeout(1.0)
+        except Exception as e:
+            # Bind/listen failed — almost always the port is already in use.
+            # Surface it instead of silently never accepting connections, since
+            # otherwise this PC just appears un-viewable for no visible reason.
+            self.running = False
+            if self._on_server_error:
+                self._on_server_error(
+                    f"Couldn't start the remote-screen listener on port "
+                    f"{SCREEN_TCP_PORT} ({e}). Others won't be able to view this "
+                    f"PC until the conflicting program is closed.")
+            return
+        try:
             while self.running:
                 try:
                     conn, addr = srv.accept()
@@ -355,9 +372,8 @@ class RemoteScreenService:
                     continue
                 except Exception:
                     break
+        finally:
             srv.close()
-        except Exception:
-            pass
 
     def _handle_session(self, conn: socket.socket, addr) -> None:
         try:

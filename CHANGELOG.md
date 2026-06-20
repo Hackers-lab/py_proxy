@@ -8,6 +8,22 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.11.0 — 2026-06-21
+- **Fixed: the “Stop” button** on the *“X is viewing your screen”* banner did
+  nothing — clicking it now actually ends the session.
+- **Much clearer remote screen.** Frames are no longer shrunk to 1600px (a 1080p
+  host was being downscaled before sending), the default image quality is higher,
+  and the viewer now scales frames smoothly — so small text and icon labels stay
+  readable.
+- **New: Sharp text mode (lossless PNG)** — sends pixel-perfect frames instead of
+  JPEG, ideal for reading text. **On by default**; turn it off on slow links.
+- **New: Resolution control** (Settings → Remote Screen) — *Match host* (sharpest)
+  down to 1080p (fastest).
+- The default frame rate is now 8 fps, a better fit for the heavier lossless
+  frames (raise it in Settings if you want smoother motion over JPEG).
+- The host now shows a warning if its screen-share listener can’t start (e.g. the
+  port is already in use) instead of silently never accepting connections.
+
 ## v4.10.0 — 2026-06-20
 - **New: Remote Screen** — a built-in, lightweight remote desktop. Open a 1:1
   chat and click the **🖥** button to view and control a peer's PC: mouse

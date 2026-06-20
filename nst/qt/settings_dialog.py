@@ -205,6 +205,8 @@ class SettingsDialog(QDialog):
         config.save_remote_unattended(self._cb_unattended.isChecked())
         config.save_remote_secret(self._remote_secret.text())
         config.save_remote_quality(self._remote_quality.value())
+        config.save_remote_max_edge(self._remote_res.currentData())
+        config.save_remote_lossless(self._cb_lossless.isChecked())
         config.save_remote_fps(self._remote_fps.value())
         config.save_remote_timeout(self._remote_timeout.value())
         if remote_on != was_on:
@@ -544,6 +546,29 @@ class SettingsDialog(QDialog):
         v.addWidget(hline())
         v.addWidget(self._section_label("PERFORMANCE"))
 
+        rrow = QHBoxLayout()
+        rrow.addWidget(QLabel("Resolution"))
+        self._remote_res = QComboBox()
+        for label, px in [("Match host — sharpest", 0), ("Up to 1920px", 1920),
+                          ("Up to 1440px", 1440), ("Up to 1080px — fastest", 1080)]:
+            self._remote_res.addItem(label, px)
+        ridx = self._remote_res.findData(config.load_remote_max_edge())
+        self._remote_res.setCurrentIndex(ridx if ridx >= 0 else 1)
+        rrow.addStretch(1)
+        rrow.addWidget(self._remote_res)
+        v.addLayout(rrow)
+        v.addWidget(self._hint(
+            "Controls how much the host's screen is shrunk before sending. "
+            "“Match host” keeps text crispest; lower settings are faster on slow links."))
+
+        self._cb_lossless = QCheckBox("Sharp text mode (lossless PNG)")
+        self._cb_lossless.setChecked(config.load_remote_lossless())
+        v.addWidget(self._cb_lossless)
+        v.addWidget(self._hint(
+            "Sends perfectly crisp PNG frames instead of JPEG — best for reading "
+            "text and icon labels. Frames are larger, so lower the frame rate if "
+            "it feels heavy. (Image quality below applies to JPEG only.)"))
+
         qrow = QHBoxLayout()
         qrow.addWidget(QLabel("Image quality"))
         self._remote_quality = QSlider(Qt.Orientation.Horizontal)
@@ -554,7 +579,16 @@ class SettingsDialog(QDialog):
         qrow.addWidget(self._remote_quality, 1)
         qrow.addWidget(self._rq_lbl)
         v.addLayout(qrow)
-        v.addWidget(self._hint("Higher quality is sharper but uses more bandwidth."))
+        v.addWidget(self._hint(
+            "Higher quality keeps small text and icon labels readable; lower uses "
+            "less bandwidth. 80+ is recommended for reading the remote screen."))
+
+        # Quality only affects JPEG, so grey it out while Sharp text mode is on.
+        def _sync_quality_enabled(on: bool) -> None:
+            self._remote_quality.setEnabled(not on)
+            self._rq_lbl.setEnabled(not on)
+        self._cb_lossless.toggled.connect(_sync_quality_enabled)
+        _sync_quality_enabled(self._cb_lossless.isChecked())
 
         frow = QHBoxLayout()
         frow.addWidget(QLabel("Frame rate (frames per second)"))

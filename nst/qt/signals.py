@@ -33,6 +33,7 @@ class ScreenSignals(QObject):
     share_started = pyqtSignal(object)         # HostSession
     share_stopped = pyqtSignal(object)         # HostSession
     clipboard_in = pyqtSignal(str)             # text a viewer pushed to us
+    server_error = pyqtSignal(str)             # listener failed to start (e.g. port in use)
 
 
 class MainSignals(QObject):

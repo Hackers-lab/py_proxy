@@ -56,6 +56,9 @@ class _ScreenCanvas(QWidget):
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
+        # Smooth scaling keeps text legible when the frame is fit into a window
+        # that isn't its exact size (the usual case); without it edges alias.
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         p.fillRect(self.rect(), Qt.GlobalColor.black)
         if not self._pix or self._pix.isNull():
             return
@@ -321,9 +324,12 @@ class RemoteHostController:
         respond(box.clickedButton() is allow)
 
     def _on_share_started(self, session) -> None:
+        # NB: QPushButton.clicked emits a `checked` bool, so the handler must
+        # absorb it (*_) — otherwise it would land in `sid` and we'd call
+        # stop_session(False), which matches nothing and silently does nothing.
         ind = _SharingIndicator(
             f"{session.viewer_name} ({session.viewer_ip})",
-            on_stop=lambda sid=session.id: self._service.stop_session(sid),
+            on_stop=lambda *_, sid=session.id: self._service.stop_session(sid),
         )
         self._indicators[session.id] = ind
         ind.show()

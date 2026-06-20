@@ -37,9 +37,11 @@ SF_CLIP   = 0x30   # either way:     {text}
 SF_PING   = 0x40   # either way:     keepalive (empty)
 SF_BYE    = 0x50   # either way:     graceful close
 
-SCREEN_FPS      = 12     # default host capture cadence (frames/sec)
-SCREEN_QUALITY  = 60     # default JPEG quality (1-100)
-SCREEN_MAX_EDGE = 1600   # downscale so the longest screen edge fits this many px
+SCREEN_FPS      = 8      # default host capture cadence (frames/sec); lower suits
+                         # the default lossless-PNG frames (heavier than JPEG)
+SCREEN_QUALITY  = 80     # default JPEG quality (1-100); higher keeps text crisp
+SCREEN_MAX_EDGE = 1920   # default cap on the longest captured edge (px); 0 = native.
+                         # 1920 leaves a 1080p host un-scaled, so text stays sharp.
 SCREEN_REQUEST_TIMEOUT = 60   # seconds the host waits for the user to accept
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────

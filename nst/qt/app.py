@@ -73,9 +73,12 @@ def run() -> None:
         on_share_started=lambda s: screen_sig.share_started.emit(s),
         on_share_stopped=lambda s: screen_sig.share_stopped.emit(s),
         on_clipboard_from_viewer=lambda text: screen_sig.clipboard_in.emit(text),
+        on_server_error=lambda msg: screen_sig.server_error.emit(msg),
     )
 
     toasts = ToastManager()
+    screen_sig.server_error.connect(
+        lambda msg: toasts.notify("Remote screen", msg, "remote-error"))
     _log_holder = {"main": None}
     chat_window = ChatWindow(chat, toasts,
                              log_fn=lambda m: _log_holder["main"] and _log_holder["main"].log(m))

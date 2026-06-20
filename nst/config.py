@@ -362,6 +362,43 @@ def save_remote_quality(quality: int) -> bool:
                         min(95, max(20, int(quality))))
 
 
+def load_remote_lossless() -> bool:
+    """When on, the host sends lossless PNG frames instead of JPEG.
+
+    Text and icon labels stay perfectly crisp; frames are larger and slower to
+    encode, so this pairs best with a lower frame rate. On by default — crisp
+    text is the priority for this feature; users on slow links can turn it off.
+    """
+    return bool(_read_value("RemoteLossless", 1))
+
+
+def save_remote_lossless(on: bool) -> bool:
+    return _write_value("RemoteLossless", winreg.REG_DWORD, 1 if on else 0)
+
+
+def load_remote_max_edge() -> int:
+    """Longest edge (px) the host downscales each frame to before encoding.
+
+    Lower = smaller/faster frames but blurrier text; higher = sharper but heavier.
+    ``0`` means send the host's native resolution (sharpest possible).
+    """
+    from .constants import SCREEN_MAX_EDGE
+    try:
+        px = int(_read_value("RemoteMaxEdge", SCREEN_MAX_EDGE))
+    except (TypeError, ValueError):
+        return SCREEN_MAX_EDGE
+    return 0 if px <= 0 else min(3840, max(720, px))
+
+
+def save_remote_max_edge(px: int) -> bool:
+    try:
+        px = int(px)
+    except (TypeError, ValueError):
+        px = 0
+    px = 0 if px <= 0 else min(3840, max(720, px))
+    return _write_value("RemoteMaxEdge", winreg.REG_DWORD, px)
+
+
 def load_remote_fps() -> int:
     """Frames per second the host streams (higher = smoother, more bandwidth)."""
     from .constants import SCREEN_FPS

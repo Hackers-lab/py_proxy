@@ -202,7 +202,9 @@ You can also connect to a manual IP. The host listens on TCP `54325`.
 > [!WARNING]
 > Unattended access is effectively a backdoor: anyone with the secret can control the PC without approval. It is **off by default**. Only enable it with a long, unique secret shared only with devices you trust.
 
-Performance is tunable in Settings (image quality, frame rate). On a LAN it's smooth enough for clicking, typing and copy-paste; over the internet expect more lag.
+**Readable text:** by default the host sends **lossless PNG** frames at its **native resolution**, so small text and icon labels stay crisp — no JPEG smearing or downscaling. This is the *Sharp text mode* toggle in **Settings → Remote Screen**; on a slow link you can turn it off to fall back to (lighter) JPEG and pick a lower **Resolution**.
+
+Performance is tunable in Settings (sharp-text mode, resolution, image quality, frame rate). On a LAN it's smooth enough for clicking, typing and copy-paste; over the internet, lower the resolution or turn off sharp-text mode and expect more lag.
 
 ---
 
@@ -218,7 +220,7 @@ Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes t
 | **Network** | Active interfaces, IPs, ports in use, peers currently online, queued offline messages |
 | **Privacy & Users** | Blocked peer list with instant Unblock |
 | **File Transfer** | Download folder, max file size, offer expiry time |
-| **Remote Screen** | Allow incoming sessions, unattended secret, image quality, frame rate, approval timeout |
+| **Remote Screen** | Allow incoming sessions, unattended secret, sharp-text (lossless) mode, resolution, image quality, frame rate, approval timeout |
 | **About** | Version, diagnostics |
 
 ---

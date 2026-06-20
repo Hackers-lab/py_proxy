@@ -171,8 +171,18 @@ class ScreenGrabber:
         img = QImage(self._buf, self._w, self._h, QImage.Format.Format_RGB32)
         return img.copy()
 
-    def grab_jpeg(self, max_edge: int, quality: int) -> tuple[bytes, int, int] | None:
-        """Capture, optionally downscale, and encode. Returns (bytes, w, h)."""
+    def grab_frame(self, max_edge: int, quality: int,
+                   lossless: bool = False) -> tuple[bytes, int, int] | None:
+        """Capture, optionally downscale, and encode. Returns (bytes, w, h).
+
+        *lossless* encodes PNG — perfectly crisp text and icon labels at the cost
+        of much larger/slower frames (best paired with a lower frame rate). When
+        off, frames are JPEG at *quality*, falling back to PNG only if the JPEG
+        plugin is unavailable so the feature still works either way.
+
+        The viewer decodes via ``QImage.fromData`` which auto-detects the format,
+        so the wire protocol is unchanged regardless of which path runs.
+        """
         img = self.grab_qimage()
         if img is None or img.isNull():
             return None
@@ -185,9 +195,9 @@ class ScreenGrabber:
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QBuffer.OpenModeFlag.WriteOnly)
-        # JPEG needs the qjpeg image-format plugin; fall back to (lossless, larger)
-        # PNG if it isn't present so the feature still works.
-        if not img.save(buf, "JPEG", quality):
+        if lossless:
+            img.save(buf, "PNG")
+        elif not img.save(buf, "JPEG", quality):
             ba.clear()
             buf.seek(0)
             img.save(buf, "PNG")
