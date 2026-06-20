@@ -686,7 +686,10 @@ class MainWindow(QMainWindow):
             return f"{bps * 8 / 1000:.1f} Kbps"
         if unit == "Mbps":
             return f"{bps * 8 / 1_000_000:.3f} Mbps"
-        return format_speed(bps)  # Auto
+        # Auto — drop to bps (bits/sec) for very low rates, else B/s → KB/s → MB/s
+        if bps * 8 < 1000:
+            return f"{bps * 8:.0f} bps"
+        return format_speed(bps)
 
     def _build_log(self) -> QWidget:
         card, v = self._card("EVENT LOG")
