@@ -298,26 +298,33 @@ class _RosterRow(QFrame):
 
 
 class _MsgRow(QWidget):
-    """A message row that reveals its reply affordance only while hovered.
-
-    The reply button keeps a fixed-width slot at all times so showing it on
-    hover never shifts the bubble layout."""
+    """A message row whose reply button is always visible (grey) and turns the
+    accent colour while the row is hovered, so it's discoverable without
+    cluttering the bubble."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._hover_btn: QWidget | None = None
+        self._reply_btn: QPushButton | None = None
+        self._grey = ""
+        self._blue = ""
 
-    def attach_hover(self, btn) -> None:
-        self._hover_btn = btn
+    def attach_reply(self, btn: "QPushButton", grey: str, blue: str) -> None:
+        self._reply_btn = btn
+        self._grey, self._blue = grey, blue
+        self._tint(grey)
+
+    def _tint(self, color: str) -> None:
+        if self._reply_btn is not None:
+            self._reply_btn.setStyleSheet(
+                "QPushButton{border:none; background:transparent;"
+                " font-size:16px; color:%s;}" % color)
 
     def enterEvent(self, e) -> None:
-        if self._hover_btn is not None:
-            self._hover_btn.setVisible(True)
+        self._tint(self._blue)
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:
-        if self._hover_btn is not None:
-            self._hover_btn.setVisible(False)
+        self._tint(self._grey)
         super().leaveEvent(e)
 
 
@@ -339,8 +346,24 @@ class _Composer(QPlainTextEdit):
         # so the height maths below can fit a line without clipping it.
         self.document().setDocumentMargin(7)
         self._max_lines = max_lines
+        self._emoji_btn: QPushButton | None = None
         self.textChanged.connect(self._auto_height)
         self._auto_height()
+
+    def set_emoji_button(self, btn: "QPushButton") -> None:
+        """Overlay an emoji button at the inner-right edge, vertically centred,
+        and reserve text space on the right so typing never runs under it."""
+        self._emoji_btn = btn
+        btn.setParent(self)
+        self.setViewportMargins(0, 0, 34, 0)
+        btn.raise_()
+        self._place_emoji()
+
+    def _place_emoji(self) -> None:
+        if not self._emoji_btn:
+            return
+        b = self._emoji_btn
+        b.move(self.width() - b.width() - 6, max(0, (self.height() - b.height()) // 2))
 
     def text(self) -> str:
         return self.toPlainText()
@@ -361,6 +384,7 @@ class _Composer(QPlainTextEdit):
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
         self._auto_height()
+        self._place_emoji()
 
     def _auto_height(self) -> None:
         # Grow with the number of (wrapped) lines, capped at max_lines. For a
@@ -379,6 +403,7 @@ class _Composer(QPlainTextEdit):
         target = int(round(shown * line)) + 2 * dm + 2 * fr + 4
         if self.height() != target:
             self.setFixedHeight(target)
+        self._place_emoji()
         self.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if visual_lines > self._max_lines + 0.01
             else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -745,26 +770,34 @@ class ChatWindow(QWidget):
         self._entry.textChanged.connect(self._on_typing_edit)
         self._entry.textChanged.connect(self._update_send_enabled)
         comp.addWidget(self._entry, 1)
-        # Emoji + file as quiet ghost buttons so Send is the clear primary action.
-        _ghost = ("QPushButton{background:transparent; border:none; font-size:17px;"
-                  " border-radius:9px; color:%s;}"
-                  "QPushButton:hover{background:%s;}"
-                  % (theme.color("text_sec"), theme.color("hover")))
+
+        # Emoji button lives INSIDE the composer at the inner-right edge.
         self._btn_emoji = QPushButton("😊")
-        self._btn_emoji.setFixedSize(38, 38)
-        self._btn_emoji.setStyleSheet(_ghost)
+        self._btn_emoji.setFixedSize(30, 30)
+        self._btn_emoji.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_emoji.setToolTip("Open emoji picker  (Win + .)")
+        self._btn_emoji.setStyleSheet(
+            "QPushButton{background:transparent; border:none; padding:0;"
+            " font-size:18px; color:%s;}"
+            "QPushButton:hover{color:%s;}"
+            % (theme.color("text_sec"), theme.color("text_pri")))
         self._btn_emoji.clicked.connect(self._open_emoji_picker)
-        comp.addWidget(self._btn_emoji, alignment=Qt.AlignmentFlag.AlignBottom)
+        self._entry.set_emoji_button(self._btn_emoji)
+
+        # File + Send: both solid-coloured, sized to the single-line composer.
         self._btn_file = QPushButton("📎")
-        self._btn_file.setFixedSize(38, 38)
-        self._btn_file.setStyleSheet(_ghost)
+        self._btn_file.setFixedSize(44, 40)
+        self._btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_file.setToolTip("Attach a file")
+        self._btn_file.setStyleSheet(
+            "QPushButton{background:%s; color:#fff; border:none; border-radius:10px;"
+            " font-size:16px;} QPushButton:hover{background:%s;}"
+            % (theme.color("accent2"), theme.color("accent2")))
         self._btn_file.clicked.connect(self._attach_file)
         comp.addWidget(self._btn_file, alignment=Qt.AlignmentFlag.AlignBottom)
-        # Circular accent Send button — the primary action.
+
         self._btn_send = QPushButton("➤")
-        self._btn_send.setFixedSize(40, 40)
+        self._btn_send.setFixedSize(44, 40)
         self._btn_send.setToolTip("Send  (Enter)")
         self._btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_send.clicked.connect(self._send)
@@ -780,11 +813,14 @@ class ChatWindow(QWidget):
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _bubble_max(self) -> int:
-        """Maximum bubble width: ~78 % of the chat viewport, clamped 280-760 px."""
+        """Maximum bubble width: ~88 % of the chat viewport (leaving ~12 % on the
+        opposite side for the reply button + breathing room), clamped 280-980 px.
+        A long message can therefore fill most of the width instead of stopping
+        well short and leaving a big empty gutter down the middle."""
         vp = self._messages.viewport().width()
         if vp < 10:
             return _BUBBLE_MAX  # not yet realized -- use module fallback
-        return max(280, min(760, int(vp * 0.78)))
+        return max(280, min(980, int(vp * 0.88)))
 
     @staticmethod
     def _is_group(key: str) -> bool:
@@ -1486,26 +1522,22 @@ class ChatWindow(QWidget):
         vv.addWidget(bubble)
         vv.addWidget(reaction_row)
 
-        # Reply affordance: a small button revealed only on row hover (a
-        # fixed-width slot keeps it from shifting the bubble when it appears).
+        # Reply affordance: always-visible grey arrow on the bubble's inner side,
+        # turning the accent colour while the row is hovered. The trailing
+        # U+FE0E forces text (not emoji) rendering so it shows as a crisp arrow
+        # rather than a coloured blob.
         snd = "You" if is_out else sender
-        hover = QPushButton("↩")
-        hover.setFixedSize(26, 26)
-        hover.setCursor(Qt.CursorShape.PointingHandCursor)
-        hover.setToolTip("Reply")
-        hover.setStyleSheet(
-            "QPushButton{border:none; border-radius:13px; font-size:13px;"
-            " background:%s; color:%s;}"
-            "QPushButton:hover{background:%s; color:#fff;}"
-            % (theme.color("panel2"), theme.color("text_sec"), theme.color("accent")))
-        hover.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
-        hover.setVisible(False)
+        reply_btn = QPushButton("↩︎")
+        reply_btn.setFixedSize(26, 30)
+        reply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reply_btn.setToolTip("Reply")
+        reply_btn.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
         hslot = QWidget()
         hslot.setFixedWidth(28)
         hsl = QHBoxLayout(hslot)
         hsl.setContentsMargins(1, 0, 1, 0)
-        hsl.addWidget(hover, alignment=Qt.AlignmentFlag.AlignVCenter)
-        row.attach_hover(hover)
+        hsl.addWidget(reply_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        row.attach_reply(reply_btn, theme.color("text_sec"), theme.color("accent"))
 
         # Avatar beside incoming messages in a group/channel so it's clear who
         # is speaking. Grouped (consecutive) messages get a blank spacer to keep
@@ -1554,7 +1586,7 @@ class ChatWindow(QWidget):
         else:
             bg, fg = theme.color("panel2"), theme.color("text_sec")
         self._btn_send.setStyleSheet(
-            "QPushButton{background:%s; color:%s; border:none; border-radius:20px;"
+            "QPushButton{background:%s; color:%s; border:none; border-radius:10px;"
             " font-size:16px; font-weight:700;}" % (bg, fg))
 
     # ── send / receive ────────────────────────────────────────────────────────
