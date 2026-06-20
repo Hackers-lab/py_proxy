@@ -27,6 +27,14 @@ class ChatSignals(QObject):
 
 
 
+class ScreenSignals(QObject):
+    """Remote-screen service callbacks marshalled to the GUI thread."""
+    request = pyqtSignal(str, str, object)     # viewer name, ip, respond(bool)
+    share_started = pyqtSignal(object)         # HostSession
+    share_stopped = pyqtSignal(object)         # HostSession
+    clipboard_in = pyqtSignal(str)             # text a viewer pushed to us
+
+
 class MainSignals(QObject):
     beacon = pyqtSignal(str, bool)        # host ip, has_internet
     internet = pyqtSignal(bool)           # this host's internet state

@@ -10,11 +10,13 @@ from PyQt6.QtWidgets import QApplication
 
 from .. import config
 from ..chat import ChatService
+from ..remotescreen import RemoteScreenService
 from ..updater import UpdateManager, apply_staged_on_launch
 from ..win_utils import get_resource_path, set_app_user_model_id
 from .chat_window import ChatWindow
 from .main_window import MainWindow
-from .signals import ChatSignals
+from .remote_window import RemoteHostController
+from .signals import ChatSignals, ScreenSignals
 from .theme import theme
 from .toast import ToastManager
 from .tray import SpeedOverlay, TrayManager, chat_icon
@@ -62,6 +64,17 @@ def run() -> None:
     chat.ip_chat_enabled = config.load_ip_chat_enabled()
     chat.my_status = config.load_my_status()
 
+    # Remote-screen service (host + viewer). Host callbacks are marshalled to the
+    # GUI thread via ScreenSignals and handled by RemoteHostController.
+    screen_sig = ScreenSignals()
+    remote = RemoteScreenService(
+        chat,
+        on_request=lambda name, ip, respond: screen_sig.request.emit(name, ip, respond),
+        on_share_started=lambda s: screen_sig.share_started.emit(s),
+        on_share_stopped=lambda s: screen_sig.share_stopped.emit(s),
+        on_clipboard_from_viewer=lambda text: screen_sig.clipboard_in.emit(text),
+    )
+
     toasts = ToastManager()
     _log_holder = {"main": None}
     chat_window = ChatWindow(chat, toasts,
@@ -69,6 +82,8 @@ def run() -> None:
     # Give the chat window the green message-bubble icon (matches the tray chat
     # icon) so it's distinct from the proxy/splitter window's app icon.
     chat_window.setWindowIcon(chat_icon())
+    chat_window.set_remote_service(remote)
+    remote_host = RemoteHostController(remote, screen_sig)
 
     sig.roster_changed.connect(chat_window.update_roster)
     sig.message.connect(chat_window.receive_message)
@@ -94,6 +109,7 @@ def run() -> None:
 
     def quit_app():
         try:
+            remote.stop()
             chat.stop()
             chat_window.shutdown()
             main.shutdown()
@@ -133,6 +149,8 @@ def run() -> None:
     main.set_update_manager(updates)
 
     chat.start()
+    if config.load_remote_enabled():
+        remote.start()
 
     # ── launch mode ───────────────────────────────────────────────────────────
     # --autostart (logon Run key) and --updated=<ver> (relaunch after a silent

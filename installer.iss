@@ -9,7 +9,7 @@
 ; app, replaces the folder and relaunches the new version via [Run].
 
 #ifndef AppVersion
-  #define AppVersion "4.9.13"
+  #define AppVersion "4.10.0"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"

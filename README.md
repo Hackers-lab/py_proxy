@@ -1,4 +1,4 @@
-# Net Split-Tunneler  v4.9
+# Net Split-Tunneler  v4.10
 
 A Windows desktop tool for the messy reality of office networks: **share internet without losing the LAN**, **reach the intranet and the internet at the same time**, **flip between saved IP setups in one click**, and run a **full-featured LAN chat** between every PC on the network — all without any server, cloud account, or router config.
 
@@ -32,6 +32,7 @@ Everything in the main window is organised into four tabs, plus the LAN Chat tha
 | 🔀 | **IP Switch** — one-click static/DHCP network profiles |
 | 💬 | **LAN Chat** — private messages, groups, broadcast channels |
 | 📎 | **File Transfer** — send files with live progress |
+| 🖥️ | **Remote Screen** — view and control a peer's PC: mouse, keyboard, clipboard |
 | 🔔 | **Notifications** — sound, toast, window-raise or taskbar flash |
 | 🔍 | **Search** — full-text search across all messages and files |
 | 📶 | **Speed Monitor** — live network speeds, optionally pinned to the taskbar |
@@ -180,6 +181,31 @@ Automatic discovery only spans one subnet. To reach a peer on a different networ
 
 ---
 
+## Remote Screen — view & control a PC
+
+A lightweight, built-in remote desktop — no AnyDesk, VNC or TeamViewer needed, and no extra download (it reuses the same Qt the app already ships, so it adds almost nothing to the size).
+
+**Start a session:** open a 1:1 chat and click the **🖥** button in the conversation header. A window opens showing the peer's screen. By default the peer is **asked to approve** the connection; once they click **Allow**, you can:
+
+- **Move and click** the mouse (left / right / middle, scroll wheel)
+- **Type** with your keyboard, including shortcuts like Ctrl+C / Ctrl+V
+- **Sync the clipboard** — push your clipboard text to the remote PC with one button
+- **Send Ctrl+Alt+End** (the remote equivalent of Ctrl+Alt+Del)
+- Toggle **Control: on/off** to switch between controlling and view-only
+
+You can also connect to a manual IP. The host listens on TCP `54325`.
+
+**While you're being viewed**, a red "*X is viewing your screen*" banner stays on top of your screen with a **Stop** button so a session can never run silently.
+
+**Unattended access (optional):** in **Settings → Remote Screen** you can set a **secret** and enable *connect without asking*. A peer who presents that secret is let in automatically, with no approval prompt — handy for your own machines.
+
+> [!WARNING]
+> Unattended access is effectively a backdoor: anyone with the secret can control the PC without approval. It is **off by default**. Only enable it with a long, unique secret shared only with devices you trust.
+
+Performance is tunable in Settings (image quality, frame rate). On a LAN it's smooth enough for clicking, typing and copy-paste; over the internet expect more lag.
+
+---
+
 ## Settings
 
 Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes take effect on **Save**; **Cancel** discards everything.
@@ -192,6 +218,7 @@ Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes t
 | **Network** | Active interfaces, IPs, ports in use, peers currently online, queued offline messages |
 | **Privacy & Users** | Blocked peer list with instant Unblock |
 | **File Transfer** | Download folder, max file size, offer expiry time |
+| **Remote Screen** | Allow incoming sessions, unattended secret, image quality, frame rate, approval timeout |
 | **About** | Version, diagnostics |
 
 ---

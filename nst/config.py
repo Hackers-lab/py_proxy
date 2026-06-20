@@ -315,6 +315,78 @@ def load_file_expiry_min() -> int:
 def save_file_expiry_min(minutes: int) -> bool:
     return _write_value("FileExpiryMin", winreg.REG_DWORD, max(1, int(minutes)))
 
+# ── Remote screen (view + control) ────────────────────────────────────────────
+
+def load_remote_enabled() -> bool:
+    """Whether this PC accepts incoming screen-view/control sessions at all."""
+    return bool(_read_value("RemoteEnabled", 1))
+
+
+def save_remote_enabled(enabled: bool) -> bool:
+    return _write_value("RemoteEnabled", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_remote_unattended() -> bool:
+    """Whether a peer presenting the correct secret connects without a prompt.
+
+    Off by default — unattended access is effectively a backdoor, so the user
+    must opt in explicitly and set a secret.
+    """
+    return bool(_read_value("RemoteUnattended", 0))
+
+
+def save_remote_unattended(enabled: bool) -> bool:
+    return _write_value("RemoteUnattended", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_remote_secret() -> str:
+    """The shared secret that authorises unattended access (empty = none)."""
+    return str(_read_value("RemoteSecret", "")).strip()
+
+
+def save_remote_secret(secret: str) -> bool:
+    return _write_value("RemoteSecret", winreg.REG_SZ, (secret or "").strip())
+
+
+def load_remote_quality() -> int:
+    """JPEG quality (1-100) the host encodes screen frames at."""
+    from .constants import SCREEN_QUALITY
+    try:
+        return min(95, max(20, int(_read_value("RemoteQuality", SCREEN_QUALITY))))
+    except (TypeError, ValueError):
+        return SCREEN_QUALITY
+
+
+def save_remote_quality(quality: int) -> bool:
+    return _write_value("RemoteQuality", winreg.REG_DWORD,
+                        min(95, max(20, int(quality))))
+
+
+def load_remote_fps() -> int:
+    """Frames per second the host streams (higher = smoother, more bandwidth)."""
+    from .constants import SCREEN_FPS
+    try:
+        return min(30, max(1, int(_read_value("RemoteFps", SCREEN_FPS))))
+    except (TypeError, ValueError):
+        return SCREEN_FPS
+
+
+def save_remote_fps(fps: int) -> bool:
+    return _write_value("RemoteFps", winreg.REG_DWORD, min(30, max(1, int(fps))))
+
+
+def load_remote_timeout() -> int:
+    """Seconds the host waits for the user to accept an incoming request."""
+    from .constants import SCREEN_REQUEST_TIMEOUT
+    try:
+        return min(600, max(10, int(_read_value("RemoteTimeout", SCREEN_REQUEST_TIMEOUT))))
+    except (TypeError, ValueError):
+        return SCREEN_REQUEST_TIMEOUT
+
+
+def save_remote_timeout(seconds: int) -> bool:
+    return _write_value("RemoteTimeout", winreg.REG_DWORD, min(600, max(10, int(seconds))))
+
 # ── General behaviour ──────────────────────────────────────────────────────────
 
 def load_minimize_to_tray() -> bool:

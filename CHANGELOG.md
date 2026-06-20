@@ -8,6 +8,22 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.10.0 — 2026-06-20
+- **New: Remote Screen** — a built-in, lightweight remote desktop. Open a 1:1
+  chat and click the **🖥** button to view and control a peer's PC: mouse
+  (move, left/right/middle click, scroll), keyboard (including Ctrl+C/V and other
+  shortcuts), one-click clipboard sync, and a Ctrl+Alt+End shortcut.
+- The person being viewed approves each connection, and sees an always-on-top
+  "X is viewing your screen" banner with a **Stop** button for the whole session.
+- Optional **unattended access**: set a secret in Settings → Remote Screen to let
+  trusted devices connect without a prompt. Off by default (it's effectively a
+  backdoor — use a long, unique secret).
+- New **Settings → Remote Screen** page: allow/deny incoming sessions, unattended
+  secret, image quality, frame rate, and approval timeout.
+- Adds almost nothing to the download — capture, encoding, input injection and
+  clipboard all reuse Win32 (ctypes) and the Qt already bundled. No new
+  third-party dependencies.
+
 ## v4.9.13 — 2026-06-20
 - Chat read receipts now show **green** double-ticks (read) vs grey double-ticks
   (delivered), so the two are easy to tell apart.

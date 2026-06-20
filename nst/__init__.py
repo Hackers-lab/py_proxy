@@ -13,7 +13,9 @@ Package layout:
     proxy_server    — HTTP/HTTPS tunnelling proxy server
     beacon          — host discovery (UDP broadcast) for the proxy feature
     chat            — LAN peer discovery + text messaging
+    screencap       — Win32 GDI screen capture + input injection (ctypes)
+    remotescreen    — remote screen view/control sessions (host + viewer)
     qt.*            — PyQt6 UI (main window, chat window, widgets, tray, toasts)
 """
 
-__version__ = "4.9.13"
+__version__ = "4.10.0"

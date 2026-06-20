@@ -22,6 +22,26 @@ CHAT_PEER_TIMEOUT   = 10         # seconds of silence before a peer is dropped
 CHAT_AWAY_AFTER     = 300        # seconds of input idle before we report "away"
 FILE_SAVE_DIR      = "NetSplitter"   # subfolder under Documents
 
+# ── Remote screen (view + control) ────────────────────────────────────────────
+SCREEN_TCP_PORT = 54325          # TCP port the host listens on for screen sessions
+
+# Length-prefixed frame protocol on the session socket: a 1-byte type followed
+# by a 4-byte big-endian payload length (see nst.remotescreen). Control frames
+# carry JSON; SF_FRAME carries raw JPEG/PNG image bytes.
+SF_HELLO  = 0x01   # viewer -> host: {name, ip, secret}
+SF_ACCEPT = 0x02   # host -> viewer: {name, w, h}
+SF_REJECT = 0x03   # host -> viewer: {reason}
+SF_FRAME  = 0x10   # host -> viewer: image bytes
+SF_INPUT  = 0x20   # viewer -> host: {k: move|button|wheel|key|text, ...}
+SF_CLIP   = 0x30   # either way:     {text}
+SF_PING   = 0x40   # either way:     keepalive (empty)
+SF_BYE    = 0x50   # either way:     graceful close
+
+SCREEN_FPS      = 12     # default host capture cadence (frames/sec)
+SCREEN_QUALITY  = 60     # default JPEG quality (1-100)
+SCREEN_MAX_EDGE = 1600   # downscale so the longest screen edge fits this many px
+SCREEN_REQUEST_TIMEOUT = 60   # seconds the host waits for the user to accept
+
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 BTN_FONT   = ("Consolas", 9, "bold")
 LABEL_FONT = ("Segoe UI", 9)

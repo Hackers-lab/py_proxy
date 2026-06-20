@@ -84,7 +84,8 @@ class SettingsDialog(QDialog):
         self._nav = QListWidget()
         self._nav.setFrameShape(QFrame.Shape.NoFrame)
         self._nav.addItems(["General", "Notifications", "Storage", "Network",
-                            "Privacy & Users", "File Transfer", "About"])
+                            "Privacy & Users", "File Transfer", "Remote Screen",
+                            "About"])
         self._nav.currentRowChanged.connect(self._on_nav)
         nv.addWidget(self._nav, 1)
         root.addWidget(nav)
@@ -93,7 +94,7 @@ class SettingsDialog(QDialog):
         for builder in (self._page_general, self._page_notifications,
                         self._page_storage, self._page_network,
                         self._page_privacy, self._page_filetransfer,
-                        self._page_about):
+                        self._page_remote, self._page_about):
             self._pages.addWidget(self._scroll(builder()))
         root.addWidget(self._pages, 1)
         outer.addWidget(body, 1)
@@ -196,6 +197,18 @@ class SettingsDialog(QDialog):
         config.save_file_expiry_min(self._ft_expiry.value())
         if self._pending_dir:
             config.save_download_dir(self._pending_dir)
+
+        # Remote screen
+        remote_on = self._cb_remote.isChecked()
+        was_on = config.load_remote_enabled()
+        config.save_remote_enabled(remote_on)
+        config.save_remote_unattended(self._cb_unattended.isChecked())
+        config.save_remote_secret(self._remote_secret.text())
+        config.save_remote_quality(self._remote_quality.value())
+        config.save_remote_fps(self._remote_fps.value())
+        config.save_remote_timeout(self._remote_timeout.value())
+        if remote_on != was_on:
+            self.cw.apply_remote_enabled(remote_on)
 
         self.cw.on_settings_changed()
         self.accept()
@@ -492,6 +505,78 @@ class SettingsDialog(QDialog):
         v.addWidget(self._hint(
             "Transfers are peer-to-peer: the sender hosts the file while online "
             "and there is no central storage. Offline file transfer isn't supported."))
+        v.addStretch(1)
+        return w
+
+    # ── Remote Screen ──────────────────────────────────────────────────────────
+    def _page_remote(self) -> QWidget:
+        w, v = self._page("Remote Screen")
+
+        self._cb_remote = QCheckBox("Allow others to view and control this PC")
+        self._cb_remote.setChecked(config.load_remote_enabled())
+        v.addWidget(self._cb_remote)
+        v.addWidget(self._hint(
+            "When on, a peer can request your screen from the 🖥 button in chat. "
+            "You'll be asked to approve each connection unless unattended access "
+            "is enabled below."))
+
+        v.addWidget(hline())
+        v.addWidget(self._section_label("UNATTENDED ACCESS"))
+        self._cb_unattended = QCheckBox("Connect without asking if the secret matches")
+        self._cb_unattended.setChecked(config.load_remote_unattended())
+        v.addWidget(self._cb_unattended)
+
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("Secret"))
+        self._remote_secret = QLineEdit(config.load_remote_secret())
+        self._remote_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self._remote_secret.setPlaceholderText("Required for unattended access")
+        show = QCheckBox("Show")
+        show.toggled.connect(lambda on: self._remote_secret.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        srow.addWidget(self._remote_secret, 1)
+        srow.addWidget(show)
+        v.addLayout(srow)
+        v.addWidget(self._hint(
+            "⚠ Anyone with this secret can control this PC without your approval. "
+            "Use a long, unique secret and share it only with trusted devices."))
+
+        v.addWidget(hline())
+        v.addWidget(self._section_label("PERFORMANCE"))
+
+        qrow = QHBoxLayout()
+        qrow.addWidget(QLabel("Image quality"))
+        self._remote_quality = QSlider(Qt.Orientation.Horizontal)
+        self._remote_quality.setRange(20, 95)
+        self._remote_quality.setValue(config.load_remote_quality())
+        self._rq_lbl = QLabel(str(self._remote_quality.value()))
+        self._remote_quality.valueChanged.connect(lambda x: self._rq_lbl.setText(str(x)))
+        qrow.addWidget(self._remote_quality, 1)
+        qrow.addWidget(self._rq_lbl)
+        v.addLayout(qrow)
+        v.addWidget(self._hint("Higher quality is sharper but uses more bandwidth."))
+
+        frow = QHBoxLayout()
+        frow.addWidget(QLabel("Frame rate (frames per second)"))
+        self._remote_fps = QSpinBox()
+        self._remote_fps.setRange(1, 30)
+        self._remote_fps.setValue(config.load_remote_fps())
+        frow.addStretch(1)
+        frow.addWidget(self._remote_fps)
+        v.addLayout(frow)
+
+        trow = QHBoxLayout()
+        trow.addWidget(QLabel("Approval timeout (seconds)"))
+        self._remote_timeout = QSpinBox()
+        self._remote_timeout.setRange(10, 600)
+        self._remote_timeout.setValue(config.load_remote_timeout())
+        trow.addStretch(1)
+        trow.addWidget(self._remote_timeout)
+        v.addLayout(trow)
+        v.addWidget(self._hint(
+            "How long an incoming request waits for you to click Allow before it "
+            "is automatically declined."))
+
         v.addStretch(1)
         return w
 

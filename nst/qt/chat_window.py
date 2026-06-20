@@ -595,6 +595,12 @@ class ChatWindow(QWidget):
         self._ft = FileTransferService(chat_service)
         self._ft.start()
 
+        # Remote-screen viewing: set by app.py once the service exists. The chat
+        # window only launches outgoing viewer sessions; the host side lives in
+        # RemoteHostController.
+        self._remote_service = None
+        self._remote_windows: list = []
+
         # Deliver worker-thread transfer updates onto the GUI thread.
         self._xfer_progress.connect(self._on_xfer_progress)
         self._xfer_finished.connect(self._on_xfer_finished)
@@ -750,6 +756,12 @@ class ChatWindow(QWidget):
         self._btn_search.setToolTip("Search messages and files")
         self._btn_search.clicked.connect(self._open_search)
         head.addWidget(self._btn_search)
+        self._btn_remote = QPushButton("🖥")
+        self._btn_remote.setProperty("variant", "ghost")
+        self._btn_remote.setFixedWidth(40)
+        self._btn_remote.setToolTip("View / control this peer's screen")
+        self._btn_remote.clicked.connect(self._open_remote)
+        head.addWidget(self._btn_remote)
         self._btn_manage = QPushButton("⚙ Manage")
         self._btn_manage.clicked.connect(self._manage_active)
         head.addWidget(self._btn_manage)
@@ -1320,6 +1332,7 @@ class ChatWindow(QWidget):
         self._btn_add.setVisible(is_room and can_post)
         self._btn_manage.setVisible(is_room)
         self._btn_save.setVisible(not is_room and key != DemoBot.IP)
+        self._btn_remote.setVisible(not is_room and key != DemoBot.IP)
         # File send and emoji: 1:1 peers only.
         self._btn_file.setVisible(not is_room)
         self._btn_emoji.setVisible(not is_room)
@@ -1337,6 +1350,35 @@ class ChatWindow(QWidget):
         if prev != key:
             self.update_roster(self.chat.peers())
 
+    # ── remote screen ─────────────────────────────────────────────────────────
+    def set_remote_service(self, service) -> None:
+        """Give the chat window the RemoteScreenService so the 🖥 button works."""
+        self._remote_service = service
+
+    def apply_remote_enabled(self, enabled: bool) -> None:
+        """Start/stop accepting incoming screen sessions when the user toggles it."""
+        if not self._remote_service:
+            return
+        if enabled:
+            self._remote_service.start()   # idempotent
+        else:
+            self._remote_service.stop()
+
+    def _open_remote(self) -> None:
+        key = self._active
+        if not key or self._is_room(key) or key == DemoBot.IP:
+            return
+        if not self._remote_service:
+            QMessageBox.information(self, "Remote screen",
+                                    "Remote screen is not available.")
+            return
+        from .remote_window import open_viewer
+        win = open_viewer(self._remote_service, key, self._display_name(key))
+        # Keep a reference so the window isn't garbage-collected; drop it on close.
+        self._remote_windows.append(win)
+        win.destroyed.connect(lambda *_: self._remote_windows.remove(win)
+                              if win in self._remote_windows else None)
+
     def _set_composer_visible(self, on: bool) -> None:
         self._composer.setVisible(on)
         self._btn_clear.setVisible(on)
@@ -1344,6 +1386,7 @@ class ChatWindow(QWidget):
             self._btn_add.setVisible(False)
             self._btn_save.setVisible(False)
             self._btn_manage.setVisible(False)
+            self._btn_remote.setVisible(False)
             self._readonly_lbl.setVisible(False)
             self._cancel_reply()
 
