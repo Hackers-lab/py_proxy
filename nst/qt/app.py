@@ -148,6 +148,10 @@ def run() -> None:
         quit_app=quit_app,
     )
     updates.status.connect(lambda m: toasts.notify("Software update", m, "update"))
+    # Mirror update activity into the main window's event log: the detailed
+    # progress (update found, installer size, download %) plus the status lines.
+    updates.log.connect(main.log)
+    updates.status.connect(main.log)
     chat_window.set_on_closed(updates.apply_staged_if_any)
     main.set_update_manager(updates)
 

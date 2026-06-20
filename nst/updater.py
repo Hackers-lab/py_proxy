@@ -93,26 +93,59 @@ def _fetch_latest() -> tuple[str, str] | None:
     return best[1], best[2]
 
 
-def _download(url: str, version: str) -> str:
-    """Download *url* to %TEMP% and return the local path."""
+def _fmt_size(n: int) -> str:
+    """Bytes → a short human size, e.g. '12.4 MB'."""
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
+def _download(url: str, version: str, progress=None) -> str:
+    """Download *url* to %TEMP% and return the local path.
+
+    *progress* (optional) is called with human-readable strings as the download
+    starts, advances (~every 25%) and completes — wired to the event log so the
+    user can see the installer's size and download progress.
+    """
     safe = re.sub(r"[^0-9A-Za-z._-]", "_", version) or "latest"
     dest = os.path.join(tempfile.gettempdir(),
                         f"NetSplitTunnel_Setup_{safe}.exe")
     req = urllib.request.Request(
         url, headers={"User-Agent": "NetSplitTunnel-Updater"})
     with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if progress:
+            progress(f"Downloading update v{version}"
+                     + (f" ({_fmt_size(total)})…" if total else "…"))
+        got = 0
+        last_pct = 0
         while True:
             chunk = resp.read(65536)
             if not chunk:
                 break
             f.write(chunk)
+            got += len(chunk)
+            if progress and total:
+                pct = got * 100 // total
+                if pct >= last_pct + 25 and pct < 100:
+                    last_pct = pct
+                    progress(f"Update v{version}: {pct}% "
+                             f"({_fmt_size(got)} / {_fmt_size(total)})")
+        if progress:
+            progress(f"Update v{version} downloaded ({_fmt_size(got)}).")
     return dest
 
 
-def _check_for_update() -> tuple[str, str] | None:
+def _check_for_update(progress=None) -> tuple[str, str] | None:
     """Find + download a newer installer. Returns ``(version, path)`` or None.
 
-    No-ops when running from source (not frozen).
+    No-ops when running from source (not frozen). *progress* is forwarded to
+    :func:`_download` for event-log reporting.
     """
     if not getattr(sys, "frozen", False):
         return None
@@ -122,7 +155,9 @@ def _check_for_update() -> tuple[str, str] | None:
     version, url = latest
     if not _is_newer(version, __version__):
         return None
-    return version, _download(url, version)
+    if progress:
+        progress(f"Update v{version} found (current v{__version__}).")
+    return version, _download(url, version, progress)
 
 
 def _launch_installer(path: str) -> bool:
@@ -162,6 +197,7 @@ class UpdateManager(QObject):
 
     _ready = pyqtSignal(str, str)   # version, installer_path  (worker → UI thread)
     status = pyqtSignal(str)        # human message, for manual "Check for updates"
+    log = pyqtSignal(str)           # detailed progress (update found, size, %) → event log
 
     def __init__(self, is_chat_open, quit_app, parent=None) -> None:
         super().__init__(parent)
@@ -184,7 +220,9 @@ class UpdateManager(QObject):
 
     def _worker(self, manual: bool) -> None:
         try:
-            result = _check_for_update()
+            # self.log.emit is thread-safe (Qt queues it to the GUI thread), so
+            # the download can report size/progress straight into the event log.
+            result = _check_for_update(progress=self.log.emit)
         except Exception as e:
             if manual:
                 self.status.emit(f"Update check failed: {e}")
