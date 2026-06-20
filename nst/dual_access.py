@@ -34,6 +34,14 @@ def get_adapter_for_ip(ip: str) -> str | None:
     return None
 
 
+def get_adapter_dns_servers(adapter: str) -> list[str]:
+    """Read DNS server IPs currently configured on *adapter* via netsh."""
+    import re as _re
+    _, out, _ = run_cmd(["netsh", "interface", "ip", "show", "dns", adapter])
+    found = _re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', out)
+    return found if found else DEFAULT_DNS
+
+
 # ── Status checks ─────────────────────────────────────────────────────────────
 
 def check_secondary_ip(internet_ip: str) -> bool:
@@ -150,7 +158,6 @@ import sys   # noqa: E402  (after the primitives so circular-import risk is low)
 
 
 def enable_dual_access(intranet_ip: str, internet_ip: str,
-                       dns_servers: list[str],
                        domains: list[str]) -> tuple[bool, str]:
     adapter = get_adapter_for_ip(intranet_ip)
     if not adapter:
@@ -158,6 +165,8 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
 
     intranet_gw  = _derive_gw(intranet_ip)
     internet_gw  = _derive_gw(internet_ip)
+    # Read DNS already configured on this adapter; fall back to built-in defaults
+    dns_servers  = get_adapter_dns_servers(adapter) or DEFAULT_DNS
     dns_csv      = ",".join(dns_servers)
     domain_csv   = ",".join(domains)
 

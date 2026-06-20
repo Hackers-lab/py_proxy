@@ -260,50 +260,59 @@ class MainWindow(QMainWindow):
     def _build_dual(self) -> QWidget:
         card, v = self._card("DUAL ACCESS  —  LAN + Internet simultaneously")
 
-        # Internet IP row
-        irow = QHBoxLayout()
-        irow.addWidget(QLabel("Internet IP :"))
+        # Two-column input row
+        cols = QHBoxLayout()
+
+        left = QVBoxLayout()
+        left.setSpacing(3)
+        left.addWidget(QLabel("Internet IP"))
         self._dual_ip_edit = QLineEdit(config.load_dual_internet_ip())
         self._dual_ip_edit.setStyleSheet(_MONO)
-        self._dual_ip_edit.setPlaceholderText("192.168.x.x")
+        self._dual_ip_edit.setPlaceholderText("e.g. 192.168.1.50")
         self._dual_ip_edit.textChanged.connect(
             lambda t: config.save_dual_internet_ip(t.strip()))
-        irow.addWidget(self._dual_ip_edit, 1)
-        v.addLayout(irow)
+        left.addWidget(self._dual_ip_edit)
 
-        # DNS row
-        dnsrow = QHBoxLayout()
-        dnsrow.addWidget(QLabel("DNS Servers :"))
-        self._dual_dns_edit = QLineEdit(",".join(config.load_dual_dns_servers()))
-        self._dual_dns_edit.setStyleSheet(_MONO)
-        self._dual_dns_edit.textChanged.connect(
-            lambda t: config.save_dual_dns_servers(
-                [s.strip() for s in t.split(",") if s.strip()]))
-        dnsrow.addWidget(self._dual_dns_edit, 1)
-        v.addLayout(dnsrow)
-
-        # Domains row
-        domrow = QHBoxLayout()
-        domrow.addWidget(QLabel("Domains     :"))
+        right = QVBoxLayout()
+        right.setSpacing(3)
+        right.addWidget(QLabel("NRPT Domains  (comma-separated)"))
         self._dual_dom_edit = QLineEdit(",".join(config.load_dual_domains()))
         self._dual_dom_edit.setStyleSheet(_MONO)
+        self._dual_dom_edit.setPlaceholderText("e.g. corp.local,company.in")
         self._dual_dom_edit.textChanged.connect(
             lambda t: config.save_dual_domains(
                 [s.strip() for s in t.split(",") if s.strip()]))
-        domrow.addWidget(self._dual_dom_edit, 1)
-        v.addLayout(domrow)
+        right.addWidget(self._dual_dom_edit)
+
+        cols.addLayout(left, 1)
+        cols.addSpacing(10)
+        cols.addLayout(right, 1)
+        v.addLayout(cols)
+
+        hint = QLabel("Intranet DNS is auto-read from your adapter — no extra config needed.")
+        hint.setObjectName("muted")
+        v.addWidget(hint)
 
         v.addWidget(hline())
 
-        # Status labels
+        # Status — two per row
+        srow1 = QHBoxLayout()
         self._lbl_da_intranet = QLabel("Intranet Route  :  —")
         self._lbl_da_secip    = QLabel("Secondary IP    :  —")
-        self._lbl_da_inet     = QLabel("Internet Route  :  —")
-        self._lbl_da_dns      = QLabel("Split DNS/NRPT  :  —")
-        for lbl in (self._lbl_da_intranet, self._lbl_da_secip,
-                    self._lbl_da_inet, self._lbl_da_dns):
-            lbl.setStyleSheet(_MONO)
-            v.addWidget(lbl)
+        self._lbl_da_intranet.setStyleSheet(_MONO)
+        self._lbl_da_secip.setStyleSheet(_MONO)
+        srow1.addWidget(self._lbl_da_intranet, 1)
+        srow1.addWidget(self._lbl_da_secip, 1)
+        v.addLayout(srow1)
+
+        srow2 = QHBoxLayout()
+        self._lbl_da_inet = QLabel("Internet Route  :  —")
+        self._lbl_da_dns  = QLabel("Split DNS/NRPT  :  —")
+        self._lbl_da_inet.setStyleSheet(_MONO)
+        self._lbl_da_dns.setStyleSheet(_MONO)
+        srow2.addWidget(self._lbl_da_inet, 1)
+        srow2.addWidget(self._lbl_da_dns, 1)
+        v.addLayout(srow2)
 
         v.addWidget(hline())
 
@@ -358,14 +367,12 @@ class MainWindow(QMainWindow):
                                  "No intranet IP detected. Connect to the intranet first.")
             return
 
-        dns_servers = config.load_dual_dns_servers()
-        domains     = config.load_dual_domains()
+        domains = config.load_dual_domains()
 
         if self._dual_active:
             ok, msg = disable_dual_access(self._detected_ip, internet_ip, domains)
         else:
-            ok, msg = enable_dual_access(
-                self._detected_ip, internet_ip, dns_servers, domains)
+            ok, msg = enable_dual_access(self._detected_ip, internet_ip, domains)
 
         self.log(msg)
         self._update_dual_status()

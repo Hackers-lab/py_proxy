@@ -14,6 +14,7 @@ startup or raises into the UI.
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -61,7 +62,19 @@ def _fetch_latest() -> tuple[str, str] | None:
         headers={"User-Agent": "NetSplitTunnel-Updater",
                  "Accept": "application/vnd.github+json"},
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    def _open(ctx=None):
+        return urllib.request.urlopen(req, timeout=15, context=ctx)
+    try:
+        resp_ctx = _open()
+    except urllib.error.URLError as exc:
+        if "certificate" in str(exc).lower() or "ssl" in str(exc).lower():
+            _ctx = ssl.create_default_context()
+            _ctx.check_hostname = False
+            _ctx.verify_mode = ssl.CERT_NONE
+            resp_ctx = _open(_ctx)
+        else:
+            raise
+    with resp_ctx as resp:
         data = json.loads(resp.read().decode("utf-8"))
     best = None  # (version_tuple, version_str, url)
     for asset in data.get("assets", []):
