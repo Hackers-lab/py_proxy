@@ -14,11 +14,12 @@ import time
 import uuid
 
 from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QDragEnterEvent, QDragLeaveEvent, QDropEvent, QPixmap
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
-                             QFrame, QHBoxLayout, QInputDialog, QLabel,
-                             QLineEdit, QListWidget, QListWidgetItem, QMenu,
-                             QMessageBox, QPlainTextEdit, QPushButton,
+from PyQt6.QtGui import (QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
+                        QDropEvent, QPainter, QPainterPath, QPen, QPixmap)
+from PyQt6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QDialog,
+                             QFileDialog, QFrame, QHBoxLayout, QInputDialog,
+                             QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                             QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                              QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, config
@@ -297,43 +298,61 @@ class _RosterRow(QFrame):
         super().mousePressEvent(e)
 
 
-class _MsgRow(QWidget):
-    """A message row whose reply button is always visible (grey) and turns the
-    accent colour while the row is hovered, so it's discoverable without
-    cluttering the bubble."""
+class _ReplyButton(QAbstractButton):
+    """A reply arrow drawn with QPainter (not a font glyph, so it always shows).
 
-    def __init__(self) -> None:
+    Always visible in the accent colour; while the parent row is hovered it
+    fills into an accent circle with a white arrow."""
+
+    def __init__(self, accent: str) -> None:
         super().__init__()
-        self._reply_btn: QPushButton | None = None
-        self._grey = ""
-        self._blue = ""
-
-    def attach_reply(self, btn: "QPushButton", base: str, accent: str) -> None:
-        self._reply_btn = btn
-        self._base, self._accent = base, accent
-        self._style(False)
-
-    def _style(self, hovering: bool) -> None:
-        if self._reply_btn is None:
-            return
-        if hovering:
-            # Filled accent circle with a white arrow while the row is hovered.
-            self._reply_btn.setStyleSheet(
-                "QPushButton{border:none; border-radius:13px; font-size:16px;"
-                " background:%s; color:#ffffff;}" % self._accent)
-        else:
-            # Always-visible accent-coloured arrow (no background).
-            self._reply_btn.setStyleSheet(
-                "QPushButton{border:none; background:transparent;"
-                " font-size:17px; font-weight:700; color:%s;}" % self._base)
+        self._accent = QColor(accent)
+        self._hover = False
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Reply")
 
     def enterEvent(self, e) -> None:
-        self._style(True)
+        self._hover = True
+        self.update()
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:
-        self._style(False)
+        self._hover = False
+        self.update()
         super().leaveEvent(e)
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        if self._hover:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._accent)
+            p.drawEllipse(0, 0, w, h)
+            stroke = QColor("#ffffff")
+        else:
+            stroke = self._accent
+        pen = QPen(stroke)
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Reply arrow: an arrowhead on the left + an L-shaped shaft going
+        # right then up — reads as a "reply/back" curve.
+        tip_x, mid_y = w * 0.30, h * 0.56
+        head = QPainterPath()
+        head.moveTo(w * 0.46, h * 0.36)
+        head.lineTo(tip_x, mid_y)
+        head.lineTo(w * 0.46, h * 0.72)
+        p.drawPath(head)
+        shaft = QPainterPath()
+        shaft.moveTo(tip_x, mid_y)
+        shaft.lineTo(w * 0.66, mid_y)
+        shaft.cubicTo(w * 0.80, mid_y, w * 0.80, h * 0.30,
+                      w * 0.66, h * 0.30)
+        p.drawPath(shaft)
 
 
 class _Composer(QPlainTextEdit):
@@ -1401,7 +1420,7 @@ class ChatWindow(QWidget):
         grouped = self._grouped_with(entry, prev)
         active = self._active or ""
         in_room = self._is_group(active) or self._is_channel(active)
-        row = _MsgRow()
+        row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(4, 1 if grouped else 9, 4, 1)
         h.setSpacing(6)
@@ -1531,21 +1550,16 @@ class ChatWindow(QWidget):
         vv.addWidget(reaction_row)
 
         # Reply affordance: an always-visible accent-coloured arrow on the
-        # bubble's inner side, becoming a filled accent circle while the row is
-        # hovered. Plain "↩" (no emoji variation selector) renders as a crisp
-        # text arrow in Segoe UI.
+        # bubble's inner side (painted, so it never depends on a font glyph),
+        # filling into an accent circle while the row is hovered.
         snd = "You" if is_out else sender
-        reply_btn = QPushButton("↩")
-        reply_btn.setFixedSize(26, 26)
-        reply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reply_btn.setToolTip("Reply")
+        reply_btn = _ReplyButton(theme.color("accent"))
         reply_btn.clicked.connect(lambda _=False, s=snd, t=text: self._set_reply(s, t))
         hslot = QWidget()
         hslot.setFixedWidth(28)
         hsl = QHBoxLayout(hslot)
         hsl.setContentsMargins(1, 0, 1, 0)
         hsl.addWidget(reply_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
-        row.attach_reply(reply_btn, theme.color("accent"), theme.color("accent"))
 
         # Avatar beside incoming messages in a group/channel so it's clear who
         # is speaking. Grouped (consecutive) messages get a blank spacer to keep
