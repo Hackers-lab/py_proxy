@@ -62,6 +62,19 @@ def _route_cli() -> bool:
             adapter     = a[i+2] if i+2 < len(a) else "",
             domain_csv  = a[i+3] if i+3 < len(a) else "",
         ))
+
+    if "--apply-profile" in sys.argv:
+        from nst import ipswitch
+        i = sys.argv.index("--apply-profile")
+        a = sys.argv
+        sys.exit(ipswitch._do_apply(
+            adapter = a[i+1] if i+1 < len(a) else "",
+            mode    = a[i+2] if i+2 < len(a) else "static",
+            ip      = a[i+3] if i+3 < len(a) else "",
+            mask    = a[i+4] if i+4 < len(a) else "255.255.255.0",
+            gateway = a[i+5] if i+5 < len(a) else "",
+            dns     = a[i+6] if i+6 < len(a) else "",
+        ))
     return False
 
 

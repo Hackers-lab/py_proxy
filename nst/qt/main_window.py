@@ -8,10 +8,11 @@ import time
 import psutil
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                             QFrame, QGroupBox, QHBoxLayout, QLabel,
                              QLineEdit, QMainWindow, QMenu, QMessageBox,
-                             QPlainTextEdit, QPushButton, QStackedWidget,
-                             QVBoxLayout, QWidget)
+                             QPlainTextEdit, QPushButton, QRadioButton,
+                             QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, config
 from ..beacon import ClientScanner, HostBeacon
@@ -27,6 +28,7 @@ from ..dual_access import (check_secondary_ip, check_internet_route,
                            enable_dual_access, disable_dual_access)
 from ..routing import (add_intranet_route, check_route_exists,
                        delete_intranet_route, _network_from_ip)
+from ..ipswitch import apply_profile, is_profile_active, list_adapters
 from ..win_utils import is_admin
 from .signals import MainSignals
 from .theme import theme
@@ -184,9 +186,13 @@ class MainWindow(QMainWindow):
         self._tab_dual = QPushButton("Dual Access")
         self._tab_dual.setObjectName("navItem")
         self._tab_dual.clicked.connect(lambda: self._show_tab(2))
+        self._tab_ipswitch = QPushButton("IP Switch")
+        self._tab_ipswitch.setObjectName("navItem")
+        self._tab_ipswitch.clicked.connect(lambda: self._show_tab(3))
         tabs.addWidget(self._tab_host)
         tabs.addWidget(self._tab_client)
         tabs.addWidget(self._tab_dual)
+        tabs.addWidget(self._tab_ipswitch)
         tabs.addStretch(1)
         root.addLayout(tabs)
 
@@ -194,6 +200,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._build_host())
         self._stack.addWidget(self._build_client())
         self._stack.addWidget(self._build_dual())
+        self._stack.addWidget(self._build_ipswitch())
         root.addWidget(self._stack)
 
         root.addWidget(self._build_traffic())
@@ -272,7 +279,6 @@ class MainWindow(QMainWindow):
             lambda t: config.save_dual_internet_ip(t.strip()))
         ip_row.addWidget(self._dual_ip_edit, 1)
         self._btn_dual_detect = QPushButton("Auto")
-        self._btn_dual_detect.setFixedWidth(52)
         self._btn_dual_detect.clicked.connect(self._detect_internet_ip)
         ip_row.addWidget(self._btn_dual_detect)
         v.addLayout(ip_row)
@@ -418,6 +424,165 @@ class MainWindow(QMainWindow):
         self._dual_checking = False   # allow an immediate recheck
         self._update_dual_status()
 
+    # ── IP Switch tab ─────────────────────────────────────────────────────────
+
+    def _build_ipswitch(self) -> QWidget:
+        card, v = self._card("IP SWITCH  —  One-click network profiles")
+
+        # 2×2 grid of profile buttons
+        self._ipswitch_btns: list[QPushButton] = []
+        grid_top = QHBoxLayout()
+        grid_bot = QHBoxLayout()
+        for n in range(1, 5):
+            btn = QPushButton()
+            btn.setMinimumHeight(52)
+            btn.clicked.connect(lambda checked=False, i=n: self._apply_ip_profile(i))
+            self._ipswitch_btns.append(btn)
+            (grid_top if n <= 2 else grid_bot).addWidget(btn)
+        v.addLayout(grid_top)
+        v.addLayout(grid_bot)
+
+        v.addWidget(hline())
+
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        cfg_btn = QPushButton("⚙  Configure Profiles")
+        cfg_btn.clicked.connect(self._open_ipswitch_settings)
+        foot.addWidget(cfg_btn)
+        v.addLayout(foot)
+
+        self._refresh_ipswitch_buttons()
+        return card
+
+    def _refresh_ipswitch_buttons(self) -> None:
+        for idx, btn in enumerate(self._ipswitch_btns, start=1):
+            p = config.load_ip_profile(idx)
+            name = p["name"] or f"Profile {idx}"
+            if not p["ip"] and p["mode"] != "dhcp":
+                btn.setText(f"—  {name}")
+                btn.setProperty("variant", "")
+                btn.setEnabled(False)
+            else:
+                active = is_profile_active(p["adapter"], p["mode"], p["ip"])
+                icon = "■" if active else "▶"
+                btn.setText(f"{icon}  {name}")
+                btn.setProperty("variant", "success" if active else "")
+                btn.setEnabled(True)
+            btn.style().unpolish(btn); btn.style().polish(btn)
+
+    def _apply_ip_profile(self, n: int) -> None:
+        p = config.load_ip_profile(n)
+        if not p["adapter"]:
+            QMessageBox.warning(self, "Profile not configured",
+                                "Open ⚙ Configure Profiles and set up this slot first.")
+            return
+        ok, msg = apply_profile(p["adapter"], p["mode"],
+                                p["ip"], p["mask"], p["gateway"], p["dns"])
+        self.log(msg)
+        QTimer.singleShot(1500, self._refresh_ipswitch_buttons)
+
+    def _open_ipswitch_settings(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("IP Switch — Configure Profiles")
+        dlg.setMinimumWidth(420)
+        dlg_v = QVBoxLayout(dlg)
+
+        tabs = QTabWidget()
+        editors: list[dict] = []
+
+        adapters = list_adapters()
+
+        for n in range(1, 5):
+            p = config.load_ip_profile(n)
+            page = QWidget()
+            pv = QVBoxLayout(page)
+            pv.setSpacing(6)
+
+            def _row(label, widget, layout=pv):
+                r = QHBoxLayout()
+                lbl = QLabel(label)
+                lbl.setFixedWidth(80)
+                r.addWidget(lbl)
+                r.addWidget(widget, 1)
+                layout.addLayout(r)
+
+            e_name = QLineEdit(p["name"]); e_name.setPlaceholderText(f"Profile {n}")
+            _row("Name", e_name)
+
+            e_adapter = QComboBox()
+            e_adapter.addItems(adapters)
+            if p["adapter"] in adapters:
+                e_adapter.setCurrentText(p["adapter"])
+            _row("Adapter", e_adapter)
+
+            mode_grp = QGroupBox("Mode")
+            mg = QHBoxLayout(mode_grp)
+            r_static = QRadioButton("Static"); r_dhcp = QRadioButton("DHCP")
+            if p["mode"] == "dhcp":
+                r_dhcp.setChecked(True)
+            else:
+                r_static.setChecked(True)
+            mg.addWidget(r_static); mg.addWidget(r_dhcp)
+            pv.addWidget(mode_grp)
+
+            static_box = QGroupBox()
+            static_box.setFlat(True)
+            sv = QVBoxLayout(static_box)
+            sv.setSpacing(4)
+
+            def _srow(label, val, ph=""):
+                e = QLineEdit(val); e.setPlaceholderText(ph)
+                e.setStyleSheet(_MONO_INPUT)
+                r2 = QHBoxLayout()
+                lbl2 = QLabel(label); lbl2.setFixedWidth(80)
+                r2.addWidget(lbl2); r2.addWidget(e, 1)
+                sv.addLayout(r2)
+                return e
+
+            e_ip   = _srow("IP",      p["ip"],      "e.g. 10.0.0.50")
+            e_mask = _srow("Mask",    p["mask"],    "e.g. 255.255.255.0")
+            e_gw   = _srow("Gateway", p["gateway"], "e.g. 10.0.0.1")
+            e_dns  = _srow("DNS",     p["dns"],     "e.g. 10.0.0.1,8.8.8.8")
+            pv.addWidget(static_box)
+
+            def _toggle_static(checked, sb=static_box, rb=r_static):
+                sb.setEnabled(rb.isChecked())
+            r_static.toggled.connect(_toggle_static)
+            static_box.setEnabled(r_static.isChecked())
+
+            editors.append(dict(
+                n=n, name=e_name, adapter=e_adapter,
+                r_static=r_static, r_dhcp=r_dhcp,
+                ip=e_ip, mask=e_mask, gw=e_gw, dns=e_dns,
+            ))
+            tabs.addTab(page, f"Profile {n}")
+
+        dlg_v.addWidget(tabs)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel)
+        dlg_v.addWidget(btns)
+
+        def _save():
+            for e in editors:
+                config.save_ip_profile(
+                    e["n"],
+                    name    = e["name"].text().strip(),
+                    adapter = e["adapter"].currentText(),
+                    mode    = "dhcp" if e["r_dhcp"].isChecked() else "static",
+                    ip      = e["ip"].text().strip(),
+                    mask    = e["mask"].text().strip(),
+                    gateway = e["gw"].text().strip(),
+                    dns     = e["dns"].text().strip(),
+                )
+            self._refresh_ipswitch_buttons()
+            dlg.accept()
+
+        btns.accepted.connect(_save)
+        btns.rejected.connect(dlg.reject)
+        dlg.exec()
+
     def _build_traffic(self) -> QWidget:
         card, v = self._card("NETWORK TRAFFIC MONITOR")
         row = QHBoxLayout()
@@ -470,7 +635,8 @@ class MainWindow(QMainWindow):
         self._tab_host.setProperty("active", "true" if idx == 0 else "false")
         self._tab_client.setProperty("active", "true" if idx == 1 else "false")
         self._tab_dual.setProperty("active", "true" if idx == 2 else "false")
-        for b in (self._tab_host, self._tab_client, self._tab_dual):
+        self._tab_ipswitch.setProperty("active", "true" if idx == 3 else "false")
+        for b in (self._tab_host, self._tab_client, self._tab_dual, self._tab_ipswitch):
             b.style().unpolish(b); b.style().polish(b)
 
     # ── signal wiring ─────────────────────────────────────────────────────────
@@ -634,6 +800,8 @@ class MainWindow(QMainWindow):
             self._detected_ip = self._detected_gw = None
         self._update_proxy_btn(); self._update_route_btn()
         self._update_dual_status()
+        if self._stack.currentIndex() == 3:
+            self._refresh_ipswitch_buttons()
         if self._client_connected and self._chk_disable.isChecked():
             threading.Thread(target=self._client_health, daemon=True).start()
 

@@ -476,3 +476,29 @@ def save_dual_domains(domains: list[str]) -> bool:
     return _write_value("DualDomains", winreg.REG_SZ, ",".join(domains))
 
 
+# ── IP Switch profiles ─────────────────────────────────────────────────────────
+
+def load_ip_profile(n: int) -> dict:
+    """Return profile dict for slot n (1-4). All values are strings."""
+    return {
+        "name":    str(_read_value(f"IpSwitch{n}Name",    "")).strip(),
+        "adapter": str(_read_value(f"IpSwitch{n}Adapter", "")).strip(),
+        "mode":    str(_read_value(f"IpSwitch{n}Mode",    "static")).strip(),
+        "ip":      str(_read_value(f"IpSwitch{n}IP",      "")).strip(),
+        "mask":    str(_read_value(f"IpSwitch{n}Mask",    "255.255.255.0")).strip(),
+        "gateway": str(_read_value(f"IpSwitch{n}Gateway", "")).strip(),
+        "dns":     str(_read_value(f"IpSwitch{n}DNS",     "")).strip(),
+    }
+
+def save_ip_profile(n: int, name: str, adapter: str, mode: str,
+                    ip: str, mask: str, gateway: str, dns: str) -> bool:
+    ok  = _write_value(f"IpSwitch{n}Name",    winreg.REG_SZ, name)
+    ok &= _write_value(f"IpSwitch{n}Adapter", winreg.REG_SZ, adapter)
+    ok &= _write_value(f"IpSwitch{n}Mode",    winreg.REG_SZ, mode)
+    ok &= _write_value(f"IpSwitch{n}IP",      winreg.REG_SZ, ip)
+    ok &= _write_value(f"IpSwitch{n}Mask",    winreg.REG_SZ, mask)
+    ok &= _write_value(f"IpSwitch{n}Gateway", winreg.REG_SZ, gateway)
+    ok &= _write_value(f"IpSwitch{n}DNS",     winreg.REG_SZ, dns)
+    return ok
+
+
