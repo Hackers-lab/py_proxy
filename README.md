@@ -138,7 +138,7 @@ Click **💬 LAN Chat** to open the chat window. Every PC running the app on the
 - **Delete for everyone** — within 3 minutes of sending; the bubble becomes a tombstone on both sides
 - **Delete for me** — removes a message from your local view only
 - **Typing indicators** — shows who is typing in real time
-- **Read receipts** — single tick (sent), double tick (delivered), blue double tick (read); group messages show a "X/Y Seen" count
+- **Read receipts** — grey single tick (sent), grey double tick (delivered), **green** double tick (read); group messages show a "X/Y Seen" count
 
 ### File Transfer
 

@@ -8,6 +8,35 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.9.13 — 2026-06-20
+- Chat read receipts now show **green** double-ticks (read) vs grey double-ticks
+  (delivered), so the two are easy to tell apart.
+- Reworked the message UI: cleaner quoted-reply cards, an always-visible reply
+  arrow beside each message, consecutive same-sender messages grouped, sender
+  avatars in group chats, system notices shown as pills, and an animated typing
+  indicator.
+- Composer polish: emoji button moved inside the input, file + send buttons now
+  match the composer height, a simple painted paperclip attach icon, and a
+  circular Send button that lights up only when there's text.
+- Added a confirmation prompt before clearing a conversation.
+- Demo Bot now simulates delivered/read receipts so the ticks can be tried out.
+- Dual Access: restores the adapter's original DNS on disable (instead of forcing
+  DHCP), and only removes the internet default route it added (no longer wipes
+  the real gateway); the internet route now wins via an explicit metric.
+- Update check survives corporate SSL-inspection (retries on certificate errors).
+
+## v4.9.12 — 2026-06-20
+- New **IP Switch** tab: save up to 4 network profiles (static/auto) and apply
+  one with a click, with a modern segmented configure dialog.
+- Fixed profile/route/dual switching failing with "exit 2" when run from source.
+- **Dual Access** tab: auto-detects the internet IP from the DHCP cache, reads
+  intranet DNS automatically, with background status checks (no UI freeze).
+- Traffic monitor uses bps as the lowest unit in Auto mode; larger main window.
+
+## v4.9.11 — 2026-06-20
+- New **Dual Access** tab: use the corporate intranet and the internet at the
+  same time over one adapter (secondary IP + split routes + split DNS).
+
 ## v4.9.10 — 2026-06-20
 - Fixed an endless self-update loop: a stale `Setup_v4.9.6.exe` had been
   committed and was being re-published with every release, so the updater kept
