@@ -1462,39 +1462,46 @@ class ChatWindow(QWidget):
             fl.setStyleSheet("color:%s; font-style:italic; font-size:10px;" % txcol)
             bv.addWidget(fl)
         if isinstance(reply, dict) and reply.get("text"):
-            # Colour the nested quote to contrast with its own bubble: white on
-            # the blue outgoing bubble, accent on the light incoming bubble --
-            # never blue-on-blue.
+            # Quoted reply rendered as a clean inset card with a coloured left
+            # bar. The outgoing (blue) bubble darkens rather than white-washing;
+            # the incoming bubble gets a subtle grey tint. The background is
+            # scoped to #quoteCard so it never bleeds onto the child labels
+            # (which would otherwise double-paint and look patchy).
             if is_out:
-                q_bg, q_stripe = "rgba(255,255,255,0.20)", "rgba(255,255,255,0.85)"
-                q_who, q_tx = "#ffffff", "rgba(255,255,255,0.88)"
+                q_bg, q_stripe = "rgba(0,0,0,0.20)", "rgba(255,255,255,0.92)"
+                q_who, q_tx = "#ffffff", "rgba(255,255,255,0.82)"
             else:
-                q_bg, q_stripe = "rgba(127,127,127,0.14)", theme.color("accent")
-                q_who, q_tx = theme.color("accent"), txcol
+                q_bg, q_stripe = "rgba(127,127,127,0.16)", theme.color("accent")
+                q_who, q_tx = theme.color("accent"), theme.color("text_sec")
             q = QFrame()
-            q.setStyleSheet("background:%s; border-radius:7px;" % q_bg)
+            q.setObjectName("quoteCard")
+            q.setStyleSheet(
+                "QFrame#quoteCard{background:%s; border-radius:8px;}" % q_bg)
             qh = QHBoxLayout(q)
             qh.setContentsMargins(0, 0, 0, 0)
             qh.setSpacing(0)
             stripe = QFrame()
-            stripe.setFixedWidth(3)
-            stripe.setStyleSheet("background:%s; border-top-left-radius:7px;"
-                                 "border-bottom-left-radius:7px;" % q_stripe)
+            stripe.setFixedWidth(4)
+            stripe.setStyleSheet(
+                "background:%s; border-top-left-radius:8px;"
+                "border-bottom-left-radius:8px;" % q_stripe)
             qh.addWidget(stripe)
             qv = QVBoxLayout()
-            qv.setContentsMargins(8, 3, 8, 3)
-            qv.setSpacing(0)
+            qv.setContentsMargins(10, 5, 10, 5)
+            qv.setSpacing(1)
             who = QLabel(reply.get("sender", ""))
-            who.setStyleSheet("color:%s; font-weight:700; font-size:10px;" % q_who)
+            who.setStyleSheet("color:%s; font-weight:700; font-size:10px;"
+                              " background:transparent;" % q_who)
             snip = reply["text"]
             snip = snip if len(snip) <= 80 else snip[:77] + "..."
             qt = QLabel(snip)
-            qt.setStyleSheet("color:%s; font-size:11px;" % q_tx)
+            qt.setStyleSheet("color:%s; font-size:11px; background:transparent;" % q_tx)
             qt.setWordWrap(True)
             qv.addWidget(who)
             qv.addWidget(qt)
             qh.addLayout(qv, 1)
             bv.addWidget(q)
+            bv.addSpacing(2)
 
         msg = QLabel(text)
         msg.setWordWrap(True)
