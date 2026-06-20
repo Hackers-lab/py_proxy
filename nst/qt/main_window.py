@@ -21,6 +21,9 @@ from ..netinfo import (calculate_gateway, check_host_reachable,
                        format_speed, get_intranet_ip, is_valid_ipv4)
 from ..proxy_registry import clear_proxy, read_current_proxy, set_proxy
 from ..proxy_server import ProxyServer
+from ..dual_access import (check_secondary_ip, check_internet_route,
+                           check_intranet_route, check_nrpt,
+                           enable_dual_access, disable_dual_access)
 from ..routing import (add_intranet_route, check_route_exists,
                        delete_intranet_route, _network_from_ip)
 from ..win_utils import is_admin
@@ -29,6 +32,14 @@ from .theme import theme
 from .widgets import hline
 
 _MONO = "font-family:'Consolas','Cascadia Mono',monospace; font-size:12px;"
+
+
+def _derive_internet_gw(ip: str) -> str:
+    parts = ip.split(".") if ip else []
+    if len(parts) == 4:
+        parts[-1] = "1"
+        return ".".join(parts)
+    return ""
 
 
 class MainWindow(QMainWindow):
@@ -60,6 +71,7 @@ class MainWindow(QMainWindow):
         self._detected_ip = None
         self._detected_gw = None
         self._route_network: str = "10.0.0.0"  # updated when route is added
+        self._dual_active: bool = False
         self._last_net = psutil.net_io_counters()
         self._last_net_t = time.time()
 
@@ -167,14 +179,19 @@ class MainWindow(QMainWindow):
         self._tab_client = QPushButton("Client Mode")
         self._tab_client.setObjectName("navItem")
         self._tab_client.clicked.connect(lambda: self._show_tab(1))
+        self._tab_dual = QPushButton("Dual Access")
+        self._tab_dual.setObjectName("navItem")
+        self._tab_dual.clicked.connect(lambda: self._show_tab(2))
         tabs.addWidget(self._tab_host)
         tabs.addWidget(self._tab_client)
+        tabs.addWidget(self._tab_dual)
         tabs.addStretch(1)
         root.addLayout(tabs)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_host())
         self._stack.addWidget(self._build_client())
+        self._stack.addWidget(self._build_dual())
         root.addWidget(self._stack)
 
         root.addWidget(self._build_traffic())
@@ -240,6 +257,119 @@ class MainWindow(QMainWindow):
         v.addLayout(brow)
         return card
 
+    def _build_dual(self) -> QWidget:
+        card, v = self._card("DUAL ACCESS  —  LAN + Internet simultaneously")
+
+        # Internet IP row
+        irow = QHBoxLayout()
+        irow.addWidget(QLabel("Internet IP :"))
+        self._dual_ip_edit = QLineEdit(config.load_dual_internet_ip())
+        self._dual_ip_edit.setStyleSheet(_MONO)
+        self._dual_ip_edit.setPlaceholderText("192.168.x.x")
+        self._dual_ip_edit.textChanged.connect(
+            lambda t: config.save_dual_internet_ip(t.strip()))
+        irow.addWidget(self._dual_ip_edit, 1)
+        v.addLayout(irow)
+
+        # DNS row
+        dnsrow = QHBoxLayout()
+        dnsrow.addWidget(QLabel("DNS Servers :"))
+        self._dual_dns_edit = QLineEdit(",".join(config.load_dual_dns_servers()))
+        self._dual_dns_edit.setStyleSheet(_MONO)
+        self._dual_dns_edit.textChanged.connect(
+            lambda t: config.save_dual_dns_servers(
+                [s.strip() for s in t.split(",") if s.strip()]))
+        dnsrow.addWidget(self._dual_dns_edit, 1)
+        v.addLayout(dnsrow)
+
+        # Domains row
+        domrow = QHBoxLayout()
+        domrow.addWidget(QLabel("Domains     :"))
+        self._dual_dom_edit = QLineEdit(",".join(config.load_dual_domains()))
+        self._dual_dom_edit.setStyleSheet(_MONO)
+        self._dual_dom_edit.textChanged.connect(
+            lambda t: config.save_dual_domains(
+                [s.strip() for s in t.split(",") if s.strip()]))
+        domrow.addWidget(self._dual_dom_edit, 1)
+        v.addLayout(domrow)
+
+        v.addWidget(hline())
+
+        # Status labels
+        self._lbl_da_intranet = QLabel("Intranet Route  :  —")
+        self._lbl_da_secip    = QLabel("Secondary IP    :  —")
+        self._lbl_da_inet     = QLabel("Internet Route  :  —")
+        self._lbl_da_dns      = QLabel("Split DNS/NRPT  :  —")
+        for lbl in (self._lbl_da_intranet, self._lbl_da_secip,
+                    self._lbl_da_inet, self._lbl_da_dns):
+            lbl.setStyleSheet(_MONO)
+            v.addWidget(lbl)
+
+        v.addWidget(hline())
+
+        brow = QHBoxLayout()
+        self._btn_dual = QPushButton("▶  Enable Dual Access")
+        self._btn_dual.setProperty("variant", "success")
+        self._btn_dual.clicked.connect(self._toggle_dual)
+        brow.addWidget(self._btn_dual)
+        brow.addStretch(1)
+        v.addLayout(brow)
+        return card
+
+    def _update_dual_status(self) -> None:
+        internet_ip = self._dual_ip_edit.text().strip()
+        internet_gw = _derive_internet_gw(internet_ip)
+        domains     = config.load_dual_domains()
+
+        def _mark(lbl, active, text):
+            lbl.setText(text)
+            lbl.setStyleSheet(_MONO + (
+                f"color:{theme.color('success')};" if active
+                else f"color:{theme.color('danger')};"))
+
+        intranet_ok = check_intranet_route()
+        sec_ip_ok   = check_secondary_ip(internet_ip) if internet_ip else False
+        inet_ok     = check_internet_route(internet_gw) if internet_gw else False
+        nrpt_ok     = any(check_nrpt(d) for d in domains) if domains else False
+
+        _mark(self._lbl_da_intranet, intranet_ok,
+              f"Intranet Route  :  {'ACTIVE' if intranet_ok else 'INACTIVE'}")
+        _mark(self._lbl_da_secip, sec_ip_ok,
+              f"Secondary IP    :  {'ACTIVE  (' + internet_ip + ')' if sec_ip_ok else 'INACTIVE'}")
+        _mark(self._lbl_da_inet, inet_ok,
+              f"Internet Route  :  {'ACTIVE' if inet_ok else 'INACTIVE'}")
+        _mark(self._lbl_da_dns, nrpt_ok,
+              f"Split DNS/NRPT  :  {'ACTIVE' if nrpt_ok else 'INACTIVE'}")
+
+        self._dual_active = sec_ip_ok and inet_ok and nrpt_ok
+        if self._dual_active:
+            self._set_btn(self._btn_dual, "■  Disable Dual Access", "danger")
+        else:
+            self._set_btn(self._btn_dual, "▶  Enable Dual Access", "success")
+
+    def _toggle_dual(self) -> None:
+        internet_ip = self._dual_ip_edit.text().strip()
+        if not internet_ip or not is_valid_ipv4(internet_ip):
+            QMessageBox.critical(self, "Missing Internet IP",
+                                 "Enter a valid internet IP address (e.g. 192.168.1.50).")
+            return
+        if not self._detected_ip:
+            QMessageBox.critical(self, "No Intranet IP",
+                                 "No intranet IP detected. Connect to the intranet first.")
+            return
+
+        dns_servers = config.load_dual_dns_servers()
+        domains     = config.load_dual_domains()
+
+        if self._dual_active:
+            ok, msg = disable_dual_access(self._detected_ip, internet_ip, domains)
+        else:
+            ok, msg = enable_dual_access(
+                self._detected_ip, internet_ip, dns_servers, domains)
+
+        self.log(msg)
+        self._update_dual_status()
+
     def _build_traffic(self) -> QWidget:
         card, v = self._card("NETWORK TRAFFIC MONITOR")
         row = QHBoxLayout()
@@ -291,7 +421,8 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         self._tab_host.setProperty("active", "true" if idx == 0 else "false")
         self._tab_client.setProperty("active", "true" if idx == 1 else "false")
-        for b in (self._tab_host, self._tab_client):
+        self._tab_dual.setProperty("active", "true" if idx == 2 else "false")
+        for b in (self._tab_host, self._tab_client, self._tab_dual):
             b.style().unpolish(b); b.style().polish(b)
 
     # ── signal wiring ─────────────────────────────────────────────────────────
@@ -449,6 +580,7 @@ class MainWindow(QMainWindow):
             self._lbl_gw.setText("Gateway       :  —")
             self._detected_ip = self._detected_gw = None
         self._update_proxy_btn(); self._update_route_btn()
+        self._update_dual_status()
         if self._client_connected and self._chk_disable.isChecked():
             threading.Thread(target=self._client_health, daemon=True).start()
 

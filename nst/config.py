@@ -453,3 +453,26 @@ def clear_staged_update() -> None:
     save_staged_update("", "")
 
 
+# ── Dual Access ────────────────────────────────────────────────────────────────
+
+def load_dual_internet_ip() -> str:
+    return str(_read_value("DualInternetIP", "")).strip()
+
+def save_dual_internet_ip(ip: str) -> bool:
+    return _write_value("DualInternetIP", winreg.REG_SZ, ip.strip())
+
+def load_dual_dns_servers() -> list[str]:
+    val = str(_read_value("DualDnsServers", "10.251.33.80,10.251.33.90")).strip()
+    return [s.strip() for s in val.split(",") if s.strip()]
+
+def save_dual_dns_servers(servers: list[str]) -> bool:
+    return _write_value("DualDnsServers", winreg.REG_SZ, ",".join(servers))
+
+def load_dual_domains() -> list[str]:
+    val = str(_read_value("DualDomains", "wbsedcl.in,wbsedcl.co.in")).strip()
+    return [s.strip() for s in val.split(",") if s.strip()]
+
+def save_dual_domains(domains: list[str]) -> bool:
+    return _write_value("DualDomains", winreg.REG_SZ, ",".join(domains))
+
+

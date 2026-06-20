@@ -41,6 +41,27 @@ def _route_cli() -> bool:
         i = sys.argv.index("--del-route")
         network = sys.argv[i + 1] if i + 1 < len(sys.argv) else "10.0.0.0"
         sys.exit(routing._do_del_route(network))
+
+    from nst import dual_access
+    if "--dual-enable" in sys.argv:
+        i = sys.argv.index("--dual-enable")
+        a = sys.argv
+        sys.exit(dual_access._do_enable(
+            intranet_gw = a[i+1] if i+1 < len(a) else "",
+            internet_ip = a[i+2] if i+2 < len(a) else "",
+            internet_gw = a[i+3] if i+3 < len(a) else "",
+            adapter     = a[i+4] if i+4 < len(a) else "",
+            dns_csv     = a[i+5] if i+5 < len(a) else "",
+            domain_csv  = a[i+6] if i+6 < len(a) else "",
+        ))
+    if "--dual-disable" in sys.argv:
+        i = sys.argv.index("--dual-disable")
+        a = sys.argv
+        sys.exit(dual_access._do_disable(
+            internet_ip = a[i+1] if i+1 < len(a) else "",
+            adapter     = a[i+2] if i+2 < len(a) else "",
+            domain_csv  = a[i+3] if i+3 < len(a) else "",
+        ))
     return False
 
 
