@@ -1,6 +1,6 @@
 name: Build & Release
 
-# Triggers when you push a version tag: git tag v4.9.1 && git push origin v4.9.1
+# Triggers when you push a version tag: git tag v4.9.3 && git push origin v4.9.3
 on:
   push:
     tags:
@@ -30,13 +30,26 @@ jobs:
           echo "VERSION=$v" >> $env:GITHUB_OUTPUT
 
       - name: Build executable
-        run: pyinstaller NetSplitTunnel.spec --noconfirm
+        # --clean wipes any stale PyInstaller cache so the build is reproducible
+        # (a committed build/ cache previously produced wrong-named/stale exes).
+        run: pyinstaller NetSplitTunnel.spec --noconfirm --clean
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.VERSION }}" installer.iss
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "Net Split-Tunneler v${{ steps.ver.outputs.VERSION }}"
           body_path: README.md
-          files: dist/NetSplitTunnel_v*.exe
+          files: |
+            Output/NetSplitTunnel_Setup_v*.exe
+            dist/NetSplitTunnel_v*.exe
           draft: false
           prerelease: false

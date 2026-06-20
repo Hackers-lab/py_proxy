@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QApplication
 
 from .. import config
 from ..chat import ChatService
+from ..updater import UpdateManager, apply_staged_on_launch
 from ..win_utils import get_resource_path, set_app_user_model_id
 from .chat_window import ChatWindow
 from .main_window import MainWindow
@@ -20,6 +21,9 @@ from .tray import SpeedOverlay, TrayManager, chat_icon
 
 
 def run() -> None:
+    # Apply a previously staged update before anything else (exits if it runs).
+    apply_staged_on_launch()
+
     set_app_user_model_id()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -116,7 +120,20 @@ def run() -> None:
     main.set_overlay(overlay)
     tray.show()
 
+    # ── silent self-update ────────────────────────────────────────────────────
+    # Apply updates only while the chat window is closed, so an active
+    # conversation is never interrupted. Found-while-chatting updates are staged
+    # and applied the moment the chat closes (see ChatWindow.closeEvent).
+    updates = UpdateManager(
+        is_chat_open=lambda: chat_window.isVisible() and not chat_window.isMinimized(),
+        quit_app=quit_app,
+    )
+    updates.status.connect(lambda m: toasts.notify("Software update", m, "update"))
+    chat_window.set_on_closed(updates.apply_staged_if_any)
+    main.set_update_manager(updates)
+
     chat.start()
     main.show()
+    updates.start()
 
     sys.exit(app.exec())

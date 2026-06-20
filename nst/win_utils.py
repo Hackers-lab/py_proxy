@@ -56,18 +56,65 @@ def is_admin() -> bool:
         return False
 
 
-def elevate() -> None:
-    """Relaunch the process elevated via UAC, then exit the current one."""
-    script = os.path.abspath(sys.argv[0])
-    params = " ".join(f'"{a}"' for a in sys.argv[1:])
-    executable = sys.executable
-    # Use pythonw.exe so no cmd window flashes while elevating.
-    if executable.lower().endswith("python.exe"):
-        executable = executable[:-10] + "pythonw.exe"
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", executable, f'"{script}" {params}', None, 1
-    )
-    sys.exit(0)
+# Sentinel returned when the elevated launch itself fails (e.g. the user
+# dismisses the UAC prompt). Distinct from any real route.exe exit code.
+ELEVATION_CANCELLED = 1223  # ERROR_CANCELLED
+
+
+def run_elevated_and_wait(args: list[str]) -> int:
+    """Run *args* elevated via UAC (hidden), wait, and return the exit code.
+
+    Used for the one privileged operation the app has — adding/removing the
+    persistent intranet route. The first element of *args* is the executable
+    (normally ``sys.executable``); the rest are its arguments. Returns the
+    child's exit code, or :data:`ELEVATION_CANCELLED` if elevation could not
+    start (most commonly because the user cancelled the UAC prompt).
+    """
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SW_HIDE = 0
+    INFINITE = 0xFFFFFFFF
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_ulong),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", ctypes.c_void_p),
+            ("lpVerb", ctypes.c_wchar_p),
+            ("lpFile", ctypes.c_wchar_p),
+            ("lpParameters", ctypes.c_wchar_p),
+            ("lpDirectory", ctypes.c_wchar_p),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", ctypes.c_void_p),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", ctypes.c_wchar_p),
+            ("hkeyClass", ctypes.c_void_p),
+            ("dwHotKey", ctypes.c_ulong),
+            ("hIcon", ctypes.c_void_p),
+            ("hProcess", ctypes.c_void_p),
+        ]
+
+    params = " ".join(f'"{a}"' for a in args[1:])
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS
+    info.lpVerb = "runas"
+    info.lpFile = args[0]
+    info.lpParameters = params
+    info.nShow = SW_HIDE
+
+    try:
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
+            return ELEVATION_CANCELLED
+        if not info.hProcess:
+            return ELEVATION_CANCELLED
+        kernel32 = ctypes.windll.kernel32
+        kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+        kernel32.CloseHandle(info.hProcess)
+        return int(code.value)
+    except Exception:
+        return ELEVATION_CANCELLED
 
 
 def get_idle_seconds() -> float:

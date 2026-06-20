@@ -1,10 +1,9 @@
 """Registry-backed persistent settings.
 
-Autostart uses Windows Task Scheduler (not the Run registry key) because the
-app requests administrator privileges via its UAC manifest. Windows silently
-skips Run-key entries that require elevation at logon (no interactive desktop
-is available to show the UAC prompt). A scheduled task with "Run with highest
-privileges" is the correct workaround for portable admin-level executables.
+Autostart uses the HKCU ``Run`` key. The app runs as a normal user (no UAC
+manifest), so the Run key starts it silently at logon — no Task Scheduler
+workaround is needed. The installer also writes this value; the in-app toggle
+lets users opt out.
 
 Everything else lives under ``HKCU\\Software\\NetSplitTunnel``.
 """
@@ -17,52 +16,59 @@ import sys
 import uuid
 import winreg
 
-from .constants import REG_APP_PATH, RUN_VALUE_NAME
+from .constants import REG_APP_PATH, REG_RUN_PATH, RUN_VALUE_NAME
 
-_TASK_NAME = RUN_VALUE_NAME   # "NetSplitTunnel"
+# ── Autostart (HKCU Run key) ──────────────────────────────────────────────────
 
-# ── Autostart (Task Scheduler) ────────────────────────────────────────────────
+def _autostart_command() -> str:
+    """The command Windows runs at logon."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+
 
 def set_autostart(enabled: bool) -> tuple[bool, str]:
-    """Register or remove a logon-triggered scheduled task that runs elevated.
+    """Add/remove the HKCU Run-key value that launches the app at logon."""
+    try:
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_RUN_PATH)
+        try:
+            if enabled:
+                winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ,
+                                  _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, RUN_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(key)
+    except Exception as e:
+        return False, f"Autostart registry error: {e}"
 
-    The HKCU Run key cannot auto-elevate, so apps with a UAC requireAdministrator
-    manifest are silently skipped at login. A Task Scheduler entry with
-    /rl HIGHEST bypasses the UAC prompt and reliably starts the app.
-    """
+    # Best-effort: clean up the old scheduled task left by pre-4.9.3 installs.
     if enabled:
-        if getattr(sys, "frozen", False):
-            exe = sys.executable
-        else:
-            exe = f"{sys.executable} {os.path.abspath(sys.argv[0])}"
-        # /f  — overwrite if the task already exists
-        # /sc onlogon — trigger: when the current user logs on
-        # /rl highest — run with highest available privileges (no UAC prompt)
-        # /delay 0000:30 — 30-second delay so the desktop is ready
-        cmd = (
-            f'schtasks /create /f'
-            f' /tn "{_TASK_NAME}"'
-            f' /tr "{exe}"'
-            f' /sc onlogon'
-            f' /rl highest'
-            f' /delay 0000:30'
-        )
-    else:
-        cmd = f'schtasks /delete /f /tn "{_TASK_NAME}"'
+        try:
+            subprocess.run(f'schtasks /delete /f /tn "{RUN_VALUE_NAME}"',
+                           shell=True, capture_output=True, text=True)
+        except Exception:
+            pass
 
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        return True, f"Autostart {'enabled' if enabled else 'disabled'} via Task Scheduler."
-    err = (result.stderr or result.stdout or "unknown error").strip()
-    return False, f"Task Scheduler error: {err}"
+    return True, f"Autostart {'enabled' if enabled else 'disabled'}."
 
 
 def is_autostart_enabled() -> bool:
-    result = subprocess.run(
-        f'schtasks /query /tn "{_TASK_NAME}"',
-        shell=True, capture_output=True, text=True
-    )
-    return result.returncode == 0
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_RUN_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            winreg.QueryValueEx(key, RUN_VALUE_NAME)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        return False
 
 # ── Generic app-key helpers ───────────────────────────────────────────────────
 
@@ -413,5 +419,34 @@ def save_blocked_users(users: list[dict]) -> bool:
             seen.add(ip)
             clean.append({"ip": ip, "name": str(u.get("name", ip))})
     return _write_json("BlockedUsers", clean)
+
+# ── Auto-update ────────────────────────────────────────────────────────────────
+
+def load_auto_update_enabled() -> bool:
+    """Whether the app silently self-updates from GitHub Releases (default on)."""
+    return bool(_read_value("AutoUpdate", 1))
+
+
+def save_auto_update_enabled(enabled: bool) -> bool:
+    return _write_value("AutoUpdate", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+def load_staged_update() -> tuple[str, str]:
+    """A downloaded-but-not-yet-applied installer: ``(version, path)``.
+
+    Set when an update is found mid-session while the chat window is open; the
+    installer runs once the chat closes or on the next launch. Empty if none.
+    """
+    return (str(_read_value("StagedUpdateVersion", "")).strip(),
+            str(_read_value("StagedUpdatePath", "")).strip())
+
+
+def save_staged_update(version: str, path: str) -> bool:
+    ok = _write_value("StagedUpdateVersion", winreg.REG_SZ, version or "")
+    return _write_value("StagedUpdatePath", winreg.REG_SZ, path or "") and ok
+
+
+def clear_staged_update() -> None:
+    save_staged_update("", "")
 
 

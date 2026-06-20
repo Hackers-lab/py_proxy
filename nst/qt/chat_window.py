@@ -816,10 +816,20 @@ class ChatWindow(QWidget):
         if key:
             self.select_peer(key)
 
+    def set_on_closed(self, cb) -> None:
+        """Register a callback fired whenever the user closes (hides) the chat."""
+        self._on_closed = cb
+
     def closeEvent(self, e) -> None:
         e.ignore()
         self._visible = False
         self.hide()
+        cb = getattr(self, "_on_closed", None)
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def showEvent(self, e) -> None:
         self._visible = True

@@ -3,3 +3,9 @@ __pycache__/
 
 # PyInstaller intermediate build artifacts
 build/
+*.spec.bak
+
+# Build outputs (produced by CI / local builds — never commit)
+dist/
+Output/
+build.log

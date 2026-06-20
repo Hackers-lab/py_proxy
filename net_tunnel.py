@@ -17,23 +17,41 @@ import sys
 
 from nst.win_utils import (
     check_single_instance,
-    elevate,
     hide_console,
-    is_admin,
     show_already_running_dialog,
 )
 
 
+def _route_cli() -> bool:
+    """Handle the elevated route-helper invocations.
+
+    The app no longer runs elevated; the split-tunnel route (the only operation
+    that needs admin) is performed by relaunching this exe elevated with one of
+    these flags. These branches do the route op and exit — no UI, no mutex.
+    Returns True if a route command was handled (caller should not continue).
+    """
+    from nst import routing
+
+    if "--add-route" in sys.argv:
+        i = sys.argv.index("--add-route")
+        gateway = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        sys.exit(routing._do_add_route(gateway))
+    if "--del-route" in sys.argv:
+        sys.exit(routing._do_del_route())
+    return False
+
+
 def main() -> None:
     hide_console()
-    if not is_admin():
-        elevate()  # relaunches elevated, then exits this process
+
+    # Elevated route helper (relaunched via UAC by nst.routing); never opens UI.
+    _route_cli()
 
     if not check_single_instance():
         show_already_running_dialog()
         sys.exit(0)
 
-    # Import the UI lazily — only the surviving, elevated, single instance needs it.
+    # Import the UI lazily — only the surviving, single instance needs it.
     from nst.qt.app import run
 
     run()
@@ -49,6 +67,8 @@ if __name__ == "__main__":
 #  pip install psutil PyQt6 pyinstaller
 #  pyinstaller NetSplitTunnel.spec
 #
-#  Output: dist\NetSplitTunnel_v4.5.exe
-#  The uac_admin manifest means Windows prompts for elevation on every launch.
+#  Output: dist\NetSplitTunnel_v<version>.exe
+#  The app runs as a normal user (no UAC). Admin is requested on demand only
+#  when the split-tunnel route is toggled. Distributed via the per-user
+#  Inno Setup installer (installer.iss); see the release workflow.
 # ──────────────────────────────────────────────────────────────────────────────

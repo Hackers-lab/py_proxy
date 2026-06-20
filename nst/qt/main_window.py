@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self._tray = None
         self._overlay = None
         self._tray_notified = False
+        self._update_mgr = None
         self.sig = MainSignals()
 
         self.setWindowTitle("Net Split-Tunneler & Proxy Sharing Tool")
@@ -111,6 +112,10 @@ class MainWindow(QMainWindow):
         self._act_speed.setChecked(config.load_show_speed_in_taskbar())
         self._act_speed.triggered.connect(self._toggle_speed)
         setm.addAction(self._act_speed)
+        self._act_autoupdate = QAction("Update automatically", self, checkable=True)
+        self._act_autoupdate.setChecked(config.load_auto_update_enabled())
+        self._act_autoupdate.triggered.connect(self._toggle_autoupdate)
+        setm.addAction(self._act_autoupdate)
         setm.addSeparator()
         self._act_light = QAction("Light theme", self, checkable=True)
         self._act_light.setChecked(not theme.is_dark())
@@ -122,6 +127,7 @@ class MainWindow(QMainWindow):
         a = QAction("Run Chat Demo", self); a.triggered.connect(lambda: self._run_demo()); chatm.addAction(a)
 
         aboutm = mb.addMenu("About")
+        a = QAction("Check for updates", self); a.triggered.connect(self._check_updates); aboutm.addAction(a)
         a = QAction("About Net Split-Tunneler", self); a.triggered.connect(self._about); aboutm.addAction(a)
 
     # ── ui ────────────────────────────────────────────────────────────────────
@@ -394,6 +400,21 @@ class MainWindow(QMainWindow):
                 self._overlay.hide()
         else:
             QMessageBox.critical(self, "Registry Error", "Failed to save settings.")
+
+    # ── updates ───────────────────────────────────────────────────────────────
+    def set_update_manager(self, mgr) -> None:
+        self._update_mgr = mgr
+
+    def _toggle_autoupdate(self) -> None:
+        enabled = self._act_autoupdate.isChecked()
+        config.save_auto_update_enabled(enabled)
+        self.log(f"Automatic updates {'enabled' if enabled else 'disabled'}.")
+
+    def _check_updates(self) -> None:
+        if self._update_mgr is None:
+            return
+        self.log("Checking for updates…")
+        self._update_mgr.check(manual=True)
 
     # ── theme ─────────────────────────────────────────────────────────────────
     def _toggle_theme(self) -> None:
