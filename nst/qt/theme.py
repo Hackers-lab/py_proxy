@@ -193,6 +193,10 @@ class QtTheme(QObject):
         QFrame#rosterRow[active="true"] {{
             background: {p['select_bg']};
             border-left: 3px solid {p['accent']};
+            border-top-left-radius: 0px;
+            border-bottom-left-radius: 0px;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
         }}
 
         QLabel#unread {{

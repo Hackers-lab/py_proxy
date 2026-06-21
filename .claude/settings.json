@@ -46,7 +46,8 @@
       "PowerShell(git tag v4.12.0)",
       "PowerShell(git push origin v4.12.0)",
       "PowerShell(python -c \"from nst.qt import app, chat_window, theme; from nst.qt.widgets import header_icon_pixmap; print\\('import OK'\\)\" 2>&1)",
-      "PowerShell(python -c \"from nst.qt import app, chat_window; print\\('OK'\\)\" 2>&1)"
+      "PowerShell(python -c \"from nst.qt import app, chat_window; print\\('OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from nst.qt import theme; print\\('OK'\\)\" 2>&1)"
     ]
   }
 }

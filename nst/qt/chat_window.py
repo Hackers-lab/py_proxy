@@ -662,13 +662,24 @@ class ChatWindow(QWidget):
         s.setContentsMargins(12, 12, 12, 12)
         s.setSpacing(8)
 
-        # YOU header
+        # YOU header row: YOU label — [theme] [bell] [status] [gear]
         you = QHBoxLayout()
+        you.setSpacing(4)
         lbl = QLabel("YOU")
         lbl.setObjectName("section")
         you.addWidget(lbl)
         you.addStretch(1)
-        # Bell — shows notification state at a glance; click opens pause menu.
+        # Theme toggle (☀ / ☾)
+        self._theme_btn = QToolButton()
+        self._theme_btn.setObjectName("bellBtn")   # reuse same transparent style
+        tf = self._theme_btn.font()
+        tf.setPixelSize(15)
+        self._theme_btn.setFont(tf)
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        self._refresh_theme_btn()
+        you.addWidget(self._theme_btn)
+        # Bell — shows popup-pause state; click opens timer menu or resumes.
         self._bell_btn = QToolButton()
         self._bell_btn.setObjectName("bellBtn")
         bf = self._bell_btn.font()
@@ -678,21 +689,18 @@ class ChatWindow(QWidget):
         self._bell_btn.clicked.connect(self._open_bell_menu)
         self._refresh_bell_btn()
         you.addWidget(self._bell_btn)
-        # Status chip — a presence-coloured dot + ▾ that opens the status /
-        # notifications menu (bordered #statusChip styling so it stands out).
+        # Status chip — presence dot + ▾
         self._status_btn = QToolButton()
         self._status_btn.setObjectName("statusChip")
         self._status_btn.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._status_btn.setText("▾")
         self._status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._status_btn.setToolTip("Your status & notifications")
+        self._status_btn.setToolTip("Your status")
         self._status_btn.clicked.connect(self._open_status_menu)
         self._refresh_status_btn()
         you.addWidget(self._status_btn)
-        # Settings gear (⚙) — the app menu (Network Tools, Settings, updates,
-        # etc.). Dark, no box; font set in code so it doesn't trip Qt's
-        # "QFont::setPointSize <= 0" stylesheet warning.
+        # Settings gear ⚙
         gear = QToolButton()
         gear.setObjectName("gearBtn")
         gear.setText("⚙")
@@ -705,6 +713,7 @@ class ChatWindow(QWidget):
         gear.clicked.connect(self._open_app_menu)
         you.addWidget(gear)
         s.addLayout(you)
+        s.addWidget(hline())
 
         idrow = QHBoxLayout()
         self._self_avatar = Avatar(self.chat.my_name, 34)
@@ -1084,6 +1093,15 @@ class ChatWindow(QWidget):
         config.save_display_name(new)
         self._self_avatar.set_name(new)
         self._log(f"Chat display name set to '{new}'.")
+
+    def _refresh_theme_btn(self) -> None:
+        self._theme_btn.setText("☀️" if theme.is_dark() else "🌙")
+        self._theme_btn.setToolTip(
+            "Switch to light mode" if theme.is_dark() else "Switch to dark mode")
+
+    def _toggle_theme(self) -> None:
+        theme.toggle()
+        self._refresh_theme_btn()
 
     def _refresh_bell_btn(self) -> None:
         if not self._popup_paused:
