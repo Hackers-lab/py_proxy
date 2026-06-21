@@ -8,6 +8,13 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.1 — 2026-06-22
+- **New: "What's New" chat** — after an update, a virtual peer appears in the roster and delivers the release notes as chat messages. Clicking the update toast navigates straight to it.
+- **Bell pause timer** — click 🔔 to pause window pop-up for 15 min / 1 hr / 2 hr / 6 hr / 24 hr; click 🔕 to resume instantly. Toast and sound keep working while paused.
+- **Dark/light toggle** (☀️ / 🌙) added to the chat header row.
+- **Straight selection bar** — the active-peer left accent line is now a clean vertical bar with no curved corners.
+- Sound diagnostic: event log now shows exactly why sound was skipped (muted, DND, volume 0, per-scope off).
+
 ## v4.12.0 — 2026-06-21
 - **Chat is now the primary window** — the app opens straight into LAN Chat on
   launch instead of the proxy/splitter window.

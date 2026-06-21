@@ -154,6 +154,20 @@ class ChatService:
         return sorted(merged, key=lambda p: p.name.lower())
 
     # ── demo / virtual peers ──────────────────────────────────────────────────
+    def add_updates_bot(self) -> "UpdatesBot":
+        """Add the What's New virtual peer (no networking, no replies)."""
+        bot = UpdatesBot(self)
+        with self._lock:
+            self._virtual[bot.peer.ip] = bot
+        self._emit_roster()
+        return bot
+
+    def has_updates_bot(self) -> bool:
+        return UpdatesBot.IP in self._virtual
+
+    def get_updates_bot(self) -> "UpdatesBot | None":
+        return self._virtual.get(UpdatesBot.IP)  # type: ignore[return-value]
+
     def add_demo_bot(self) -> "DemoBot":
         """Add a simulated peer so the chat UX can be tried on a single PC.
 
@@ -308,7 +322,7 @@ class ChatService:
 
     def is_peer_online(self, ip: str) -> bool:
         """True if the peer is within the timeout window of last being seen."""
-        if ip == DemoBot.IP:
+        if ip in (DemoBot.IP, UpdatesBot.IP):
             return True
         with self._lock:
             p = self._peers.get(ip)
@@ -450,7 +464,7 @@ class ChatService:
 
     def peer_status(self, ip: str) -> str:
         """Return 'online', 'away' or 'offline' for *ip*."""
-        if ip == DemoBot.IP:
+        if ip in (DemoBot.IP, UpdatesBot.IP):
             return "online"
         with self._lock:
             p = self._peers.get(ip)
@@ -852,3 +866,30 @@ class DemoBot:
         reply = self._REPLIES[self._i % len(self._REPLIES)]
         self._i += 1
         self._say(reply, 1.8)
+
+
+class UpdatesBot:
+    """Virtual peer that delivers What's New changelog messages — no networking."""
+
+    IP   = "system:updates"
+    NAME = "What's New 🆕"
+
+    def __init__(self, service: "ChatService") -> None:
+        self.service = service
+        self.peer = Peer(ip=self.IP, name=self.NAME, last_seen=time.time())
+
+    def _post(self, text: str, delay: float = 0.0) -> None:
+        def fire():
+            if self.service._on_message and self.IP in self.service._virtual:
+                self.service._on_message(
+                    self.IP, self.NAME, text, time.time(),
+                    None, uuid.uuid4().hex[:16])
+        threading.Timer(delay, fire).start()
+
+    def post_notes(self, version: str, bullets: list[str]) -> None:
+        self._post(f"✨ Updated to v{version} — here's what changed:", 0.15)
+        for i, bullet in enumerate(bullets):
+            self._post(bullet, 0.25 + i * 0.12)
+
+    def on_user_message(self, _text: str, mid: str = "") -> None:
+        pass   # read-only bot — no replies

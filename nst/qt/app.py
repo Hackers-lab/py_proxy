@@ -4,13 +4,14 @@ toasts and tray, then runs the event loop."""
 import os
 import sys
 
-from PyQt6.QtCore import Qt, qInstallMessageHandler
+from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from .. import config
 from ..chat import ChatService
 from ..remotescreen import RemoteScreenService
+from .. import changelog
 from ..updater import UpdateManager, apply_staged_on_launch
 from ..win_utils import get_resource_path, set_app_user_model_id
 from .chat_window import ChatWindow
@@ -165,6 +166,7 @@ def run() -> None:
         quit_app=quit_app,
     )
     updates.status.connect(lambda m: toasts.notify("Software update", m, "update"))
+    toasts.clicked.connect(lambda key: key == "update" and chat_window._ensure_updates_bot())
     # Mirror update activity into the main window's event log: the detailed
     # progress (update found, installer size, download %) plus the status lines.
     updates.log.connect(main.log)
@@ -195,7 +197,10 @@ def run() -> None:
         chat_window.open()
     if updated_ver:
         toasts.notify("Net Split-Tunneler",
-                      f"Updated to version {updated_ver}.", "update")
+                      f"Updated to v{updated_ver} — tap to see what's new.", "update")
+        notes = changelog.get(updated_ver)
+        if notes:
+            QTimer.singleShot(800, lambda: chat_window.post_update_notes(updated_ver, notes))
 
     updates.start()
 

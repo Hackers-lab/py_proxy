@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QDialog,
                              QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, config
-from ..chat import DemoBot
+from ..chat import DemoBot, UpdatesBot
 from ..constants import CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
 from ..netinfo import check_host_reachable, is_valid_ipv4
@@ -1035,13 +1035,31 @@ class ChatWindow(QWidget):
             return 0.0
 
     # ── window visibility ─────────────────────────────────────────────────────
+    def _is_virtual(self, key: str) -> bool:
+        return key in (DemoBot.IP, UpdatesBot.IP)
+
     def open(self, key: str | None = None) -> None:
         self.showNormal()
         self.raise_()
         self.activateWindow()
         self._visible = True
-        if key:
+        if key == "update":
+            self._ensure_updates_bot()
+            QTimer.singleShot(100, lambda: self.select_peer(UpdatesBot.IP))
+        elif key:
             self.select_peer(key)
+
+    def post_update_notes(self, version: str, bullets: list[str]) -> None:
+        """Inject changelog messages into the What's New conversation."""
+        self._ensure_updates_bot()
+        bot = self.chat.get_updates_bot()
+        if bot:
+            bot.post_notes(version, bullets)
+        QTimer.singleShot(400, lambda: self.select_peer(UpdatesBot.IP))
+
+    def _ensure_updates_bot(self) -> None:
+        if not self.chat.has_updates_bot():
+            self.chat.add_updates_bot()
 
     def set_on_closed(self, cb) -> None:
         """Register a callback fired whenever the user closes (hides) the chat."""
@@ -1295,7 +1313,7 @@ class ChatWindow(QWidget):
     # ── roster ────────────────────────────────────────────────────────────────
     def _status_of(self, ip: str) -> str:
         """'online' | 'away' | 'offline' for a peer."""
-        if ip == DemoBot.IP:
+        if ip in (DemoBot.IP, UpdatesBot.IP):
             return "online"
         return self.chat.peer_status(ip)
 
@@ -1321,6 +1339,8 @@ class ChatWindow(QWidget):
     def _peer_subtitle(self, ip: str, status: str) -> str:
         if ip == DemoBot.IP:
             return "demo peer"
+        if ip == UpdatesBot.IP:
+            return "app updates"
         if status == "offline":
             return _fmt_last_seen(self.chat.last_seen_of(ip))
         dev = self._devices.get(ip)
@@ -1402,7 +1422,7 @@ class ChatWindow(QWidget):
             for ip in sorted(local_peers, key=_peer_sort):
                 status = self._status_of(ip)
                 self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, status),
-                              status, self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
+                              status, self._unread.get(ip, 0), "peer", not self._is_virtual(ip))
 
         if manual_peers and not self._add_section("IP / MANUAL", len(manual_peers)):
             for ip in sorted(manual_peers, key=_peer_sort):
@@ -1413,7 +1433,7 @@ class ChatWindow(QWidget):
         if offline_f and not self._add_section("OFFLINE", len(offline_f)):
             for ip in sorted(offline_f, key=_peer_sort):
                 self._add_row(ip, self._display_name(ip), self._peer_subtitle(ip, "offline"),
-                              "offline", self._unread.get(ip, 0), "peer", ip != DemoBot.IP)
+                              "offline", self._unread.get(ip, 0), "peer", not self._is_virtual(ip))
 
         if self._active:
             self._update_header_sub(peers)
@@ -1461,6 +1481,8 @@ class ChatWindow(QWidget):
             self._head_sub.setText(f"📢 Broadcast channel · {n} members · {role}")
         elif key == DemoBot.IP:
             self._head_sub.setText("demo peer")
+        elif key == UpdatesBot.IP:
+            self._head_sub.setText("app release notes")
         else:
             status = self._status_of(key)
             dev = self._devices.get(key)
@@ -1487,8 +1509,8 @@ class ChatWindow(QWidget):
         can_post = self._is_admin(key)
         self._btn_add.setVisible(is_room and can_post)
         self._btn_manage.setVisible(is_room)
-        self._btn_save.setVisible(not is_room and key != DemoBot.IP)
-        self._btn_remote.setVisible(not is_room and key != DemoBot.IP)
+        self._btn_save.setVisible(not is_room and not self._is_virtual(key))
+        self._btn_remote.setVisible(not is_room and not self._is_virtual(key))
         # File send and emoji: 1:1 peers only.
         self._btn_file.setVisible(not is_room)
         self._btn_emoji.setVisible(not is_room)
@@ -1522,7 +1544,7 @@ class ChatWindow(QWidget):
 
     def _open_remote(self) -> None:
         key = self._active
-        if not key or self._is_room(key) or key == DemoBot.IP:
+        if not key or self._is_room(key) or self._is_virtual(key):
             return
         if not self._remote_service:
             QMessageBox.information(self, "Remote screen",
@@ -2171,7 +2193,7 @@ class ChatWindow(QWidget):
 
     def _mark_read(self, key) -> None:
         """Send 'read' receipts once the chat is open+focused."""
-        if key == DemoBot.IP or self._is_channel(key):
+        if self._is_virtual(key) or self._is_channel(key):
             return   # broadcast channels are read-only; no receipts
         if not (self._visible and self.isActiveWindow() and key == self._active):
             return
@@ -2238,7 +2260,7 @@ class ChatWindow(QWidget):
         for gid, g in self._groups.items():
             targets[f"👥 {g.get('name', 'Group')}"] = f"group:{gid}"
         for ip in self._visible_peers(self.chat.peers()):
-            if ip == DemoBot.IP or ip == self._active:
+            if self._is_virtual(ip) or ip == self._active:
                 continue
             targets[f"{self._display_name(ip)} ({ip})"] = ip
         if not targets:
@@ -2454,7 +2476,7 @@ class ChatWindow(QWidget):
     # ── typing indicators ─────────────────────────────────────────────────────
     def _on_typing_edit(self) -> None:
         key = self._active
-        if (not key or key == DemoBot.IP or self._is_channel(key)
+        if (not key or self._is_virtual(key) or self._is_channel(key)
                 or not self._entry.text().strip()):
             return
         now = time.time()
@@ -2567,7 +2589,7 @@ class ChatWindow(QWidget):
     # ── alias / delete ────────────────────────────────────────────────────────
     def _edit_alias(self) -> None:
         ip = self._active
-        if not ip or self._is_group(ip) or ip == DemoBot.IP:
+        if not ip or self._is_group(ip) or self._is_virtual(ip):
             return
         cur = self._aliases.get(ip, "")
         name, ok = QInputDialog.getText(self, "Save name", f"Name for {ip}:",
@@ -2620,7 +2642,7 @@ class ChatWindow(QWidget):
         blocked = set(self.chat.blocked_ips())
         cands = [ip for ip in (set(self._names) | set(self._aliases) | set(self._conversations))
                  if ip not in exclude and ip != self.chat.my_ip
-                 and ip != DemoBot.IP and not self._is_room(ip) and ip not in blocked]
+                 and not self._is_virtual(ip) and not self._is_room(ip) and ip not in blocked]
         cands.sort(key=lambda x: self._display_name(x).lower())
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
@@ -3080,7 +3102,7 @@ class ChatWindow(QWidget):
             if self._is_admin(key):
                 m.addAction("⚙ Manage channel", lambda: self._manage_channel_dialog(key[8:]))
             m.addAction("Delete/leave channel", lambda: self._delete_channel(key))
-        elif key != DemoBot.IP:
+        elif not self._is_virtual(key):
             m.addAction("✎ Save name", lambda: (self.select_peer(key), self._edit_alias()))
             m.addSeparator()
             if key in self.chat.blocked_ips():
