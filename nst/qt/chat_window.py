@@ -569,6 +569,7 @@ class ChatWindow(QWidget):
         self._collapsed: set[str] = set()   # roster sections the user folded away
         self._reply_to: dict | None = None
         self._notifications_enabled = config.load_notifications_enabled()
+        self._popup_paused: bool = False   # bell pause: suppresses window-raise only
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
         # Peers the user deleted -- hidden from the roster until they contact us.
@@ -812,10 +813,16 @@ class ChatWindow(QWidget):
         self._btn_add.setProperty("variant", "accent")
         self._btn_add.clicked.connect(self._add_group_members)
         head.addWidget(self._btn_add)
-        self._btn_save = QPushButton("✎ Save name")
+        self._btn_save = QPushButton("💾")
+        self._btn_save.setProperty("variant", "ghost")
+        self._btn_save.setFixedWidth(40)
+        self._btn_save.setToolTip("Edit display name / alias")
         self._btn_save.clicked.connect(self._edit_alias)
         head.addWidget(self._btn_save)
-        self._btn_clear = QPushButton("Clear")
+        self._btn_clear = QPushButton("❌")
+        self._btn_clear.setProperty("variant", "ghost")
+        self._btn_clear.setFixedWidth(40)
+        self._btn_clear.setToolTip("Clear chat history")
         self._btn_clear.clicked.connect(self._clear_chat)
         head.addWidget(self._btn_clear)
         r.addLayout(head)
@@ -1079,50 +1086,51 @@ class ChatWindow(QWidget):
         self._log(f"Chat display name set to '{new}'.")
 
     def _refresh_bell_btn(self) -> None:
-        enabled = self._notifications_enabled
-        if enabled:
+        if not self._popup_paused:
             self._bell_btn.setText("🔔")
-            self._bell_btn.setToolTip("Notifications on — click to pause")
+            self._bell_btn.setToolTip("Window pop-up on — click to pause")
         else:
             self._bell_btn.setText("🔕")
             if self._notify_resume_at:
                 remaining = max(0, self._notify_resume_at - time.time())
                 h, m = int(remaining // 3600), int((remaining % 3600) // 60)
                 when = f"{h}h {m}m" if h else f"{m}m"
-                self._bell_btn.setToolTip(f"Notifications paused — resumes in {when}")
+                self._bell_btn.setToolTip(
+                    f"Window pop-up paused — resumes in {when} (click to resume now)")
             else:
-                self._bell_btn.setToolTip("Notifications paused — click to resume")
+                self._bell_btn.setToolTip("Window pop-up paused — click to resume")
 
     def _open_bell_menu(self) -> None:
+        # If paused, a single click resumes — no menu needed.
+        if self._popup_paused:
+            self._set_popup_paused(False)
+            return
         m = QMenu(self)
-        if self._notifications_enabled:
-            m.addAction("Pause for 15 minutes",
-                        lambda: self._pause_notify(15 * 60))
-            m.addAction("Pause for 1 hour",
-                        lambda: self._pause_notify(1 * 3600))
-            m.addAction("Pause for 2 hours",
-                        lambda: self._pause_notify(2 * 3600))
-            m.addAction("Pause for 6 hours",
-                        lambda: self._pause_notify(6 * 3600))
-            m.addAction("Pause for 24 hours",
-                        lambda: self._pause_notify(24 * 3600))
-            m.addSeparator()
-            m.addAction("Pause indefinitely",
-                        lambda: self._set_notify(False))
-        else:
-            m.addAction("Resume now", lambda: self._set_notify(True))
+        m.addAction("Pause for 15 minutes",  lambda: self._pause_popup(15 * 60))
+        m.addAction("Pause for 1 hour",      lambda: self._pause_popup(1 * 3600))
+        m.addAction("Pause for 2 hours",     lambda: self._pause_popup(2 * 3600))
+        m.addAction("Pause for 6 hours",     lambda: self._pause_popup(6 * 3600))
+        m.addAction("Pause for 24 hours",    lambda: self._pause_popup(24 * 3600))
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
-    def _pause_notify(self, seconds: int) -> None:
+    def _pause_popup(self, seconds: int) -> None:
+        """Pause window-raise for *seconds*; toast + sound keep working."""
         self._notify_pause_timer.stop()
         self._notify_resume_at = time.time() + seconds
-        self._set_notify(False)
+        self._set_popup_paused(True)
         self._notify_pause_timer.start(seconds * 1000)
+
+    def _set_popup_paused(self, paused: bool) -> None:
+        if not paused:
+            self._notify_pause_timer.stop()
+            self._notify_resume_at = 0.0
+        self._popup_paused = paused
+        self._refresh_bell_btn()
+        self._log(f"Window pop-up {'paused' if paused else 'resumed'}.")
 
     def _on_notify_timer_expired(self) -> None:
         self._notify_resume_at = 0.0
-        self._set_notify(True)
-        self._log("Notifications resumed (pause timer expired).")
+        self._set_popup_paused(False)
 
     def _refresh_status_btn(self) -> None:
         """Repaint the status chip dot to match the current presence."""
@@ -1142,11 +1150,6 @@ class ChatWindow(QWidget):
         _status_item("online", "Online")
         _status_item("away", "Away")
         _status_item("invisible", "Invisible (appear offline)")
-        m.addSeparator()
-        if self._notifications_enabled:
-            m.addAction("Pause notifications", lambda: self._set_notify(False))
-        else:
-            m.addAction("Enable notifications", lambda: self._set_notify(True))
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
     def _open_full_settings(self) -> None:
@@ -1194,14 +1197,9 @@ class ChatWindow(QWidget):
         self._log(f"You now appear {status} to peers.")
 
     def _set_notify(self, enabled: bool) -> None:
-        if enabled:
-            # Clear any running timer when resuming manually.
-            self._notify_pause_timer.stop()
-            self._notify_resume_at = 0.0
+        """Master notification switch (sound + toast). Bell controls popup only."""
         self._notifications_enabled = enabled
         config.save_notifications_enabled(enabled)
-        self._refresh_bell_btn()
-        self._log(f"Notifications {'enabled' if enabled else 'paused'}.")
 
     # ── settings-dialog callbacks ─────────────────────────────────────────────
     def apply_display_name(self, name: str) -> None:
@@ -1923,15 +1921,11 @@ class ChatWindow(QWidget):
         notifs_ok = config.load_notifications_enabled() and not config.load_do_not_disturb()
         window_up = self.isVisible() and not self.isMinimized()
 
-        if sound.should_notify(scope, "popup"):
+        if sound.should_notify(scope, "popup") and not self._popup_paused:
             if window_up:
-                # Already visible in another chat -- raising does nothing; show a
-                # toast so the user sees who messaged without hijacking their view.
                 if notifs_ok:
                     self._toasts.notify(title, body, key)
             else:
-                # Raise the window to the *current* active chat; do not switch to
-                # the sender -- the roster badge is the cue for who needs attention.
                 self.showNormal()
                 self.raise_()
                 self.activateWindow()

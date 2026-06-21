@@ -2,6 +2,7 @@
 animated on/off toggle switch — all drawn with QPainter so they stay crisp at
 any DPI and recolor with the palette."""
 
+import math
 from functools import lru_cache
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtProperty, pyqtSignal
@@ -190,6 +191,131 @@ class Dot(QLabel):
     # Backwards-compatible alias.
     def set_online(self, online: bool) -> None:
         self.set_status(online)
+
+
+def header_icon_pixmap(name: str, size: int = 22, color: str = "#94a3b8") -> QPixmap:
+    """Painted header-button icons: search, remote, save, trash, manage.
+    All stroke-based, thick pen so they read clearly at 20–24 px."""
+    dpr = 2
+    pm = QPixmap(size * dpr, size * dpr)
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    pr = QPainter(pm)
+    pr.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    s = float(size)
+    c = QColor(color)
+    W = max(1.5, s * 0.10)   # standard stroke width
+
+    def pen(w=W, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin):
+        p = QPen(c, w, cap=cap, join=join)
+        pr.setPen(p)
+        pr.setBrush(Qt.BrushStyle.NoBrush)
+
+    if name == "search":
+        # Circle + handle
+        pen(W * 1.5)
+        r = s * 0.30
+        cx, cy = s * 0.38, s * 0.38
+        pr.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        pen(W * 1.8)
+        pr.drawLine(int(cx + r * 0.70), int(cy + r * 0.70),
+                    int(s * 0.86), int(s * 0.86))
+
+    elif name == "remote":
+        # Monitor screen + stand + base
+        pen(W * 1.3)
+        pr.drawRoundedRect(QRectF(s*0.08, s*0.10, s*0.84, s*0.58), s*0.07, s*0.07)
+        pen(W * 1.3)
+        pr.drawLine(int(s*0.50), int(s*0.68), int(s*0.50), int(s*0.80))
+        pr.drawLine(int(s*0.28), int(s*0.80), int(s*0.72), int(s*0.80))
+        # Play triangle inside screen (remote control hint)
+        pr.setBrush(QBrush(c))
+        pr.setPen(Qt.PenStyle.NoPen)
+        tri = QPainterPath()
+        tri.moveTo(s*0.38, s*0.27)
+        tri.lineTo(s*0.38, s*0.51)
+        tri.lineTo(s*0.62, s*0.39)
+        tri.closeSubpath()
+        pr.drawPath(tri)
+
+    elif name == "save":
+        # Pencil — body + tip + eraser top
+        pen(W * 1.2)
+        path = QPainterPath()
+        # Pencil body: a rotated thin rectangle
+        angle = math.radians(45)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        # Define the four corners of the pencil body
+        bw = s * 0.16   # half-width
+        bl = s * 0.52   # half-length
+        cx, cy = s * 0.50, s * 0.46
+        corners = [
+            (cx - cos_a*bl + sin_a*bw, cy - sin_a*bl - cos_a*bw),
+            (cx + cos_a*bl + sin_a*bw, cy + sin_a*bl - cos_a*bw),
+            (cx + cos_a*bl - sin_a*bw, cy + sin_a*bl + cos_a*bw),
+            (cx - cos_a*bl - sin_a*bw, cy - sin_a*bl + cos_a*bw),
+        ]
+        path.moveTo(*corners[0])
+        for pt in corners[1:]:
+            path.lineTo(*pt)
+        path.closeSubpath()
+        pr.setBrush(QBrush(c))
+        pr.setPen(Qt.PenStyle.NoPen)
+        pr.drawPath(path)
+        # Tip triangle at bottom-left
+        tip = QPainterPath()
+        tip_x = cx - cos_a*(bl + s*0.10)
+        tip_y = cy - sin_a*(bl + s*0.10)
+        tip.moveTo(*corners[0])
+        tip.lineTo(*corners[3])
+        tip.lineTo(tip_x, tip_y)
+        tip.closeSubpath()
+        pr.drawPath(tip)
+
+    elif name == "trash":
+        # Lid: rounded rect at top
+        pen(W * 1.3)
+        pr.drawRoundedRect(QRectF(s*0.14, s*0.12, s*0.72, s*0.14), s*0.05, s*0.05)
+        # Handle on lid
+        pen(W * 1.1)
+        pr.drawRoundedRect(QRectF(s*0.36, s*0.05, s*0.28, s*0.10), s*0.04, s*0.04)
+        # Body
+        pen(W * 1.3)
+        body = QPainterPath()
+        body.moveTo(s*0.20, s*0.26)
+        body.lineTo(s*0.24, s*0.88)
+        body.lineTo(s*0.76, s*0.88)
+        body.lineTo(s*0.80, s*0.26)
+        pr.drawPath(body)
+        pr.drawRoundedRect(QRectF(s*0.20, s*0.82, s*0.60, s*0.06), s*0.03, s*0.03)
+        # Three vertical lines inside
+        pen(W * 0.9)
+        for xf in (0.38, 0.50, 0.62):
+            pr.drawLine(int(s*xf), int(s*0.36), int(s*xf), int(s*0.78))
+
+    elif name == "manage":
+        # Two people (for group management)
+        pr.setPen(Qt.PenStyle.NoPen)
+        pr.setBrush(QBrush(c))
+        # Back person (slightly offset right)
+        pr.drawEllipse(QRectF(s*0.46, s*0.08, s*0.26, s*0.26))
+        back = QPainterPath()
+        back.moveTo(s*0.42, s*0.88)
+        back.cubicTo(s*0.42, s*0.56, s*0.94, s*0.56, s*0.94, s*0.88)
+        back.closeSubpath()
+        pr.drawPath(back)
+        # Front person (overlapping left, slightly lighter via alpha)
+        pr.setBrush(QBrush(QColor(color)))
+        pr.drawEllipse(QRectF(s*0.12, s*0.10, s*0.28, s*0.28))
+        front = QPainterPath()
+        front.moveTo(s*0.04, s*0.88)
+        front.cubicTo(s*0.04, s*0.54, s*0.58, s*0.54, s*0.58, s*0.88)
+        front.closeSubpath()
+        pr.drawPath(front)
+
+    pr.end()
+    return pm
 
 
 def hline() -> QFrame:
