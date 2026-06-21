@@ -29,7 +29,22 @@
       "Bash(echo \"EXIT=$?\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('nst/qt/main_window.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
       "Bash(python -c \"from nst.qt import main_window; print\\('imports OK'\\)\")",
-      "Bash(python -c \"from nst import ipswitch, routing, dual_access, win_utils; print\\('all modules OK'\\); print\\('relaunch cmd:', win_utils.self_relaunch_cmd\\(\\)\\)\")"
+      "Bash(python -c \"from nst import ipswitch, routing, dual_access, win_utils; print\\('all modules OK'\\); print\\('relaunch cmd:', win_utils.self_relaunch_cmd\\(\\)\\)\")",
+      "Bash(git stash *)",
+      "Bash(git checkout *)",
+      "Bash(python -c \"from nst.qt import app, chat_window; print\\('import OK'\\)\")",
+      "Bash(python -c \"from nst.qt import app, chat_window, theme; print\\('import OK'\\)\")",
+      "Bash(python -c \"from nst.qt import app, chat_window, theme; print\\('final import OK'\\)\")",
+      "Bash(python -c \"from nst.qt import theme; print\\('import OK'\\)\")",
+      "Bash(python -c \"from nst.qt import chat_window, theme; print\\('import OK'\\)\")",
+      "Bash(python -c \"from nst.qt.widgets import bell_pixmap; b=bell_pixmap\\(True,18\\); print\\('on OK', b.width\\(\\), b.height\\(\\)\\); b2=bell_pixmap\\(False,18\\); print\\('off OK'\\)\")",
+      "PowerShell(python -c \"from nst.qt.widgets import bell_pixmap; b=bell_pixmap\\(True,18\\); print\\('on OK', b.width\\(\\), b.height\\(\\)\\); b2=bell_pixmap\\(False,18\\); print\\('off OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from nst.qt import chat_window, theme; print\\('import OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from nst.qt import app, chat_window, theme; print\\('import OK'\\)\" 2>&1)",
+      "PowerShell(git add nst/__init__.py installer.iss CHANGELOG.md README.md nst/qt/app.py nst/qt/chat_window.py nst/qt/theme.py nst/qt/widgets.py)",
+      "PowerShell(git push origin main)",
+      "PowerShell(git tag v4.12.0)",
+      "PowerShell(git push origin v4.12.0)"
     ]
   }
 }

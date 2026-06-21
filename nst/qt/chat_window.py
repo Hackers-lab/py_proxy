@@ -608,6 +608,13 @@ class ChatWindow(QWidget):
         self._check_updates_cb = None
         self._quit_cb = None
 
+        # Timed notification pause. _notify_resume_at is the epoch second when
+        # the pause expires (0 = paused indefinitely or not paused).
+        self._notify_resume_at: float = 0.0
+        self._notify_pause_timer = QTimer(self)
+        self._notify_pause_timer.setSingleShot(True)
+        self._notify_pause_timer.timeout.connect(self._on_notify_timer_expired)
+
         # Deliver worker-thread transfer updates onto the GUI thread.
         self._xfer_progress.connect(self._on_xfer_progress)
         self._xfer_finished.connect(self._on_xfer_finished)
@@ -660,15 +667,14 @@ class ChatWindow(QWidget):
         lbl.setObjectName("section")
         you.addWidget(lbl)
         you.addStretch(1)
-        # Bell — shows notification state at a glance; click toggles directly.
+        # Bell — shows notification state at a glance; click opens pause menu.
         self._bell_btn = QToolButton()
         self._bell_btn.setObjectName("bellBtn")
         bf = self._bell_btn.font()
         bf.setPixelSize(15)
         self._bell_btn.setFont(bf)
         self._bell_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._bell_btn.clicked.connect(
-            lambda: self._set_notify(not self._notifications_enabled))
+        self._bell_btn.clicked.connect(self._open_bell_menu)
         self._refresh_bell_btn()
         you.addWidget(self._bell_btn)
         # Status chip — a presence-coloured dot + ▾ that opens the status /
@@ -1074,10 +1080,49 @@ class ChatWindow(QWidget):
 
     def _refresh_bell_btn(self) -> None:
         enabled = self._notifications_enabled
-        self._bell_btn.setText("🔔" if enabled else "🔕")
-        self._bell_btn.setToolTip(
-            "Notifications on — click to pause" if enabled
-            else "Notifications paused — click to enable")
+        if enabled:
+            self._bell_btn.setText("🔔")
+            self._bell_btn.setToolTip("Notifications on — click to pause")
+        else:
+            self._bell_btn.setText("🔕")
+            if self._notify_resume_at:
+                remaining = max(0, self._notify_resume_at - time.time())
+                h, m = int(remaining // 3600), int((remaining % 3600) // 60)
+                when = f"{h}h {m}m" if h else f"{m}m"
+                self._bell_btn.setToolTip(f"Notifications paused — resumes in {when}")
+            else:
+                self._bell_btn.setToolTip("Notifications paused — click to resume")
+
+    def _open_bell_menu(self) -> None:
+        m = QMenu(self)
+        if self._notifications_enabled:
+            m.addAction("Pause for 15 minutes",
+                        lambda: self._pause_notify(15 * 60))
+            m.addAction("Pause for 1 hour",
+                        lambda: self._pause_notify(1 * 3600))
+            m.addAction("Pause for 2 hours",
+                        lambda: self._pause_notify(2 * 3600))
+            m.addAction("Pause for 6 hours",
+                        lambda: self._pause_notify(6 * 3600))
+            m.addAction("Pause for 24 hours",
+                        lambda: self._pause_notify(24 * 3600))
+            m.addSeparator()
+            m.addAction("Pause indefinitely",
+                        lambda: self._set_notify(False))
+        else:
+            m.addAction("Resume now", lambda: self._set_notify(True))
+        m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
+
+    def _pause_notify(self, seconds: int) -> None:
+        self._notify_pause_timer.stop()
+        self._notify_resume_at = time.time() + seconds
+        self._set_notify(False)
+        self._notify_pause_timer.start(seconds * 1000)
+
+    def _on_notify_timer_expired(self) -> None:
+        self._notify_resume_at = 0.0
+        self._set_notify(True)
+        self._log("Notifications resumed (pause timer expired).")
 
     def _refresh_status_btn(self) -> None:
         """Repaint the status chip dot to match the current presence."""
@@ -1149,6 +1194,10 @@ class ChatWindow(QWidget):
         self._log(f"You now appear {status} to peers.")
 
     def _set_notify(self, enabled: bool) -> None:
+        if enabled:
+            # Clear any running timer when resuming manually.
+            self._notify_pause_timer.stop()
+            self._notify_resume_at = 0.0
         self._notifications_enabled = enabled
         config.save_notifications_enabled(enabled)
         self._refresh_bell_btn()
@@ -1893,6 +1942,22 @@ class ChatWindow(QWidget):
                 QApplication.alert(self, 3000)
         if sound.should_notify(scope, "sound"):
             sound.play_sound()
+        else:
+            # Log why sound was skipped so it's diagnosable from the event log.
+            reasons = []
+            if not config.load_notifications_enabled():
+                reasons.append("notifications off")
+            if config.load_mute_all():
+                reasons.append("mute all")
+            if config.load_do_not_disturb():
+                reasons.append("do not disturb")
+            if config.load_sound_volume() <= 0:
+                reasons.append("volume 0")
+            prefs = config.load_notify_prefs()
+            if not prefs.get(scope, {}).get("sound", True):
+                reasons.append(f"{scope} sound off in Settings")
+            if reasons:
+                self._log(f"[sound skipped: {', '.join(reasons)}]")
 
     def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
         self._unhide(ip)
