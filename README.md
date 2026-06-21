@@ -1,4 +1,4 @@
-# Net Split-Tunneler  v4.10
+# Net Split-Tunneler  v4.12
 
 A Windows desktop tool for the messy reality of office networks: **share internet without losing the LAN**, **reach the intranet and the internet at the same time**, **flip between saved IP setups in one click**, and run a **full-featured LAN chat** between every PC on the network — all without any server, cloud account, or router config.
 
@@ -11,9 +11,11 @@ Windows 10/11 · Python 3.10+ · PyQt6
 
 ---
 
-## The main window — four tabs
+## The main window — chat first
 
-Everything in the main window is organised into four tabs, plus the LAN Chat that opens in its own window.
+The app opens straight into **LAN Chat**. A header menu (⋮) gives you access to Network Tools, Settings, updates and more without leaving chat. The Network Tools window (proxy, routing, IP switch) opens on demand via that menu or the system tray.
+
+### Network Tools — four tabs
 
 | Tab | What it's for |
 |---|---|
@@ -33,7 +35,7 @@ Everything in the main window is organised into four tabs, plus the LAN Chat tha
 | 💬 | **LAN Chat** — private messages, groups, broadcast channels |
 | 📎 | **File Transfer** — send files with live progress |
 | 🖥️ | **Remote Screen** — view and control a peer's PC: mouse, keyboard, clipboard |
-| 🔔 | **Notifications** — sound, toast, window-raise or taskbar flash |
+| 🔔 | **Notifications** — sound, toast, window-raise or taskbar flash; bell icon toggles mute instantly |
 | 🔍 | **Search** — full-text search across all messages and files |
 | 📶 | **Speed Monitor** — live network speeds, optionally pinned to the taskbar |
 

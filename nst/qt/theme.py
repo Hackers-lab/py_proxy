@@ -144,6 +144,19 @@ class QtTheme(QObject):
                        padding: 4px; color: {p['text_sec']}; }}
         QToolButton:hover {{ background: {p['hover']}; color: {p['text_pri']}; }}
 
+        /* Chat header: bell toggle, bordered status chip, settings gear. */
+        QToolButton#bellBtn {{ background: transparent; border: none;
+                               border-radius: 6px; padding: 2px 4px; }}
+        QToolButton#bellBtn:hover {{ background: {p['hover']}; }}
+        QToolButton#statusChip {{ background: {p['panel2']}; border: 1px solid {p['border']};
+                                  border-radius: 9px; padding: 3px 7px;
+                                  color: {p['text_sec']}; }}
+        QToolButton#statusChip:hover {{ border: 1px solid {p['accent']};
+                                        color: {p['text_pri']}; }}
+        QToolButton#gearBtn {{ background: #1d4ed8; border: none;
+                               border-radius: 9px; padding: 2px 9px; color: #ffffff; }}
+        QToolButton#gearBtn:hover {{ background: #2563eb; }}
+
         QCheckBox {{ spacing: 8px; }}
         QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px;
                                 border: 1px solid {p['border']}; background: {p['entry_bg']}; }}

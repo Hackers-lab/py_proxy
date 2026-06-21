@@ -15,7 +15,7 @@ import uuid
 
 from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
-                        QDropEvent, QPainter, QPainterPath, QPen, QPixmap)
+                        QDropEvent, QIcon, QPainter, QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QDialog,
                              QFileDialog, QFrame, QHBoxLayout, QInputDialog,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -30,7 +30,8 @@ from ..netinfo import check_host_reachable, is_valid_ipv4
 from . import sound
 from .settings_dialog import SettingsDialog
 from .theme import theme
-from .widgets import Avatar, AvatarWithStatus, Dot, ToggleSwitch, hline
+from .widgets import (Avatar, AvatarWithStatus, ToggleSwitch, dot_pixmap,
+                      hline)
 
 _PLACEHOLDER = "Type a message..."
 _MAX_HISTORY = 200
@@ -601,6 +602,12 @@ class ChatWindow(QWidget):
         self._remote_service = None
         self._remote_windows: list = []
 
+        # App-level actions injected by app.py so the ⋯ header menu can reach the
+        # Network Tools window, the updater and quit without owning those objects.
+        self._open_network_tools = None
+        self._check_updates_cb = None
+        self._quit_cb = None
+
         # Deliver worker-thread transfer updates onto the GUI thread.
         self._xfer_progress.connect(self._on_xfer_progress)
         self._xfer_finished.connect(self._on_xfer_finished)
@@ -653,12 +660,42 @@ class ChatWindow(QWidget):
         lbl.setObjectName("section")
         you.addWidget(lbl)
         you.addStretch(1)
-        self._self_dot = Dot(self.chat.my_status, 9)
-        you.addWidget(self._self_dot)
+        # Bell — shows notification state at a glance; click toggles directly.
+        self._bell_btn = QToolButton()
+        self._bell_btn.setObjectName("bellBtn")
+        bf = self._bell_btn.font()
+        bf.setPixelSize(15)
+        self._bell_btn.setFont(bf)
+        self._bell_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bell_btn.clicked.connect(
+            lambda: self._set_notify(not self._notifications_enabled))
+        self._refresh_bell_btn()
+        you.addWidget(self._bell_btn)
+        # Status chip — a presence-coloured dot + ▾ that opens the status /
+        # notifications menu (bordered #statusChip styling so it stands out).
+        self._status_btn = QToolButton()
+        self._status_btn.setObjectName("statusChip")
+        self._status_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._status_btn.setText("▾")
+        self._status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_btn.setToolTip("Your status & notifications")
+        self._status_btn.clicked.connect(self._open_status_menu)
+        self._refresh_status_btn()
+        you.addWidget(self._status_btn)
+        # Settings gear (⚙) — the app menu (Network Tools, Settings, updates,
+        # etc.). Dark, no box; font set in code so it doesn't trip Qt's
+        # "QFont::setPointSize <= 0" stylesheet warning.
         gear = QToolButton()
+        gear.setObjectName("gearBtn")
         gear.setText("⚙")
+        gf = gear.font()
+        gf.setPixelSize(20)
+        gf.setBold(True)
+        gear.setFont(gf)
         gear.setCursor(Qt.CursorShape.PointingHandCursor)
-        gear.clicked.connect(self._open_settings)
+        gear.setToolTip("Menu")
+        gear.clicked.connect(self._open_app_menu)
         you.addWidget(gear)
         s.addLayout(you)
 
@@ -686,7 +723,7 @@ class ChatWindow(QWidget):
 
         conrow = QHBoxLayout()
         self._ip_edit = QLineEdit()
-        self._ip_edit.setPlaceholderText("e.g. 192.168.1.20")
+        self._ip_edit.setPlaceholderText("10.x.x.x")
         self._ip_edit.returnPressed.connect(self._connect_manual_ip)
         conrow.addWidget(self._ip_edit, 1)
         go = QPushButton("➜")
@@ -1035,33 +1072,86 @@ class ChatWindow(QWidget):
         self._self_avatar.set_name(new)
         self._log(f"Chat display name set to '{new}'.")
 
-    def _open_settings(self) -> None:
+    def _refresh_bell_btn(self) -> None:
+        enabled = self._notifications_enabled
+        self._bell_btn.setText("🔔" if enabled else "🔕")
+        self._bell_btn.setToolTip(
+            "Notifications on — click to pause" if enabled
+            else "Notifications paused — click to enable")
+
+    def _refresh_status_btn(self) -> None:
+        """Repaint the status chip dot to match the current presence."""
+        self._status_btn.setIcon(QIcon(dot_pixmap(self.chat.my_status, 13)))
+        self._status_btn.setIconSize(QSize(13, 13))
+
+    def _open_status_menu(self) -> None:
         m = QMenu(self)
-        m.addAction("⚙  Settings...", self._open_full_settings)
-        m.addSeparator()
         status = self.chat.my_status
-        m.addAction("● Online" + (" ✓" if status == "online" else ""), lambda: self.set_status("online"))
-        m.addAction("🌙 Away" + (" ✓" if status == "away" else ""), lambda: self.set_status("away"))
-        m.addAction("○ Invisible (appear offline)" + (" ✓" if status == "invisible" else ""), lambda: self.set_status("invisible"))
+
+        # Consistent presence dots (green/amber/grey); active status gets a ✓.
+        def _status_item(key: str, label: str) -> None:
+            act = m.addAction(label + ("   ✓" if status == key else ""))
+            act.setIcon(QIcon(dot_pixmap(key, 12)))
+            act.triggered.connect(lambda: self.set_status(key))
+
+        _status_item("online", "Online")
+        _status_item("away", "Away")
+        _status_item("invisible", "Invisible (appear offline)")
         m.addSeparator()
         if self._notifications_enabled:
-            m.addAction("🔔 Notifications on -- pause", lambda: self._set_notify(False))
+            m.addAction("Pause notifications", lambda: self._set_notify(False))
         else:
-            m.addAction("🔕 Notifications paused -- enable", lambda: self._set_notify(True))
+            m.addAction("Enable notifications", lambda: self._set_notify(True))
         m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
 
     def _open_full_settings(self) -> None:
         SettingsDialog(self, self).exec()
 
+    # ── app menu (⚙) ──────────────────────────────────────────────────────────
+    def set_app_actions(self, open_network_tools=None,
+                        check_updates=None, quit_app=None) -> None:
+        """Wire up app-level actions surfaced by the ⚙ header menu (injected by
+        app.py, which owns the Network Tools window, updater and quit)."""
+        if open_network_tools is not None:
+            self._open_network_tools = open_network_tools
+        if check_updates is not None:
+            self._check_updates_cb = check_updates
+        if quit_app is not None:
+            self._quit_cb = quit_app
+
+    def _open_app_menu(self) -> None:
+        m = QMenu(self)
+        if self._open_network_tools:
+            m.addAction("Network Tools", self._open_network_tools)
+            m.addSeparator()
+        m.addAction("Settings...", self._open_full_settings)
+        if self._check_updates_cb:
+            m.addAction("Check for Updates", self._check_updates_cb)
+        m.addAction("About", self._about)
+        if self._quit_cb:
+            m.addSeparator()
+            m.addAction("Quit", self._quit_cb)
+        m.exec(self.sender().mapToGlobal(QPoint(0, self.sender().height())))
+
+    def _about(self) -> None:
+        QMessageBox.about(
+            self, "About Net Split-Tunneler",
+            f"<b>Net Split-Tunneler v{__version__}</b><br>"
+            "Proxy Sharing Tool + LAN Chat<br><br>"
+            "A lightweight Windows utility to split-tunnel local traffic, share a "
+            "proxy connection, and chat across the LAN.<br><br>"
+            "Developed by Pramod Verma")
+
     def set_status(self, status: str) -> None:
         self.chat.my_status = status
         config.save_my_status(status)
-        self._self_dot.set_status(status)
+        self._refresh_status_btn()
         self._log(f"You now appear {status} to peers.")
 
     def _set_notify(self, enabled: bool) -> None:
         self._notifications_enabled = enabled
         config.save_notifications_enabled(enabled)
+        self._refresh_bell_btn()
         self._log(f"Notifications {'enabled' if enabled else 'paused'}.")
 
     # ── settings-dialog callbacks ─────────────────────────────────────────────
@@ -1078,7 +1168,8 @@ class ChatWindow(QWidget):
     def on_settings_changed(self) -> None:
         """Re-read live-affecting settings after the Settings dialog changes them."""
         self._notifications_enabled = config.load_notifications_enabled()
-        self._self_dot.set_status(self.chat.my_status)
+        self._refresh_bell_btn()
+        self._refresh_status_btn()
 
     def clear_all_history(self) -> int:
         """Clear every local conversation (keeps peers, drops messages). Returns count."""

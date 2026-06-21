@@ -4,7 +4,7 @@ toasts and tray, then runs the event loop."""
 import os
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, qInstallMessageHandler
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -22,7 +22,24 @@ from .toast import ToastManager
 from .tray import SpeedOverlay, TrayManager, chat_icon
 
 
+# Known-benign Qt noise we don't want cluttering the console: the Windows
+# platform plugin failing to read a monitor's EDID interface, and the stylesheet
+# engine's pointSize complaint when a QSS rule mixes font-weight with a px size.
+_QT_NOISE = (
+    "Unable to open monitor interface",
+    "QFont::setPointSize: Point size <= 0",
+)
+
+
+def _qt_message_filter(mode, context, message) -> None:
+    if any(s in message for s in _QT_NOISE):
+        return
+    sys.stderr.write(message + "\n")
+
+
 def run() -> None:
+    qInstallMessageHandler(_qt_message_filter)
+
     # Apply a previously staged update before anything else (exits if it runs).
     apply_staged_on_launch()
 
@@ -155,6 +172,14 @@ def run() -> None:
     chat_window.set_on_closed(updates.apply_staged_if_any)
     main.set_update_manager(updates)
 
+    # Chat is the primary window; its ⋯ header menu reaches the Network Tools
+    # window (the proxy/splitter), the updater and quit.
+    chat_window.set_app_actions(
+        open_network_tools=open_proxy,
+        check_updates=lambda: updates.check(manual=True),
+        quit_app=quit_app,
+    )
+
     chat.start()
     if config.load_remote_enabled():
         remote.start()
@@ -167,7 +192,7 @@ def run() -> None:
                         if a.startswith("--updated=")), None)
     silent_start = updated_ver is not None or "--autostart" in sys.argv
     if not silent_start:
-        main.show()
+        chat_window.open()
     if updated_ver:
         toasts.notify("Net Split-Tunneler",
                       f"Updated to version {updated_ver}.", "update")

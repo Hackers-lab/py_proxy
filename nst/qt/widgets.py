@@ -5,7 +5,7 @@ any DPI and recolor with the palette."""
 from functools import lru_cache
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import QAbstractButton, QFrame, QLabel
 
 from .theme import avatar_color, theme
@@ -52,6 +52,70 @@ def dot_pixmap(status, size: int = 10) -> QPixmap:
     pr.setPen(Qt.PenStyle.NoPen)
     pr.setBrush(QBrush(QColor(_dot_color(status))))
     pr.drawEllipse(QRectF(1, 1, size - 2, size - 2))
+    pr.end()
+    return pm
+
+
+def bell_pixmap(enabled: bool, size: int = 18, color: str = "#94a3b8") -> QPixmap:
+    """A smooth path-based bell. When disabled a red slash crosses it."""
+    dpr = 2
+    pm = QPixmap(size * dpr, size * dpr)
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    pr = QPainter(pm)
+    pr.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    s = float(size)
+    c = QColor(color)
+
+    # ── bell body ─────────────────────────────────────────────────────────────
+    path = QPainterPath()
+    # Start at the hanger nub top-center
+    cx = s * 0.50
+    # Hanger: small rounded rect at top
+    hx, hy, hw, hh = s*0.42, s*0.04, s*0.16, s*0.11
+    path.addRoundedRect(QRectF(hx, hy, hw, hh), s*0.04, s*0.04)
+
+    # Bell dome: arc that widens from top to bottom, like a D rotated
+    body = QPainterPath()
+    body.moveTo(cx, s * 0.14)
+    # left curve — control points pull it outward
+    body.cubicTo(cx - s*0.05, s*0.14,   # cp1
+                 cx - s*0.38, s*0.22,   # cp2
+                 cx - s*0.38, s*0.58)   # end
+    # bottom-left flare
+    body.cubicTo(cx - s*0.38, s*0.66,
+                 cx - s*0.46, s*0.68,
+                 cx - s*0.46, s*0.70)
+    # bottom bar (flat-ish)
+    body.lineTo(cx + s*0.46, s*0.70)
+    # bottom-right flare
+    body.cubicTo(cx + s*0.46, s*0.68,
+                 cx + s*0.38, s*0.66,
+                 cx + s*0.38, s*0.58)
+    # right curve
+    body.cubicTo(cx + s*0.38, s*0.22,
+                 cx + s*0.05, s*0.14,
+                 cx,          s*0.14)
+    body.closeSubpath()
+
+    pr.setPen(Qt.PenStyle.NoPen)
+    pr.setBrush(QBrush(c))
+    pr.drawPath(path)    # hanger
+    pr.drawPath(body)    # dome + flare
+
+    # Clapper — small filled circle hanging below the flare
+    pr.drawEllipse(QRectF(cx - s*0.11, s*0.70, s*0.22, s*0.18))
+
+    # ── slash for muted ───────────────────────────────────────────────────────
+    if not enabled:
+        pen = QPen(QColor("#ef4444"))
+        pen.setWidthF(s * 0.14)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pr.setPen(pen)
+        pr.drawLine(int(s * 0.80), int(s * 0.08),
+                    int(s * 0.14), int(s * 0.92))
+
     pr.end()
     return pm
 

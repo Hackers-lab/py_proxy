@@ -8,6 +8,21 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.0 — 2026-06-21
+- **Chat is now the primary window** — the app opens straight into LAN Chat on
+  launch instead of the proxy/splitter window.
+- **New header menu (⋮ button)** in the chat sidebar: reach Network Tools,
+  Settings, Check for Updates, About and Quit without leaving chat.
+- **Bell icon** beside the header shows notification status at a glance (🔔 on /
+  🔕 muted); click it to toggle without opening a menu.
+- **Status chip** — a bordered presence-dot + ▾ chip that opens the status /
+  notifications menu; dot color updates instantly on status change.
+- Status menu items now use consistent colored dots (green / amber / grey) with
+  a ✓ marking the active state.
+- "Connect by IP" placeholder simplified to `10.x.x.x`.
+- Suppressed benign Qt console noise (EDID monitor-interface warnings, font
+  point-size warnings from the stylesheet engine).
+
 ## v4.11.1 — 2026-06-21
 - The **event log** now reports software updates as they happen: when a newer
   version is **found**, the installer's **size**, **download progress**, and
