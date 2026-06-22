@@ -179,9 +179,20 @@ def _ps(command: str) -> int:
 
 
 def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
-               adapter: str, dns_csv: str, domain_csv: str) -> int:
+               adapter: str, dns_csv: str, domain_csv: str,
+               old_internet_ip: str = "") -> int:
     dns_servers = [d.strip() for d in dns_csv.split(",") if d.strip()]
     domains     = [d.strip() for d in domain_csv.split(",") if d.strip()]
+
+    # 0. Remove a previously-bound secondary IP that differs from the new one,
+    #    so changing the internet IP doesn't leave stale addresses stacked on
+    #    the adapter (re-adding the same IP is harmless and needs no delete).
+    old_internet_ip = (old_internet_ip or "").strip()
+    if old_internet_ip and old_internet_ip != internet_ip:
+        run_cmd(["netsh", "interface", "ip", "delete", "address",
+                 adapter, old_internet_ip])
+        run_cmd(["route", "delete", "0.0.0.0", "mask", "0.0.0.0",
+                 _derive_gw(old_internet_ip)])
 
     # 1. Add secondary internet IP to the adapter
     run_cmd(["netsh", "interface", "ip", "add", "address",
@@ -279,12 +290,17 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
     dns_csv      = ",".join(dns_servers)
     domain_csv   = ",".join(domains)
 
-    # Remember the original DNS setup so disable can restore it exactly
+    # Remember the original DNS setup so disable can restore it exactly.
+    # Only capture it the first time (when dual access isn't already on) so a
+    # re-enable doesn't overwrite the real previous DNS with our own settings.
     from . import config
-    prev_mode, prev_servers = get_adapter_dns_config(adapter)
-    config.save_dual_prev_dns(prev_mode, prev_servers)
+    old_internet_ip = config.load_dual_active_ip()
+    if not old_internet_ip:
+        prev_mode, prev_servers = get_adapter_dns_config(adapter)
+        config.save_dual_prev_dns(prev_mode, prev_servers)
 
-    args = [intranet_gw, internet_ip, internet_gw, adapter, dns_csv, domain_csv]
+    args = [intranet_gw, internet_ip, internet_gw, adapter, dns_csv, domain_csv,
+            old_internet_ip]
     if is_admin():
         code = _do_enable(*args)
     else:
@@ -292,6 +308,7 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
             self_relaunch_cmd() + ["--dual-enable"] + args)
 
     if code == 0:
+        config.save_dual_active_ip(internet_ip)
         return True, (f"Dual access enabled — internet via {internet_gw}, "
                       f"intranet via {intranet_gw}.")
     if code == ELEVATION_CANCELLED:
@@ -306,11 +323,14 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
         return False, f"Cannot find adapter for intranet IP {intranet_ip}."
 
     domain_csv = ",".join(domains)
-    # Restore the DNS setup captured when dual access was enabled
     from . import config
+    # Remove the IP actually bound at enable time, not whatever is currently in
+    # the edit field — they differ if the user edited it after enabling.
+    active_ip = config.load_dual_active_ip() or internet_ip
+    # Restore the DNS setup captured when dual access was enabled
     prev_mode, prev_servers = config.load_dual_prev_dns()
     prev_dns_csv = ",".join(prev_servers)
-    args = [internet_ip, adapter, domain_csv, prev_mode, prev_dns_csv]
+    args = [active_ip, adapter, domain_csv, prev_mode, prev_dns_csv]
     if is_admin():
         code = _do_disable(*args)
     else:
@@ -318,6 +338,7 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
             self_relaunch_cmd() + ["--dual-disable"] + args)
 
     if code == 0:
+        config.save_dual_active_ip("")
         return True, "Dual access disabled — intranet only."
     if code == ELEVATION_CANCELLED:
         return False, "Dual access disable cancelled."

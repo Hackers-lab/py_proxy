@@ -570,6 +570,18 @@ def load_dual_internet_ip() -> str:
 def save_dual_internet_ip(ip: str) -> bool:
     return _write_value("DualInternetIP", winreg.REG_SZ, ip.strip())
 
+def load_dual_active_ip() -> str:
+    """The secondary IP currently bound by dual access (empty when disabled).
+
+    Tracked separately from DualInternetIP (the user's edit field) so enable
+    can remove a previously-bound IP before adding a new one — otherwise
+    changing the internet IP leaves stale secondary addresses on the adapter.
+    """
+    return str(_read_value("DualActiveIP", "")).strip()
+
+def save_dual_active_ip(ip: str) -> bool:
+    return _write_value("DualActiveIP", winreg.REG_SZ, ip.strip())
+
 def load_dual_dns_servers() -> list[str]:
     val = str(_read_value("DualDnsServers", "10.251.33.80,10.251.33.90")).strip()
     return [s.strip() for s in val.split(",") if s.strip()]

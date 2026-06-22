@@ -8,6 +8,21 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.2 — 2026-06-22
+- **Fixed: the Dual Access button stayed on “Enable”** after a successful enable
+  (the log said *enabled* but there was no way to turn it back off). The button
+  now flips to **“Disable”** immediately when enabling succeeds, and back to
+  **“Enable”** on disable. This also removes the “enable it 2–3 times before it
+  works” symptom — the button was being gated on a status re-check that lagged
+  the OS.
+- **Fixed: changing the internet IP no longer stacks addresses.** Enabling with
+  a new IP (e.g. switching from `192.168.0.175` to `192.168.1.15`) now removes
+  the previously-bound secondary IP and its internet route first, instead of
+  leaving both on the adapter.
+- Disable now removes the IP that was actually bound at enable time (not whatever
+  is currently typed in the field), and a re-enable no longer overwrites the
+  saved “original DNS” used to restore your settings on disable.
+
 ## v4.12.1 — 2026-06-22
 - **New: "What's New" chat** — after an update, a virtual peer appears in the roster and delivers the release notes as chat messages. Clicking the update toast navigates straight to it.
 - **Bell pause timer** — click 🔔 to pause window pop-up for 15 min / 1 hr / 2 hr / 6 hr / 24 hr; click 🔕 to resume instantly. Toast and sound keep working while paused.
@@ -29,7 +44,6 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - "Connect by IP" placeholder simplified to `10.x.x.x`.
 - Suppressed benign Qt console noise (EDID monitor-interface warnings, font
   point-size warnings from the stylesheet engine).
-
 ## v4.11.1 — 2026-06-21
 - The **event log** now reports software updates as they happen: when a newer
   version is **found**, the installer's **size**, **download progress**, and

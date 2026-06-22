@@ -96,7 +96,7 @@ In one click it:
 3. (Optional) Adjust the **NRPT Domains** — the internal domains that should resolve via corporate DNS. Your intranet DNS servers are read automatically from the adapter.
 4. Click **▶ Enable Dual Access** and approve the UAC prompt
 
-The four status rows (Intranet Route, Secondary IP, Internet Route, Split DNS) turn green as each piece comes up. **Disable** reverses everything and restores your adapter to its original state.
+The four status rows (Intranet Route, Secondary IP, Internet Route, Split DNS) turn green as each piece comes up. Once it's on, the button switches to **Disable** — and it stays correct if you close and reopen the app while dual access is still active. If you enable again with a *different* Internet IP, the old address is removed first so they don't stack up. **Disable** reverses everything and restores your adapter (including your original DNS) to its previous state.
 
 ---
 

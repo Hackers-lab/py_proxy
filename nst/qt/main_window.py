@@ -375,8 +375,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_dual_checking", False):
             return
         self._dual_checking = True
-        # Read Qt widget values on the main thread before handing off
-        internet_ip = self._dual_ip_edit.text().strip()
+        # Detect against the IP that was actually bound at enable time so the
+        # button is correct after the app is closed and reopened (the network
+        # config persists); fall back to the edit field when nothing is bound.
+        internet_ip = config.load_dual_active_ip() or self._dual_ip_edit.text().strip()
         internet_gw = _derive_internet_gw(internet_ip)
         domains     = list(config.load_dual_domains())
         threading.Thread(
@@ -417,7 +419,11 @@ class MainWindow(QMainWindow):
         _mark(self._lbl_da_dns, nrpt_ok,
               f"Split DNS/NRPT  :  {'ACTIVE' if nrpt_ok else 'INACTIVE'}")
 
-        self._dual_active = sec_ip_ok and inet_ok and nrpt_ok
+        # The secondary internet IP is the defining marker of dual access;
+        # the route and NRPT rules are shown above as sub-status but must NOT
+        # gate the button — their detection lags the OS and ANDing all three
+        # left the button stuck on "Enable" even when enabling had succeeded.
+        self._dual_active = sec_ip_ok
         if self._dual_active:
             self._set_btn(self._btn_dual, "■  Disable Dual Access", "danger")
         else:
@@ -448,15 +454,29 @@ class MainWindow(QMainWindow):
             return
 
         domains = config.load_dual_domains()
+        enabling = not self._dual_active
 
-        if self._dual_active:
-            ok, msg = disable_dual_access(self._detected_ip, internet_ip, domains)
-        else:
+        if enabling:
             ok, msg = enable_dual_access(self._detected_ip, internet_ip, domains)
+        else:
+            ok, msg = disable_dual_access(self._detected_ip, internet_ip, domains)
 
         self.log(msg)
+
+        if ok:
+            # Reflect the action immediately so the button is never stuck on
+            # "Enable" after a successful enable. The status re-check below only
+            # refreshes the component labels and can lag the OS by a moment;
+            # gating the button on it caused the "enable 2-3 times" symptom.
+            self._dual_active = enabling
+            self._set_btn(
+                self._btn_dual,
+                "■  Disable Dual Access" if enabling else "▶  Enable Dual Access",
+                "danger" if enabling else "success")
+
+        # Refresh the component status labels once the OS has settled.
         self._dual_checking = False   # allow an immediate recheck
-        self._update_dual_status()
+        QTimer.singleShot(800, self._update_dual_status)
 
     # ── IP Switch tab ─────────────────────────────────────────────────────────
 
