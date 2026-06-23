@@ -1,6 +1,10 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.12.3": [
+        "🧹 Fixed: a person no longer appears twice with two IPs (e.g. 10.x and 192.168.x). Multi-homed machines (Dual Access, VPN, Wi-Fi + Ethernet) now collapse to a single contact, always keyed by the LAN IP.",
+        "🛡 New: inbound rate limit — at most 5 messages per second from any one sender. Extra messages are dropped so no one can flood your chat.",
+    ],
     "4.12.1": [
         "💬 New: 'What's New' chat — release notes appear as messages in a virtual peer after every update. Click any update toast to open it.",
         "🔔 Bell pause timer — pause window pop-up for 15 min / 1 hr / 2 hr / 6 hr / 24 hr. Toast and sound keep working while paused. Click 🔕 to resume instantly.",

@@ -8,6 +8,16 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.3 — 2026-06-23
+- **Fixed: a peer no longer shows up twice with two IPs (e.g. `10.x` *and*
+  `192.168.x`).** A machine that holds more than one address — a stacked Dual
+  Access internet IP, a VPN, or a Wi-Fi + Ethernet pair — is now collapsed to a
+  single contact, keyed by its **LAN IP**. Chat always advertises and uses the
+  LAN address; the secondary IP is never announced as a separate identity.
+- **New: inbound message rate limit (5 messages/second per sender).** Content
+  messages past that burst are dropped silently, so a single peer can't flood
+  the roster or notifications. Receipts, typing and reactions are exempt.
+
 ## v4.12.2 — 2026-06-22
 - **Fixed: the Dual Access button stayed on “Enable”** after a successful enable
   (the log said *enabled* but there was no way to turn it back off). The button

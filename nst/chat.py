@@ -29,9 +29,11 @@ from .constants import (
     CHAT_PEER_TIMEOUT,
     CHAT_PRESENCE_EVERY,
     CHAT_PRESENCE_PORT,
+    CHAT_RATE_LIMIT,
+    CHAT_RATE_WINDOW,
     CHAT_TCP_PORT,
 )
-from .netinfo import get_all_local_ips, get_local_ip, get_my_broadcast
+from .netinfo import get_local_ip, get_my_broadcast
 from .win_utils import get_idle_seconds
 
 
@@ -44,6 +46,26 @@ class Peer:
     device: str = ""
     status: str = "online"        # "online" | "away"  (offline is derived from last_seen)
     ips: tuple = ()               # all advertised IPs of this peer
+
+
+def _lan_rank(ip: str) -> int:
+    """Sort key for choosing a peer's canonical address (lower = preferred).
+
+    A machine can hold several IPs at once — a VPN, a Wi-Fi + Ethernet pair, a
+    VM adapter, or Dual Access stacking a second 192.168.x internet address on
+    the same adapter as the 10.x intranet IP. When the same device (uid) shows
+    up under more than one address we keep the LAN/intranet one, so chat always
+    talks to peers by their LAN IP.
+    """
+    if ip.startswith("10."):
+        return 0
+    parts = ip.split(".")
+    if (len(parts) == 4 and parts[0] == "172"
+            and parts[1].isdigit() and 16 <= int(parts[1]) <= 31):
+        return 1
+    if ip.startswith("192.168."):
+        return 2
+    return 3
 
 
 class ChatService:
@@ -118,6 +140,8 @@ class ChatService:
         self._approved_ips: set[str] = set()   # approved external IPs
         self._blocked_ips: set[str] = set()    # permanently blocked IPs
         self._pending_requests: dict[str, list[dict]] = {}  # buffered msgs awaiting approval
+        # Anti-flood sliding window: ip -> recent inbound content-message times.
+        self._msg_times: dict[str, list[float]] = {}
 
         self._peers: dict[str, Peer] = {}
         self._virtual: dict[str, "DemoBot"] = {}   # ip -> bot (demo / loopback)
@@ -151,6 +175,21 @@ class ChatService:
         with self._lock:
             merged = list(self._peers.values())
             merged += [b.peer for b in self._virtual.values()]
+        # Collapse a multi-homed peer (same device uid discovered under several
+        # IPs — e.g. a machine with a stacked Dual-Access address, or a VPN /
+        # Wi-Fi+Ethernet pair) to a single entry keyed by its LAN-preferred IP,
+        # so a person never shows up twice (once as 10.x, once as 192.x).
+        by_uid: dict[str, Peer] = {}
+        singles: list[Peer] = []
+        for p in merged:
+            if not p.uid:
+                singles.append(p)   # virtual bots / pre-V2 peers: no identity
+                continue
+            cur = by_uid.get(p.uid)
+            if cur is None or ((_lan_rank(p.ip), -p.last_seen)
+                               < (_lan_rank(cur.ip), -cur.last_seen)):
+                by_uid[p.uid] = p
+        merged = singles + list(by_uid.values())
         return sorted(merged, key=lambda p: p.name.lower())
 
     # ── demo / virtual peers ──────────────────────────────────────────────────
@@ -369,7 +408,10 @@ class ChatService:
                             "name": self.my_name,
                             "device": self.my_device,
                             "ip": self.my_ip,
-                            "ips": get_all_local_ips(),
+                            # Advertise only the LAN IP so a Dual-Access / VPN /
+                            # multi-NIC machine isn't discovered under a second
+                            # address. self.my_ip already prefers 10.x intranet.
+                            "ips": [self.my_ip],
                             "status": self.my_status,
                         }).encode("utf-8")
                         # Broadcast only on the primary LAN subnet so the
@@ -551,6 +593,14 @@ class ChatService:
                         self._on_chat_request(ip, name, msg)
                     return
 
+            # Anti-flood: throttle content messages from a single sender so a
+            # peer can't spam the roster/notifications. Control messages
+            # (receipts, typing, reactions, …) are exempt — they're cheap and
+            # legitimately bursty.
+            _content = ("chat", "group", "group_invite", "channel", "channel_meta")
+            if msg_type in _content and not self._rate_ok(ip):
+                return  # over the limit — drop silently
+
             self._dispatch_msg(msg, ip, name)
         except Exception:
             pass
@@ -559,6 +609,23 @@ class ChatService:
                 conn.close()
             except Exception:
                 pass
+
+    def _rate_ok(self, ip: str) -> bool:
+        """True while *ip* stays under the inbound message rate limit.
+
+        Sliding window: at most ``CHAT_RATE_LIMIT`` content messages per
+        ``CHAT_RATE_WINDOW`` seconds, tracked per sender. Over the limit the
+        caller drops the message silently.
+        """
+        now = time.time()
+        cutoff = now - CHAT_RATE_WINDOW
+        with self._lock:
+            times = self._msg_times.setdefault(ip, [])
+            times[:] = [t for t in times if t >= cutoff]
+            if len(times) >= CHAT_RATE_LIMIT:
+                return False
+            times.append(now)
+            return True
 
     def _dispatch_msg(self, msg: dict, ip: str, name: str) -> None:
         """Deliver a pre-approved message to the appropriate callback."""

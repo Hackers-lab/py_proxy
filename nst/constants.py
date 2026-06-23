@@ -20,6 +20,10 @@ CHAT_MAGIC         = b"NST_CHAT_V2"
 CHAT_PRESENCE_EVERY = 3          # seconds between presence broadcasts
 CHAT_PEER_TIMEOUT   = 10         # seconds of silence before a peer is dropped
 CHAT_AWAY_AFTER     = 300        # seconds of input idle before we report "away"
+# Anti-flood: inbound content messages from a single sender are dropped once
+# they exceed this burst rate (a sliding window, applied per sender IP).
+CHAT_RATE_LIMIT     = 5          # max messages ...
+CHAT_RATE_WINDOW    = 1.0        # ... per this many seconds
 FILE_SAVE_DIR      = "NetSplitter"   # subfolder under Documents
 
 # ── Remote screen (view + control) ────────────────────────────────────────────
