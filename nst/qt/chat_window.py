@@ -2012,17 +2012,31 @@ class ChatWindow(QWidget):
         gid = group.get("gid")
         if not gid:
             return
-        members = [m for m in group.get("members", []) if m]
-        admins = [a for a in group.get("admins", []) if a]
-        g = self._groups.setdefault(gid, {"name": group.get("name", "Group"),
-                                          "members": members, "admins": admins})
-        g["name"] = group.get("name", g.get("name", "Group"))
-        if members:
-            g["members"] = members
-        # Admin set is authoritative from the sender so promote/demote propagate.
-        if admins:
-            g["admins"] = admins
-        for m in members:
+        claimed_members = [m for m in group.get("members", []) if m]
+        claimed_admins = [a for a in group.get("admins", []) if a]
+        known = self._groups.get(gid)
+        if known is None:
+            # First time we hear of this group — this is how being added works.
+            # Serverless: with no prior state we trust the inviter's roster.
+            g = self._groups[gid] = {"name": group.get("name", "Group"),
+                                     "members": claimed_members,
+                                     "admins": claimed_admins}
+        else:
+            g = known
+            # Access control: a sender we no longer list as a member — e.g.
+            # someone who was kicked — can't post to or modify the group.
+            if ip != self.chat.my_ip and ip not in g.get("members", []):
+                return
+            g["name"] = group.get("name", g.get("name", "Group"))
+            # Roster/admin changes are authoritative only from a current admin,
+            # so a plain member's (or a kicked user's) payload can't rewrite
+            # membership — nobody can silently re-add someone who was removed.
+            if ip in g.get("admins", []):
+                if claimed_members:
+                    g["members"] = claimed_members
+                if claimed_admins:
+                    g["admins"] = claimed_admins
+        for m in g.get("members", []):
             if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
                 self.chat.add_manual_peer(m)
         self._names[ip] = name
@@ -2047,16 +2061,26 @@ class ChatWindow(QWidget):
         cid = channel.get("cid")
         if not cid:
             return
-        members = [m for m in channel.get("members", []) if m]
-        admins = [a for a in channel.get("admins", []) if a]
-        c = self._channels.setdefault(cid, {"name": channel.get("name", "Channel"),
-                                            "members": members, "admins": admins})
-        c["name"] = channel.get("name", c.get("name", "Channel"))
-        if members:
-            c["members"] = members
-        if admins:
-            c["admins"] = admins
-        for m in members:
+        claimed_members = [m for m in channel.get("members", []) if m]
+        claimed_admins = [a for a in channel.get("admins", []) if a]
+        known = self._channels.get(cid)
+        if known is None:
+            c = self._channels[cid] = {"name": channel.get("name", "Channel"),
+                                       "members": claimed_members,
+                                       "admins": claimed_admins}
+        else:
+            c = known
+            # A subscriber we've removed can't act on the channel at all.
+            if ip != self.chat.my_ip and ip not in c.get("members", []):
+                return
+            c["name"] = channel.get("name", c.get("name", "Channel"))
+            # Only a current admin may change the roster.
+            if ip in c.get("admins", []):
+                if claimed_members:
+                    c["members"] = claimed_members
+                if claimed_admins:
+                    c["admins"] = claimed_admins
+        for m in c.get("members", []):
             if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
                 self.chat.add_manual_peer(m)
         self._names[ip] = name
@@ -2064,6 +2088,11 @@ class ChatWindow(QWidget):
         if not text:
             self._save_channel(cid)
             self.update_roster(self.chat.peers())
+            return
+        # Channels are broadcast-only: members read, admins post. Drop a text
+        # post that didn't come from a channel admin.
+        if ip != self.chat.my_ip and ip not in c.get("admins", []):
+            self._save_channel(cid)
             return
         entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply, from_ip=ip)
         self._store(key, entry)

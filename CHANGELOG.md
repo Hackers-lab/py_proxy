@@ -8,6 +8,23 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.4 — 2026-06-23
+- **Fixed: a kicked member can no longer message the group.** Removing someone
+  now actually cuts them off: every remaining member rejects messages from a
+  sender who isn't on their member list, so a kicked user's posts simply don't
+  appear for anyone.
+- **Fixed: a kicked user can no longer re-add themselves.** Group/channel
+  membership and admin changes are now honoured **only when they come from a
+  current admin**. Previously any message carried the sender's own member list
+  and quietly overwrote everyone's roster — so a removed user's next message
+  put them straight back in. A plain member's message no longer alters the
+  roster at all.
+- **Channels are now strictly admin-post.** A text post that doesn't come from a
+  channel admin is dropped on receipt (not just hidden in the UI).
+- **Kick delivery is now reliable.** If the removed user is offline, the kick is
+  queued and retried when they return, so the group clears from their own view
+  too.
+
 ## v4.12.3 — 2026-06-23
 - **Fixed: a peer no longer shows up twice with two IPs (e.g. `10.x` *and*
   `192.168.x`).** A machine that holds more than one address — a stacked Dual

@@ -1,6 +1,12 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.12.4": [
+        "🔒 Fixed: a kicked member can no longer message the group — remaining members now reject posts from anyone who isn't on the member list.",
+        "🛡 Fixed: a removed user can't sneak back in. Membership and admin changes are now accepted only from a current admin, so a stray message can't rewrite everyone's roster or re-add the person who left.",
+        "📢 Channels are strictly admin-post: a post from a non-admin is dropped on arrival.",
+        "📨 Kicks are now queued and retried, so an offline user still loses the group when they come back online.",
+    ],
     "4.12.3": [
         "🧹 Fixed: a person no longer appears twice with two IPs (e.g. 10.x and 192.168.x). Multi-homed machines (Dual Access, VPN, Wi-Fi + Ethernet) now collapse to a single contact, always keyed by the LAN IP.",
         "🛡 New: inbound rate limit — at most 5 messages per second from any one sender. Extra messages are dropped so no one can flood your chat.",

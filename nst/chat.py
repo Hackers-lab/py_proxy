@@ -868,13 +868,23 @@ class ChatService:
         })
 
     def send_group_kick(self, ip: str, gid: str) -> bool:
-        """Tell *ip* they have been removed from group *gid* (they lose it locally)."""
+        """Tell *ip* they have been removed from group *gid* (they lose it locally).
+
+        Retained and retried if they're offline, so the kick still lands when
+        they return — otherwise a kicked user who was away would keep the group
+        (remaining members reject their messages either way, but this also
+        clears the group from the kicked user's own view).
+        """
         if not gid or ip in self._virtual:
             return False
-        return self._send_json(ip, {
+        payload = json.dumps({
             "type": "group_kick", "gid": gid,
             "from_name": self.my_name, "from_ip": self.my_ip,
-        })
+        }).encode("utf-8") + b"\n"
+        if self._deliver(ip, payload):
+            return True
+        self._enqueue(ip, payload, mid=f"kick:{gid}")
+        return False
 
     def send_reaction(self, ip: str, mid: str, emoji: str, gid: str = "") -> bool:
         """Toggle an emoji reaction on a message and notify *ip*."""
