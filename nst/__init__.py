@@ -18,4 +18,4 @@ Package layout:
     qt.*            — PyQt6 UI (main window, chat window, widgets, tray, toasts)
 """
 
-__version__ = "4.12.5"
+__version__ = "4.12.6"

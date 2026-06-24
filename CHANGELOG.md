@@ -8,6 +8,16 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.6 — 2026-06-24
+- **Message rate limit corrected to 20 per minute.** The anti-flood limit was
+  mistakenly running as 5 messages per *second*; it's now a sliding window of 20
+  messages per minute per sender — enough for normal fast chat, while still
+  stopping a flood.
+- **You're now told when you're sending too fast.** Instead of the recipient
+  silently dropping a message that exceeds the limit, the app keeps your message
+  in the box and shows a "slow down" notice (at most once a minute), so nothing
+  is lost without you knowing.
+
 ## v4.12.5 — 2026-06-24
 - **Fixed: people no longer show "offline" while they're actually online.**
   Presence used to rely solely on a UDP broadcast that Wi-Fi and managed

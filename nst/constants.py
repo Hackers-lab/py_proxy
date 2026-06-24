@@ -29,8 +29,8 @@ CHAT_PEER_DROP      = 120        # seconds of total silence before a peer is rea
 CHAT_AWAY_AFTER     = 300        # seconds of input idle before we report "away"
 # Anti-flood: inbound content messages from a single sender are dropped once
 # they exceed this burst rate (a sliding window, applied per sender IP).
-CHAT_RATE_LIMIT     = 5          # max messages ...
-CHAT_RATE_WINDOW    = 1.0        # ... per this many seconds
+CHAT_RATE_LIMIT     = 20         # max messages ...
+CHAT_RATE_WINDOW    = 60.0       # ... per this many seconds  (i.e. 20 per minute)
 FILE_SAVE_DIR      = "NetSplitter"   # subfolder under Documents
 
 # ── Remote screen (view + control) ────────────────────────────────────────────

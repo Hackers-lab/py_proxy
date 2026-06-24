@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QDialog,
 
 from .. import __version__, config
 from ..chat import DemoBot, UpdatesBot
-from ..constants import CHAT_TCP_PORT
+from ..constants import CHAT_RATE_LIMIT, CHAT_RATE_WINDOW, CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
 from ..netinfo import check_host_reachable, is_valid_ipv4
 from . import sound
@@ -635,6 +635,12 @@ class ChatWindow(QWidget):
         self._save_running = True
         self._save_thread = threading.Thread(target=self._save_writer, daemon=True)
         self._save_thread.start()
+
+        # Sender-side mirror of the peer anti-flood limit: timestamps of our
+        # recent outbound messages per conversation, plus the last time we warned
+        # about it (so the warning itself isn't repeated every keystroke).
+        self._out_times: dict[str, list[float]] = {}
+        self._rate_warned: dict[str, float] = {}
 
         self._build()
         self._load_history()
@@ -1910,6 +1916,31 @@ class ChatWindow(QWidget):
             " font-size:16px; font-weight:700;}" % (bg, fg))
 
     # ── send / receive ────────────────────────────────────────────────────────
+    def _rate_block(self, key: str) -> bool:
+        """True if sending now would exceed the recipient's anti-flood limit.
+
+        Mirrors the per-sender limit the receiving app enforces, so instead of
+        letting the recipient silently drop a too-fast message we keep it in the
+        box and tell the user to slow down (warning shown at most once per
+        window). Virtual peers (demo / What's New) are never limited.
+        """
+        if self._is_virtual(key):
+            return False
+        now = time.time()
+        cutoff = now - CHAT_RATE_WINDOW
+        times = self._out_times.setdefault(key, [])
+        times[:] = [t for t in times if t >= cutoff]
+        if len(times) >= CHAT_RATE_LIMIT:
+            if now - self._rate_warned.get(key, 0) >= CHAT_RATE_WINDOW:
+                self._rate_warned[key] = now
+                self._sys(key,
+                          f"⚠️ You're sending messages too fast — please slow "
+                          f"down. Up to {int(CHAT_RATE_LIMIT)} per minute are "
+                          f"delivered; faster ones may be dropped.")
+            return True
+        times.append(now)
+        return False
+
     def _send(self) -> None:
         key = self._active
         text = self._entry.text().strip()
@@ -1917,6 +1948,8 @@ class ChatWindow(QWidget):
             return
         if not self._can_post(key):
             return   # broadcast channel: only admins may post
+        if self._rate_block(key):
+            return   # too fast — message kept in the box, user warned
         self._entry.clear()
         self._stop_typing()
         reply = self._reply_to
