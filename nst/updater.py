@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -45,6 +46,45 @@ def _is_newer(remote: str, local: str) -> bool:
     return _parse(remote) > _parse(local)
 
 
+# ── network: TLS-tolerant opener ──────────────────────────────────────────────
+
+def _ssl_unverified_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _is_ssl_error(exc: Exception) -> bool:
+    """True if *exc* is (or wraps) a TLS/certificate failure."""
+    if isinstance(exc, ssl.SSLError):
+        return True
+    if isinstance(getattr(exc, "reason", None), ssl.SSLError):
+        return True
+    s = str(exc).lower()
+    return "certificate" in s or "ssl" in s
+
+
+def _urlopen(req, timeout: int):
+    """urlopen that retries once without certificate verification on a TLS error.
+
+    Some corporate networks intercept HTTPS with a private root CA that isn't in
+    Python's bundled trust store, so the default verified open fails on those
+    PCs. We retry unverified rather than block updates entirely. Used for BOTH
+    the version check and the installer download — the download redirects to a
+    different host (objects.githubusercontent.com) which previously had no
+    fallback and failed the same way, so the check passed but the download never
+    completed.
+    """
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as exc:
+        if _is_ssl_error(exc):
+            return urllib.request.urlopen(req, timeout=timeout,
+                                          context=_ssl_unverified_ctx())
+        raise
+
+
 # ── GitHub query + download ───────────────────────────────────────────────────
 
 def _fetch_latest() -> tuple[str, str] | None:
@@ -62,19 +102,7 @@ def _fetch_latest() -> tuple[str, str] | None:
         headers={"User-Agent": "NetSplitTunnel-Updater",
                  "Accept": "application/vnd.github+json"},
     )
-    def _open(ctx=None):
-        return urllib.request.urlopen(req, timeout=15, context=ctx)
-    try:
-        resp_ctx = _open()
-    except urllib.error.URLError as exc:
-        if "certificate" in str(exc).lower() or "ssl" in str(exc).lower():
-            _ctx = ssl.create_default_context()
-            _ctx.check_hostname = False
-            _ctx.verify_mode = ssl.CERT_NONE
-            resp_ctx = _open(_ctx)
-        else:
-            raise
-    with resp_ctx as resp:
+    with _urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     best = None  # (version_tuple, version_str, url)
     for asset in data.get("assets", []):
@@ -114,7 +142,7 @@ def _download(url: str, version: str, progress=None) -> str:
                         f"NetSplitTunnel_Setup_{safe}.exe")
     req = urllib.request.Request(
         url, headers={"User-Agent": "NetSplitTunnel-Updater"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+    with _urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
         try:
             total = int(resp.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):

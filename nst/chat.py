@@ -18,6 +18,7 @@ import struct
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import psutil
@@ -26,7 +27,9 @@ from . import config
 from .constants import (
     CHAT_AWAY_AFTER,
     CHAT_MAGIC,
+    CHAT_PEER_DROP,
     CHAT_PEER_TIMEOUT,
+    CHAT_PROBE_AFTER,
     CHAT_PRESENCE_EVERY,
     CHAT_PRESENCE_PORT,
     CHAT_RATE_LIMIT,
@@ -152,6 +155,22 @@ class ChatService:
         self._lock = threading.Lock()
         self.running = False
 
+        # Cached interface table. _is_same_subnet / _on_my_subnet run on every
+        # inbound presence packet and message; enumerating all adapters each
+        # time (psutil.net_if_addrs) dominated idle CPU on a busy LAN, so we
+        # cache the result and refresh it only every few seconds.
+        self._if_cache: dict | None = None
+        self._if_cache_t: float = 0.0
+
+        # TCP liveness probes run on a small fixed-size pool (not one fresh
+        # thread per peer per sweep — a large group registers every member as a
+        # manual peer, which used to spawn a thread storm every few seconds).
+        # _probing dedupes in-flight probes so a permanently-offline peer can't
+        # pile up queued work.
+        self._probe_pool = ThreadPoolExecutor(max_workers=8,
+                                              thread_name_prefix="nst-probe")
+        self._probing: set[str] = set()
+
     # ── lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
         if self.running:
@@ -162,11 +181,15 @@ class ChatService:
         threading.Thread(target=self._presence_loop, daemon=True).start()
         threading.Thread(target=self._server_loop, daemon=True).start()
         threading.Thread(target=self._reaper_loop, daemon=True).start()
-        threading.Thread(target=self._manual_probe_loop, daemon=True).start()
+        threading.Thread(target=self._liveness_loop, daemon=True).start()
         threading.Thread(target=self._outbox_loop, daemon=True).start()
 
     def stop(self) -> None:
         self.running = False
+        try:
+            self._probe_pool.shutdown(wait=False)
+        except Exception:
+            pass
 
     def set_name(self, name: str) -> None:
         self.my_name = name  # picked up on the next presence broadcast
@@ -244,7 +267,7 @@ class ChatService:
             if ip not in self._peers:
                 self._peers[ip] = Peer(ip=ip, name=ip, last_seen=0.0)
         self._emit_roster()
-        threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
+        self._submit_probe(ip)
 
     def remove_peer(self, ip: str) -> None:
         """Forget a peer entirely: stop probing it (if manual), drop its presence
@@ -280,7 +303,7 @@ class ChatService:
             self._manual.add(ip)
         for msg in pending:
             self._dispatch_msg(msg, ip, msg.get("from_name", ip))
-        threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
+        self._submit_probe(ip)
 
     def block_ip(self, ip: str) -> None:
         """Block an external IP and discard buffered messages."""
@@ -312,6 +335,22 @@ class ChatService:
         """
         return self._is_same_subnet(ip)
 
+    def _net_if_addrs(self) -> dict:
+        """psutil.net_if_addrs(), cached for a few seconds.
+
+        Called on every inbound presence packet and message; uncached it
+        re-enumerates every adapter each time and is the single biggest source
+        of idle CPU on a chatty LAN.
+        """
+        now = time.time()
+        if self._if_cache is None or now - self._if_cache_t > 30:
+            try:
+                self._if_cache = psutil.net_if_addrs()
+            except Exception:
+                self._if_cache = self._if_cache or {}
+            self._if_cache_t = now
+        return self._if_cache
+
     def _is_same_subnet(self, remote_ip: str) -> bool:
         """True if remote_ip shares a subnet with ANY local interface.
 
@@ -321,7 +360,7 @@ class ChatService:
         """
         try:
             remote_int = struct.unpack("!I", socket.inet_aton(remote_ip))[0]
-            for _iface, addrs in psutil.net_if_addrs().items():
+            for _iface, addrs in self._net_if_addrs().items():
                 for addr in addrs:
                     if addr.family != socket.AF_INET or not addr.netmask:
                         continue
@@ -343,7 +382,7 @@ class ChatService:
         try:
             remote_int = struct.unpack("!I", socket.inet_aton(remote_ip))[0]
             my_int = struct.unpack("!I", socket.inet_aton(self.my_ip))[0]
-            for _iface, addrs in psutil.net_if_addrs().items():
+            for _iface, addrs in self._net_if_addrs().items():
                 for addr in addrs:
                     if (addr.family != socket.AF_INET
                             or addr.address != self.my_ip
@@ -369,17 +408,54 @@ class ChatService:
                 return False
             return (time.time() - p.last_seen) <= CHAT_PEER_TIMEOUT
 
-    def _manual_probe_loop(self) -> None:
-        """Periodically check if manual peers are reachable."""
+    def _liveness_loop(self) -> None:
+        """Keep presence accurate when UDP beacons are lost.
+
+        Probes (over TCP, via the bounded pool) every manual peer plus any
+        discovered peer whose UDP beacon has gone stale (``CHAT_PROBE_AFTER``).
+        A reachable peer's ``last_seen`` is refreshed so it stays "online" even
+        on a network that drops broadcast packets — which is the common reason a
+        peer you're actively chatting with suddenly showed offline. Healthy
+        peers (fresh UDP) are skipped, so this is idle on a clean LAN.
+        """
         while self.running:
+            now = time.time()
             with self._lock:
-                ips = list(self._manual)
-            for ip in ips:
-                threading.Thread(target=self._probe_one_manual, args=(ip,), daemon=True).start()
-            time.sleep(5)
+                cands = set(self._manual)
+                cands.update(ip for ip, p in self._peers.items()
+                             if now - p.last_seen >= CHAT_PROBE_AFTER)
+            for ip in cands:
+                if not self.running:
+                    break
+                self._submit_probe(ip)
+            for _ in range(4):     # sleep ~4s, but stay responsive to stop()
+                if not self.running:
+                    break
+                time.sleep(1)
+
+    def _submit_probe(self, ip: str) -> None:
+        """Queue a TCP liveness probe for *ip* unless one is already in flight."""
+        if not self.running and ip not in self._manual:
+            return
+        with self._lock:
+            if ip in self._probing:
+                return
+            self._probing.add(ip)
+        try:
+            self._probe_pool.submit(self._run_probe, ip)
+        except Exception:
+            with self._lock:
+                self._probing.discard(ip)
+
+    def _run_probe(self, ip: str) -> None:
+        try:
+            self._probe_one_manual(ip)
+        finally:
+            with self._lock:
+                self._probing.discard(ip)
 
     def _probe_one_manual(self, ip: str) -> None:
-        """Probes a manual IP to verify if the app's chat service is running."""
+        """Probe an IP over TCP; refresh its presence if the chat service answers."""
         try:
             # Try connecting to the peer's CHAT_TCP_PORT
             with socket.create_connection((ip, CHAT_TCP_PORT), timeout=1.0):
@@ -520,8 +596,11 @@ class ChatService:
             now = time.time()
             dropped = False
             with self._lock:
+                # A peer reads "offline" after CHAT_PEER_TIMEOUT, but we keep it
+                # in memory until CHAT_PEER_DROP so the liveness probe has time
+                # to confirm whether it's genuinely gone or just UDP-silent.
                 stale = [ip for ip, p in self._peers.items()
-                         if now - p.last_seen > CHAT_PEER_TIMEOUT
+                         if now - p.last_seen > CHAT_PEER_DROP
                          and ip not in self._manual]
                 for ip in stale:
                     del self._peers[ip]

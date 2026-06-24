@@ -8,6 +8,28 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.12.5 — 2026-06-24
+- **Fixed: people no longer show "offline" while they're actually online.**
+  Presence used to rely solely on a UDP broadcast that Wi-Fi and managed
+  networks routinely drop, so a person you were chatting with would flip to
+  offline the moment the conversation went quiet. The app now also confirms a
+  peer directly over TCP, and only marks someone offline when **both** checks
+  fail — so a reachable contact stays online even on a lossy network.
+- **Fixed: updates that wouldn't install on some PCs.** The certificate
+  workaround only covered the version *check*; the actual installer *download*
+  still failed on PCs behind a corporate HTTPS proxy or with a missing trust
+  store, so they silently stayed on the old version. Both steps now share the
+  same fallback, so those machines update again.
+- **Lighter chat storage.** Each message used to rewrite the whole conversation
+  file on its own thread. Saves are now coalesced and written once (atomically,
+  so a chat file can't be left half-written) — far less disk churn during an
+  active conversation. **Existing chats are kept as-is; nothing is migrated or
+  lost.**
+- **Lower CPU / RAM when left running all day.** The network-adapter lookup that
+  ran on every presence packet is now cached, and peer reachability checks run
+  on a small fixed thread pool instead of spawning a fresh thread per peer every
+  few seconds (a large group used to create a thread storm).
+
 ## v4.12.4 — 2026-06-23
 - **Fixed: a kicked member can no longer message the group.** Removing someone
   now actually cuts them off: every remaining member rejects messages from a

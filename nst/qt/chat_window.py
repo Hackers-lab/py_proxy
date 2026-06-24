@@ -36,6 +36,7 @@ from .widgets import (Avatar, AvatarWithStatus, ToggleSwitch, dot_pixmap,
 _PLACEHOLDER = "Type a message..."
 _MAX_HISTORY = 200
 _BUBBLE_MAX = 420  # fallback before the window is realized
+_SAVE_DEBOUNCE = 1.0   # seconds to coalesce rapid history writes into one
 
 
 def _fmt_size(b: int) -> str:
@@ -621,6 +622,19 @@ class ChatWindow(QWidget):
         self._xfer_finished.connect(self._on_xfer_finished)
         self._sys_sig.connect(self._sys)
         self._queued_sig.connect(self._on_queued)
+
+        # Debounced history writer. Each message used to spawn a fresh thread
+        # that rewrote the whole conversation file from scratch; an always-on
+        # app in active use churned the disk on every keystroke-reply. Now saves
+        # are coalesced per-conversation through one persistent writer: a burst
+        # of edits to the same chat collapses into a single atomic write ~1s
+        # later, and the per-message thread spawn is gone.
+        self._save_lock = threading.Lock()
+        self._save_queue: dict[str, tuple] = {}   # stem -> (path, data|None, is_delete)
+        self._save_event = threading.Event()
+        self._save_running = True
+        self._save_thread = threading.Thread(target=self._save_writer, daemon=True)
+        self._save_thread.start()
 
         self._build()
         self._load_history()
@@ -3789,95 +3803,109 @@ class ChatWindow(QWidget):
             e["status"] = status
             e["state"] = state
 
-    def _save_peer(self, ip) -> None:
-        self._freeze_file_entries(ip)
-        msgs = list(self._conversations.get(ip, []))
-        name = self._names.get(ip, ip)
-        device = self._devices.get(ip)
-        alias = self._aliases.get(ip)
-        manual = self.chat.is_manual_peer(ip)
-        last_seen = self.chat.last_seen_of(ip)
+    # ── debounced history persistence ─────────────────────────────────────────
+    def _enqueue_save(self, stem: str, path: str, data: dict | None,
+                      is_delete: bool = False) -> None:
+        """Queue a history write/delete keyed by file *stem*; later calls for the
+        same conversation supersede earlier ones, collapsing a burst into one
+        disk operation."""
+        with self._save_lock:
+            self._save_queue[stem] = (path, data, is_delete)
+        self._save_event.set()
 
-        def write():
+    def _save_writer(self) -> None:
+        while self._save_running:
+            self._save_event.wait()
+            if not self._save_running:
+                break
+            self._save_event.clear()
+            time.sleep(_SAVE_DEBOUNCE)    # let a burst of edits accumulate
+            self._flush_saves()
+        self._flush_saves()
+
+    def _flush_saves(self) -> None:
+        with self._save_lock:
+            pending = self._save_queue
+            self._save_queue = {}
+        for path, data, is_delete in pending.values():
             try:
-                safe = ip.replace(".", "_").replace(":", "_")
-                kept = [m for m in msgs if m.get("kind") != "chat_req"]
-                data = {"ip": ip, "name": name,
-                        "messages": kept[-_MAX_HISTORY:]}
-                if device:
-                    data["device"] = device
-                if alias:
-                    data["alias"] = alias
-                if manual:
-                    data["manual"] = True
-                if last_seen:
-                    data["last_seen"] = last_seen
-                if ip in self.chat._approved_ips:
-                    data["approved"] = True
-                if ip in self.chat._blocked_ips:
-                    data["blocked"] = True
-                with open(os.path.join(config.get_peer_chat_dir(), f"{safe}.json"),
-                          "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
+                if is_delete:
+                    if os.path.exists(path):
+                        os.remove(path)
+                else:
+                    tmp = f"{path}.tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False)
+                    os.replace(tmp, path)   # atomic: never leave a half-written file
             except Exception:
                 pass
-        threading.Thread(target=write, daemon=True).start()
+
+    def _save_peer(self, ip) -> None:
+        self._freeze_file_entries(ip)
+        safe = ip.replace(".", "_").replace(":", "_")
+        # Shallow-copy each entry so a later mutation (receipt/reaction/edit) on
+        # the GUI thread can't change the dict while the writer serializes it.
+        kept = [dict(m) for m in self._conversations.get(ip, [])
+                if m.get("kind") != "chat_req"]
+        data = {"ip": ip, "name": self._names.get(ip, ip),
+                "messages": kept[-_MAX_HISTORY:]}
+        if self._devices.get(ip):
+            data["device"] = self._devices[ip]
+        if self._aliases.get(ip):
+            data["alias"] = self._aliases[ip]
+        if self.chat.is_manual_peer(ip):
+            data["manual"] = True
+        if self.chat.last_seen_of(ip):
+            data["last_seen"] = self.chat.last_seen_of(ip)
+        if ip in self.chat._approved_ips:
+            data["approved"] = True
+        if ip in self.chat._blocked_ips:
+            data["blocked"] = True
+        path = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
+        self._enqueue_save(safe, path, data)
 
     def _save_group(self, gid) -> None:
         key = f"group:{gid}"
-        msgs = list(self._conversations.get(key, []))
         group = dict(self._groups.get(gid, {}))
-
-        def write():
-            try:
-                kept = [m for m in msgs
-                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
-                data = {"ip": key,
-                        "group": {"name": group.get("name", "Group"),
-                                  "members": group.get("members", []),
-                                  "admins": group.get("admins", [])},
-                        "messages": kept[-_MAX_HISTORY:]}
-                with open(os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json"),
-                          "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-            except Exception:
-                pass
-        threading.Thread(target=write, daemon=True).start()
+        kept = [dict(m) for m in self._conversations.get(key, [])
+                if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
+        data = {"ip": key,
+                "group": {"name": group.get("name", "Group"),
+                          "members": group.get("members", []),
+                          "admins": group.get("admins", [])},
+                "messages": kept[-_MAX_HISTORY:]}
+        path = os.path.join(config.get_peer_chat_dir(), f"group_{gid}.json")
+        self._enqueue_save(f"group_{gid}", path, data)
 
     def _save_channel(self, cid) -> None:
         key = f"channel:{cid}"
-        msgs = list(self._conversations.get(key, []))
         channel = dict(self._channels.get(cid, {}))
-
-        def write():
-            try:
-                kept = [m for m in msgs
-                        if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
-                data = {"ip": key,
-                        "channel": {"name": channel.get("name", "Channel"),
-                                    "members": channel.get("members", []),
-                                    "admins": channel.get("admins", [])},
-                        "messages": kept[-_MAX_HISTORY:]}
-                with open(os.path.join(config.get_peer_chat_dir(), f"channel_{cid}.json"),
-                          "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-            except Exception:
-                pass
-        threading.Thread(target=write, daemon=True).start()
+        kept = [dict(m) for m in self._conversations.get(key, [])
+                if m.get("kind") not in ("file_out", "file_in_offer", "chat_req")]
+        data = {"ip": key,
+                "channel": {"name": channel.get("name", "Channel"),
+                            "members": channel.get("members", []),
+                            "admins": channel.get("admins", [])},
+                "messages": kept[-_MAX_HISTORY:]}
+        path = os.path.join(config.get_peer_chat_dir(), f"channel_{cid}.json")
+        self._enqueue_save(f"channel_{cid}", path, data)
 
     def _delete_history_file(self, key) -> None:
-        def rm():
-            try:
-                safe = key.replace(".", "_").replace(":", "_")
-                p = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        threading.Thread(target=rm, daemon=True).start()
+        safe = key.replace(".", "_").replace(":", "_")
+        path = os.path.join(config.get_peer_chat_dir(), f"{safe}.json")
+        self._enqueue_save(safe, path, None, is_delete=True)
 
     def shutdown(self) -> None:
         try:
             self._ft.stop()
         except Exception:
             pass
+        # Stop the writer and flush anything still queued so no message is lost
+        # if the user quits within the debounce window (e.g. an update restart).
+        self._save_running = False
+        self._save_event.set()
+        try:
+            self._save_thread.join(timeout=3)
+        except Exception:
+            pass
+        self._flush_saves()

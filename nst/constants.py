@@ -18,7 +18,14 @@ FILE_TCP_PORT      = 54324       # TCP port for file transfer data streams
 # V2 presence: payload is ``CHAT_MAGIC|<json>`` carrying uid/device/ips/status.
 CHAT_MAGIC         = b"NST_CHAT_V2"
 CHAT_PRESENCE_EVERY = 3          # seconds between presence broadcasts
-CHAT_PEER_TIMEOUT   = 10         # seconds of silence before a peer is dropped
+CHAT_PEER_TIMEOUT   = 15         # seconds of silence before a peer reads "offline"
+# UDP presence broadcasts are routinely dropped/rate-limited on Wi-Fi and
+# managed LANs, which made peers flap to "offline" mid-conversation even though
+# TCP messaging to them still worked. Once a peer's UDP beacon is this stale we
+# fall back to a direct TCP liveness probe; only after CHAT_PEER_DROP of *no*
+# contact at all (UDP or TCP) is the peer evicted from memory.
+CHAT_PROBE_AFTER    = 6          # seconds of UDP silence before TCP-probing a peer
+CHAT_PEER_DROP      = 120        # seconds of total silence before a peer is reaped
 CHAT_AWAY_AFTER     = 300        # seconds of input idle before we report "away"
 # Anti-flood: inbound content messages from a single sender are dropped once
 # they exceed this burst rate (a sliding window, applied per sender IP).
