@@ -1,6 +1,11 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.1": [
+        "🔓 Fixed: unlocking a locked chat no longer crashes the app — clicking the unlock banner caused a TypeError that closed the window immediately.",
+        "🔄 Fixed: silent self-updates that download but never install. The installer is now fully detached from the parent process so it survives the app closing, and retries automatically if it fails.",
+        "🌐 Fixed: dual-homed peers (e.g. Dual Access with 10.x + 192.x) no longer create phantom conversations — messages are routed to the correct thread via the sender's UID.",
+    ],
     "4.13.0": [
         "✏ Edit sent messages for up to 2 minutes — right-click your message → Edit. Recipients see the update with an 'edited' tag.",
         "📷 Paste images straight into the composer (Ctrl+V) — like WhatsApp. Copied screenshots/web images appear inline in the chat; add a caption and Send.",

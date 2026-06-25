@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -188,10 +189,29 @@ def _check_for_update(progress=None) -> tuple[str, str] | None:
     return version, _download(url, version, progress)
 
 
+# Detach the installer so it survives the parent process exiting.
+# CREATE_NEW_PROCESS_GROUP  — own Ctrl-C group (won't receive parent's signals)
+# DETACHED_PROCESS          — no inherited console; fully independent
+# CREATE_BREAKAWAY_FROM_JOB — escape any job object that kills children on exit
+_DETACH_FLAGS = (
+    subprocess.CREATE_NEW_PROCESS_GROUP       # 0x0200
+    | subprocess.DETACHED_PROCESS             # 0x0008
+    | 0x01000000                              # CREATE_BREAKAWAY_FROM_JOB
+)
+
+
 def _launch_installer(path: str) -> bool:
-    """Start the staged installer silently. Returns True if it launched."""
+    """Start the staged installer silently and fully detached.
+
+    Uses Windows creation flags to ensure the installer process is independent
+    of this application — it will keep running even after we call sys.exit().
+    """
     try:
-        subprocess.Popen([path, *_SILENT_FLAGS], close_fds=True)
+        subprocess.Popen(
+            [path, *_SILENT_FLAGS],
+            creationflags=_DETACH_FLAGS,
+            close_fds=True,
+        )
         return True
     except Exception:
         return False
@@ -287,9 +307,20 @@ class UpdateManager(QObject):
             self.status.emit(
                 f"Update {version}: installer not found (may have been removed "
                 f"by antivirus). Restart the app to re-download.")
+            config.clear_staged_update()
             return
         if _launch_installer(path):
-            config.clear_staged_update()
+            # Do NOT clear the staged update here. If the installer fails
+            # silently (AV quarantine, permission issue, etc.) the staged
+            # info is preserved so apply_staged_on_launch() retries on the
+            # next start. It clears itself once the version actually bumps.
+            #
+            # Give the installer ~2 s to start and lock its temp files
+            # before we release the AppMutex by exiting. Without this the
+            # Inno Setup self-extractor may still be unpacking when the
+            # user (or the Run key) relaunches the old exe, which grabs
+            # the mutex and blocks the installer's CloseApplications step.
+            time.sleep(2)
             self._quit_app()
         else:
             self.status.emit(

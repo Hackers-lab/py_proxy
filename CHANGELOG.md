@@ -8,6 +8,24 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.1 — 2026-06-25
+- **Fixed: unlocking a locked chat no longer crashes the app.** Clicking the
+  "🔒 locked chats — click to unlock" banner caused an immediate
+  `sipBadCatcherResult` TypeError because the unlock handler returned a `bool`
+  into a Qt method that expects `void`. The return value is now suppressed.
+- **Fixed: silent self-updates that download but never install.** The Inno Setup
+  installer was spawned without Windows detachment flags, so it could be killed
+  when the parent app exited. It's now fully detached
+  (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`). A 2-second pause before
+  quitting gives the installer time to start before the AppMutex is released,
+  and the staged-update registry entry is no longer cleared prematurely — if the
+  installer fails silently, the next launch retries automatically.
+- **Fixed: dual-homed peers routing messages to the wrong conversation.** A
+  machine with two IPs (e.g. 10.x + 192.x from Dual Access) could send from its
+  secondary interface, landing the message in a phantom conversation. Inbound
+  messages are now remapped to the peer's canonical (LAN) IP via its UID, and
+  group/channel fan-out skips all local IPs (not just the primary one).
+
 ## v4.12.6 — 2026-06-24
 - **Message rate limit corrected to 20 per minute.** The anti-flood limit was
   mistakenly running as 5 messages per *second*; it's now a sliding window of 20

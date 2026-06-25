@@ -865,6 +865,7 @@ class ChatWindow(QWidget):
         self._popup_paused: bool = False   # bell pause: suppresses window-raise only
         self._last_online_sig: frozenset = frozenset()
         self._rows: dict[str, _RosterRow] = {}
+        self._rows_unread: dict[str, _RosterRow] = {}
         # Peers the user deleted -- hidden from the roster until they contact us.
         self._hidden: set[str] = set(config.load_hidden_peers())
 
@@ -1754,6 +1755,7 @@ class ChatWindow(QWidget):
 
         self._roster.clear()
         self._rows = {}
+        self._rows_unread = {}
 
         if self._unlock_banner_needed():
             self._add_unlock_banner()
@@ -1770,6 +1772,31 @@ class ChatWindow(QWidget):
             hint.setWordWrap(True)
             self._roster.add(hint)
             return
+
+        # ── UNREAD section: every conversation with unseen messages ──────────────
+        all_keys = list(groups) + list(channels) + list(peers_f)
+        unread_keys = sorted(
+            [k for k in all_keys if self._unread.get(k, 0) > 0],
+            key=lambda k: -self._unread.get(k, 0))
+        if unread_keys and not self._add_section("UNREAD", len(unread_keys)):
+            for key in unread_keys:
+                if key.startswith("group:"):
+                    gid = key[6:]
+                    n = len(self._group_meta(gid).get("members", []))
+                    self._add_unread_row(key, self._display_name(key),
+                                         f"{n} members", "online",
+                                         self._unread[key], "group")
+                elif key.startswith("channel:"):
+                    n = len(self._channel_meta(key[8:]).get("members", []))
+                    badge = "read-only" if not self._is_admin(key) else f"{n} members"
+                    self._add_unread_row(key, self._display_name(key),
+                                         badge, "online",
+                                         self._unread[key], "channel")
+                else:
+                    st = self._status_of(key)
+                    self._add_unread_row(key, self._display_name(key),
+                                         self._peer_subtitle(key, st), st,
+                                         self._unread[key], "peer")
 
         grp_channels = sorted(channels, key=lambda x: (-self._last_activity(x),
                                                        self._display_name(x).lower()))
@@ -1834,7 +1861,7 @@ class ChatWindow(QWidget):
         lbl = QLabel(f"🔒  {n} locked chat{'s' if n != 1 else ''} — click to unlock")
         lbl.setStyleSheet("font-weight:700; color:%s;" % theme.color("accent"))
         bl.addWidget(lbl, 1)
-        banner.mousePressEvent = lambda _e: self._run_unlock_gate()
+        banner.mousePressEvent = lambda _e: (self._run_unlock_gate(), None)[-1]
         self._roster.add(banner)
 
     def _add_section(self, label: str, count: int) -> bool:
@@ -1865,6 +1892,15 @@ class ChatWindow(QWidget):
         row.menu.connect(self._roster_menu)
         self._roster.add(row)
         self._rows[key] = row
+
+    def _add_unread_row(self, key, title, sub, status, unread, kind) -> None:
+        """Add a non-deletable mirror row to the UNREAD section (separate dict)."""
+        row = _RosterRow(key, title, sub, status, unread, kind, deletable=False)
+        row.set_active(key == self._active)
+        row.clicked.connect(self.select_peer)
+        row.menu.connect(self._roster_menu)
+        self._roster.add(row)
+        self._rows_unread[key] = row
 
     def _update_header_sub(self, peers) -> None:
         key = self._active
@@ -1902,6 +1938,8 @@ class ChatWindow(QWidget):
         self._unread[key] = 0
         self._cancel_reply()
         for k, row in self._rows.items():
+            row.set_active(k == key)
+        for k, row in self._rows_unread.items():
             row.set_active(k == key)
         self._head_avatar.set_name(self._display_name(key))
         self._head_name.setText(self._display_name(key))

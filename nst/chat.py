@@ -397,6 +397,40 @@ class ChatService:
             pass
         return False
 
+    def _my_all_ips(self) -> set[str]:
+        """All IPv4 addresses currently assigned to this machine's interfaces."""
+        result = {self.my_ip}
+        try:
+            for addrs in self._net_if_addrs().values():
+                for addr in addrs:
+                    if addr.family == socket.AF_INET and addr.address:
+                        result.add(addr.address)
+        except Exception:
+            pass
+        return result
+
+    def _resolve_peer_ip(self, ip: str, uid: str) -> str:
+        """Return the LAN-preferred known IP for a peer identified by *uid*.
+
+        When a dual-homed peer (e.g. 10.x + 192.x) connects from their
+        secondary interface the raw from_ip would route messages to the wrong
+        conversation. We look the sender up by UID and return whichever of
+        their known IPs has the lowest _lan_rank so the message lands in the
+        correct thread.
+        """
+        if not uid:
+            return ip
+        best_ip = ip
+        best_rank = _lan_rank(ip)
+        with self._lock:
+            for peer_ip, peer in self._peers.items():
+                if peer.uid == uid:
+                    r = _lan_rank(peer_ip)
+                    if r < best_rank:
+                        best_rank = r
+                        best_ip = peer_ip
+        return best_ip
+
     def is_manual_peer(self, ip: str) -> bool:
         """True if *ip* was added manually (not auto-discovered)."""
         return ip in self._manual
@@ -657,6 +691,11 @@ class ChatService:
             msg = json.loads(line.decode("utf-8", errors="replace"))
             name = str(msg.get("from_name", "")) or addr[0]
             ip = str(msg.get("from_ip", "")) or addr[0]
+            uid = str(msg.get("uid", ""))
+            # Dual-homed peers may connect from a secondary interface whose IP
+            # differs from their canonical (beacon) IP. Remap to the best-known
+            # address so the message lands in the right conversation.
+            ip = self._resolve_peer_ip(ip, uid)
             msg_type = msg.get("type", "chat")
 
             # Control messages reference something we already own (an offer we
@@ -809,6 +848,7 @@ class ChatService:
         msg: dict = {
             "from_name": self.my_name,
             "from_ip": self.my_ip,
+            "uid": self.my_uid,
             "text": text,
             "ts": time.time(),
         }
@@ -898,7 +938,8 @@ class ChatService:
         offline. Members are auto-approved for inbound replies. The same ``mid``
         is used for every member so delete-for-everyone targets one logical msg.
         """
-        members = [ip for ip in group.get("members", []) if ip and ip != self.my_ip]
+        my_ips = self._my_all_ips()
+        members = [ip for ip in group.get("members", []) if ip and ip not in my_ips]
         with self._lock:
             self._approved_ips.update(members)
         results: dict[str, bool] = {}
@@ -914,7 +955,8 @@ class ChatService:
         Channels are admin-post / member-read (update.md #8); membership routing
         works exactly like a group. Returns ``{ip: delivered}``.
         """
-        members = [ip for ip in channel.get("members", []) if ip and ip != self.my_ip]
+        my_ips = self._my_all_ips()
+        members = [ip for ip in channel.get("members", []) if ip and ip not in my_ips]
         with self._lock:
             self._approved_ips.update(members)
         results: dict[str, bool] = {}
