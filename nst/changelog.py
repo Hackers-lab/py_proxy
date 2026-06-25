@@ -1,6 +1,14 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.0": [
+        "✏ Edit sent messages for up to 2 minutes — right-click your message → Edit. Recipients see the update with an 'edited' tag.",
+        "📷 Paste images straight into the composer (Ctrl+V) — like WhatsApp. Copied screenshots/web images appear inline in the chat; add a caption and Send.",
+        "🔒 Chat lock — protect your history with a password. Locked conversations are encrypted on disk, so they can't be read without it. Lock the whole chat or just selected conversations (Settings → Privacy & Users).",
+        "🔑 Forgot the password? Reset via your security questions — this deletes the locked chats (they're unrecoverable by design).",
+        "🛡 Antivirus scan for shared files — every file is checked before sending and after receiving, using whatever antivirus is active on the PC (Windows Defender or third-party) plus built-in heuristics. Flagged files are blocked (configurable in Settings → File Transfer).",
+        "🛡 File bubbles now show a “Scanned by <antivirus>” mark once a file passes the check, so you can see at a glance that it was scanned.",
+    ],
     "4.12.4": [
         "🔒 Fixed: a kicked member can no longer message the group — remaining members now reject posts from anyone who isn't on the member list.",
         "🛡 Fixed: a removed user can't sneak back in. Membership and admin changes are now accepted only from a current admin, so a stray message can't rewrite everyone's roster or re-add the person who left.",

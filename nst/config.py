@@ -304,6 +304,24 @@ def save_max_file_mb(mb: int) -> bool:
     return _write_value("MaxFileMB", winreg.REG_DWORD, max(0, int(mb)))
 
 
+def load_av_mode() -> str:
+    """Antivirus scanning mode for shared files: 'off' | 'warn' | 'block'.
+
+    'block' (default) scans every outgoing/incoming file with Windows Defender
+    plus offline heuristics and refuses to send/keep flagged ones. 'warn' scans
+    but lets the user proceed anyway. 'off' skips scanning entirely.
+    """
+    val = str(_read_value("AntivirusMode", "block")).strip().lower()
+    return val if val in ("off", "warn", "block") else "block"
+
+
+def save_av_mode(mode: str) -> bool:
+    mode = str(mode).strip().lower()
+    if mode not in ("off", "warn", "block"):
+        mode = "block"
+    return _write_value("AntivirusMode", winreg.REG_SZ, mode)
+
+
 def load_file_expiry_min() -> int:
     """Minutes a sender keeps an unanswered file offer alive (default 3)."""
     try:
@@ -560,6 +578,77 @@ def save_staged_update(version: str, path: str) -> bool:
 
 def clear_staged_update() -> None:
     save_staged_update("", "")
+
+
+# ── Chat lock (password + encryption at rest) ─────────────────────────────────
+
+def load_lock_salt() -> str:
+    return str(_read_value("LockSalt", "")).strip()
+
+
+def save_lock_salt(salt_hex: str) -> bool:
+    return _write_value("LockSalt", winreg.REG_SZ, salt_hex or "")
+
+
+def load_lock_verifier() -> str:
+    return str(_read_value("LockVerifier", "")).strip()
+
+
+def save_lock_verifier(verifier_hex: str) -> bool:
+    return _write_value("LockVerifier", winreg.REG_SZ, verifier_hex or "")
+
+
+def load_lock_scope() -> str:
+    """'global' (whole chat locked) or 'selective' (only chosen chats)."""
+    val = str(_read_value("LockScope", "global")).strip().lower()
+    return val if val in ("global", "selective") else "global"
+
+
+def save_lock_scope(scope: str) -> bool:
+    scope = str(scope).strip().lower()
+    if scope not in ("global", "selective"):
+        scope = "global"
+    return _write_value("LockScope", winreg.REG_SZ, scope)
+
+
+def load_locked_chats() -> list[str]:
+    val = _read_json("LockedChats", [])
+    return [str(k) for k in val if k] if isinstance(val, list) else []
+
+
+def save_locked_chats(keys: list[str]) -> bool:
+    return _write_json("LockedChats", sorted(set(k for k in keys if k)))
+
+
+def load_lock_questions() -> list[dict]:
+    val = _read_json("LockQuestions", [])
+    out = []
+    if isinstance(val, list):
+        for item in val:
+            if isinstance(item, dict) and item.get("q") and item.get("hash"):
+                out.append(item)
+    return out
+
+
+def save_lock_questions(items: list[dict]) -> bool:
+    return _write_json("LockQuestions", items)
+
+
+def clear_lock() -> None:
+    """Remove every lock-related value from the registry."""
+    for name in ("LockSalt", "LockVerifier", "LockScope", "LockedChats",
+                 "LockQuestions"):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_APP_PATH, 0,
+                                 winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+            finally:
+                winreg.CloseKey(key)
+        except Exception:
+            pass
 
 
 # ── Dual Access ────────────────────────────────────────────────────────────────

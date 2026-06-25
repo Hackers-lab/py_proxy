@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
                              QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
                              QWidget)
 
-from .. import __version__, config
+from .. import __version__, antivirus, chatlock, config
 from ..constants import CHAT_PRESENCE_PORT, CHAT_TCP_PORT, FILE_TCP_PORT
 from ..netinfo import get_all_local_ips, get_local_ip, list_local_ipv4
 from . import sound
@@ -195,6 +195,7 @@ class SettingsDialog(QDialog):
         config.save_retention_days(self._retention.currentData())
         config.save_max_file_mb(self._maxmb.value())
         config.save_file_expiry_min(self._ft_expiry.value())
+        config.save_av_mode(self._av_mode.currentData())
         if self._pending_dir:
             config.save_download_dir(self._pending_dir)
 
@@ -427,6 +428,28 @@ class SettingsDialog(QDialog):
     # ── Privacy & Users ──────────────────────────────────────────────────────
     def _page_privacy(self) -> QWidget:
         w, v = self._page("Privacy & User Management")
+
+        v.addWidget(self._section_label("CHAT LOCK"))
+        v.addWidget(self._hint(
+            "Protect your chat history with a password. Locked conversations are "
+            "encrypted on disk, so they can't be read without the password — not "
+            "even by opening the files directly. A lost password can only be "
+            "reset via your security questions, which deletes the locked chats."))
+        self._lock_status = QLabel("")
+        v.addWidget(self._lock_status)
+        lrow = QHBoxLayout()
+        self._lock_set_btn = QPushButton("Set password…")
+        self._lock_set_btn.clicked.connect(self._lock_setup)
+        self._lock_remove_btn = QPushButton("Remove password")
+        self._lock_remove_btn.setProperty("variant", "danger")
+        self._lock_remove_btn.clicked.connect(self._lock_remove)
+        lrow.addWidget(self._lock_set_btn)
+        lrow.addWidget(self._lock_remove_btn)
+        lrow.addStretch(1)
+        v.addLayout(lrow)
+        self._refresh_lock_status()
+        v.addWidget(hline())
+
         v.addWidget(self._section_label("BLOCKED USERS"))
         v.addWidget(self._hint(
             "Blocked users cannot send you messages or files, and are excluded "
@@ -472,6 +495,30 @@ class SettingsDialog(QDialog):
         self.cw.unblock_user(ip)
         self._refresh_blocked()
 
+    def _refresh_lock_status(self) -> None:
+        if chatlock.is_set():
+            scope = ("the whole chat" if chatlock.scope() == "global"
+                     else f"{len(chatlock.locked_keys())} selected chat(s)")
+            self._lock_status.setText(f"🔒 Lock is ON — protecting {scope}.")
+            self._lock_set_btn.setText("Change password…")
+            self._lock_remove_btn.setEnabled(True)
+        else:
+            self._lock_status.setText("🔓 No password set.")
+            self._lock_set_btn.setText("Set password…")
+            self._lock_remove_btn.setEnabled(False)
+
+    def _lock_setup(self) -> None:
+        self.cw.setup_lock()
+        self._refresh_lock_status()
+
+    def _lock_remove(self) -> None:
+        if QMessageBox.question(
+                self, "Remove password",
+                "Remove the chat-lock password? Locked chats will be stored "
+                "unencrypted again.") == QMessageBox.StandardButton.Yes:
+            self.cw.remove_lock()
+            self._refresh_lock_status()
+
     # ── File Transfer ─────────────────────────────────────────────────────────
     def _page_filetransfer(self) -> QWidget:
         w, v = self._page("File Transfer")
@@ -507,6 +554,25 @@ class SettingsDialog(QDialog):
         v.addWidget(self._hint(
             "Transfers are peer-to-peer: the sender hosts the file while online "
             "and there is no central storage. Offline file transfer isn't supported."))
+
+        v.addWidget(hline())
+        v.addWidget(self._section_label("VIRUS SCANNING"))
+        avrow = QHBoxLayout()
+        avrow.addWidget(QLabel("Scan shared files"))
+        self._av_mode = QComboBox()
+        for label, val in [("Block flagged files", "block"),
+                           ("Warn, allow override", "warn"),
+                           ("Off", "off")]:
+            self._av_mode.addItem(label, val)
+        idx = self._av_mode.findData(config.load_av_mode())
+        self._av_mode.setCurrentIndex(idx if idx >= 0 else 0)
+        avrow.addStretch(1)
+        avrow.addWidget(self._av_mode)
+        v.addLayout(avrow)
+        v.addWidget(self._hint(
+            "Files are scanned with " + antivirus.engine_label() + " both before "
+            "sending and after receiving — using whatever antivirus is active on "
+            "this PC. “Block” refuses flagged files; “Warn” lets you decide."))
         v.addStretch(1)
         return w
 

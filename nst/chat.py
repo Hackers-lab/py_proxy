@@ -91,13 +91,14 @@ class ChatService:
                  on_channel_message=None,
                  on_receipt=None,
                  on_delete=None,
+                 on_edit=None,
                  on_typing=None,
                  on_reaction=None,
                  on_queue_flush=None,
                  on_group_kick=None) -> None:
         """
         on_roster_change(peers: list[Peer])          -- roster changed.
-        on_message(ip, name, text, ts, reply, mid)   -- incoming chat message.
+        on_message(ip, name, text, ts, reply, mid, image) -- incoming chat message.
         on_file_offer(ip, name, msg_dict)            -- incoming file offer.
         on_file_accept(ip, name, msg_dict)           -- peer accepted our offer.
         on_file_reject(ip, name, msg_dict)           -- peer rejected our offer.
@@ -105,6 +106,7 @@ class ChatService:
         on_group_message(group, ip, name, text, ts, reply, mid) -- message to a group.
         on_receipt(ip, mid, state)                   -- peer acked one of our messages.
         on_delete(from_ip, mid)                      -- peer deleted a message for everyone.
+        on_edit(from_ip, mid, new_text)              -- peer edited one of their messages.
         on_typing(ip, name, gid, is_typing)          -- peer started/stopped typing.
         on_reaction(from_ip, mid, emoji)             -- peer added/toggled a reaction.
         on_queue_flush(ip, mids)                     -- queued messages finally delivered.
@@ -124,6 +126,7 @@ class ChatService:
         self._on_channel_message = on_channel_message
         self._on_receipt = on_receipt
         self._on_delete = on_delete
+        self._on_edit = on_edit
         self._on_typing = on_typing
         self._on_reaction = on_reaction
         self._on_queue_flush = on_queue_flush
@@ -643,8 +646,10 @@ class ChatService:
         try:
             conn.settimeout(5.0)
             buf = b""
-            while b"\n" not in buf and len(buf) < 65536:
-                chunk = conn.recv(4096)
+            # Cap is generous so an inline pasted image (base64, a few MB) fits in
+            # one framed message; plain text is tiny. Oversized junk is bounded.
+            while b"\n" not in buf and len(buf) < 8 * 1024 * 1024:
+                chunk = conn.recv(65536)
                 if not chunk:
                     break
                 buf += chunk
@@ -658,7 +663,7 @@ class ChatService:
             # made, a message id we sent, an ephemeral typing ping) so they're
             # always trusted and bypass the first-contact approval gate.
             _trusted = ("file_accept", "file_reject", "receipt", "delete",
-                        "typing", "reaction", "group_kick")
+                        "edit", "typing", "reaction", "group_kick")
             if msg_type not in _trusted:
                 if ip in self._blocked_ips:
                     return  # silently drop — applies to LAN and external alike
@@ -726,6 +731,10 @@ class ChatService:
         elif msg_type == "delete":
             if self._on_delete:
                 self._on_delete(ip, str(msg.get("mid", "")))
+        elif msg_type == "edit":
+            mid = str(msg.get("mid", ""))
+            if mid and self._on_edit:
+                self._on_edit(ip, mid, str(msg.get("text", "")))
         elif msg_type == "group_kick":
             gid = str(msg.get("gid", ""))
             if gid and self._on_group_kick:
@@ -769,25 +778,28 @@ class ChatService:
             ts = float(msg.get("ts", time.time()))
             reply = msg.get("reply") if isinstance(msg.get("reply"), dict) else None
             mid = str(msg.get("mid", ""))
+            image = msg.get("image") if isinstance(msg.get("image"), dict) else None
             self._touch_peer(ip, name)
             # Auto-acknowledge delivery the moment we hand the message to the UI.
             if mid and msg_type == "chat":
                 threading.Thread(target=self.send_receipt,
                                  args=(ip, mid, "delivered"), daemon=True).start()
-            if text and self._on_message:
-                self._on_message(ip, name, text, ts, reply, mid)
+            if (text or image) and self._on_message:
+                self._on_message(ip, name, text, ts, reply, mid, image)
 
     # ── messaging: outgoing ───────────────────────────────────────────────────
     def send(self, ip: str, text: str, reply: dict | None = None,
              group: dict | None = None, msg_type: str = "chat",
-             mid: str = "", channel: dict | None = None) -> bool:
+             mid: str = "", channel: dict | None = None,
+             image: dict | None = None) -> bool:
         """Deliver a message synchronously. Returns True on success.
 
         ``reply`` is an optional ``{"sender", "text"}`` snippet of the message
         being replied to. ``group`` carries the synced-group identity so the
         peer can route the reply back to every member. ``mid`` is the stable
-        message id used for receipts / delete-for-everyone. Call from a worker
-        thread to avoid blocking the UI.
+        message id used for receipts / delete-for-everyone. ``image`` is an
+        optional ``{"mime", "data"(base64), "name"}`` inline picture. Call from a
+        worker thread to avoid blocking the UI.
         """
         bot = self._virtual.get(ip)
         if bot is not None:
@@ -804,6 +816,8 @@ class ChatService:
             msg["mid"] = mid
         if reply:
             msg["reply"] = reply
+        if image:
+            msg["image"] = image
         if group:
             msg["group"] = group
             msg["type"] = msg_type if msg_type in ("group", "group_invite") else "group"
@@ -936,6 +950,29 @@ class ChatService:
             "type": "delete", "mid": mid, "gid": gid,
             "from_name": self.my_name, "from_ip": self.my_ip,
         })
+
+    def send_edit(self, ip: str, mid: str, text: str, gid: str = "") -> bool:
+        """Ask *ip* to replace the text of message *mid* with *text*.
+
+        Retained and retried like a kick if they're offline, so an edit made on
+        a flaky LAN still lands when the peer returns. A later edit of the same
+        message supersedes any still-queued one (we never deliver a stale text).
+        """
+        if not mid or ip in self._virtual:
+            return False
+        payload = json.dumps({
+            "type": "edit", "mid": mid, "text": text, "gid": gid,
+            "from_name": self.my_name, "from_ip": self.my_ip,
+        }).encode("utf-8") + b"\n"
+        if self._deliver(ip, payload):
+            return True
+        key = f"edit:{mid}"
+        with self._lock:
+            q = self._outbox.get(ip)
+            if q:
+                self._outbox[ip] = [i for i in q if i["key"] != key]
+        self._enqueue(ip, payload, mid=key)
+        return False
 
     def send_typing(self, ip: str, is_typing: bool, gid: str = "") -> bool:
         """Send an ephemeral typing ping to *ip*."""

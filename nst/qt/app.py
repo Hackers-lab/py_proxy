@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
-from .. import config
+from .. import antivirus, config
 from ..chat import ChatService
 from ..remotescreen import RemoteScreenService
 from .. import changelog
@@ -62,8 +62,8 @@ def run() -> None:
     chat = ChatService(
         config.load_display_name(),
         on_roster_change=lambda peers: sig.roster_changed.emit(peers),
-        on_message=lambda ip, name, text, ts, reply, mid:
-            sig.message.emit(ip, name, text, ts, reply, mid),
+        on_message=lambda ip, name, text, ts, reply, mid, image=None:
+            sig.message.emit(ip, name, text, ts, reply, mid, image),
         on_file_offer=lambda ip, name, msg: sig.file_offer.emit(ip, name, msg),
         on_file_accept=lambda ip, name, msg: sig.file_accept.emit(ip, name, msg),
         on_file_reject=lambda ip, name, msg: sig.file_reject.emit(ip, name, msg),
@@ -74,6 +74,7 @@ def run() -> None:
             sig.channel_message.emit(channel, ip, name, text, ts, reply, mid),
         on_receipt=lambda ip, mid, state: sig.receipt.emit(ip, mid, state),
         on_delete=lambda ip, mid: sig.deleted.emit(ip, mid),
+        on_edit=lambda ip, mid, text: sig.edited.emit(ip, mid, text),
         on_typing=lambda ip, name, gid, typing: sig.typing.emit(ip, name, gid, typing),
         on_reaction=lambda ip, mid, emoji: sig.reaction.emit(ip, mid, emoji),
         on_queue_flush=lambda ip, mids: sig.queue_flush.emit(ip, mids),
@@ -116,6 +117,7 @@ def run() -> None:
     sig.channel_message.connect(chat_window.on_channel_message)
     sig.receipt.connect(chat_window.on_receipt)
     sig.deleted.connect(chat_window.on_remote_delete)
+    sig.edited.connect(chat_window.on_remote_edit)
     sig.typing.connect(chat_window.on_typing)
     sig.reaction.connect(chat_window.on_reaction)
     sig.queue_flush.connect(chat_window.on_queue_flush)
@@ -183,6 +185,7 @@ def run() -> None:
     )
 
     chat.start()
+    antivirus.prime()   # warm the active-AV name cache off the GUI thread
     if config.load_remote_enabled():
         remote.start()
 

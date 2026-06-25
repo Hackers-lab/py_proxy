@@ -6,6 +6,7 @@ state, history files and the synced-group / reply / file-transfer protocols are
 shared unchanged with the service layer.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -13,16 +14,19 @@ import threading
 import time
 import uuid
 
-from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (QBuffer, QByteArray, QEvent, QPoint, QSize, Qt, QTimer,
+                         pyqtSignal)
 from PyQt6.QtGui import (QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
-                        QDropEvent, QIcon, QPainter, QPainterPath, QPen, QPixmap)
+                        QDropEvent, QIcon, QImage, QPainter, QPainterPath, QPen,
+                        QPixmap, QTextCursor)
 from PyQt6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QDialog,
                              QFileDialog, QFrame, QHBoxLayout, QInputDialog,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem,
                              QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                             QScrollArea, QToolButton, QVBoxLayout, QWidget)
+                             QScrollArea, QStackedWidget, QToolButton,
+                             QVBoxLayout, QWidget)
 
-from .. import __version__, config
+from .. import __version__, antivirus, chatlock, config
 from ..chat import DemoBot, UpdatesBot
 from ..constants import CHAT_RATE_LIMIT, CHAT_RATE_WINDOW, CHAT_TCP_PORT
 from ..filetransfer import FileTransferService
@@ -120,6 +124,7 @@ def _fmt_last_seen(ts: float) -> str:
 
 
 _DELETE_WINDOW = 180   # seconds you may still "delete for everyone"
+_EDIT_WINDOW   = 120   # seconds you may still edit a sent message (2 min)
 
 
 def _mk_id() -> str:
@@ -165,6 +170,55 @@ def _migrate_entry(item) -> dict:
         return _mk_entry("sys", "", item[2], ts)
     # file_/chat_req were never persisted; ignore quietly.
     return _mk_entry("sys", "", "", ts)
+
+
+# Inline pasted images are downscaled + compressed so one fits in a single chat
+# message frame and doesn't bloat history. Full-resolution sharing still goes
+# through the file-transfer button.
+_INLINE_MAX_EDGE = 1280
+_INLINE_MAX_BYTES = 1_200_000   # raw bytes; base64 ~1.33x, well under the 8 MB frame
+
+
+def _encode_image(img: QImage) -> dict | None:
+    """Downscale/compress *img* to a wire dict {mime, data(base64), name}."""
+    if img is None or img.isNull():
+        return None
+    if max(img.width(), img.height()) > _INLINE_MAX_EDGE:
+        img = img.scaled(_INLINE_MAX_EDGE, _INLINE_MAX_EDGE,
+                         Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    # PNG keeps screenshots/text crisp; fall back to progressively smaller JPEG.
+    attempts = [("image/png", "PNG", -1, "image.png"),
+                ("image/jpeg", "JPG", 82, "image.jpg"),
+                ("image/jpeg", "JPG", 60, "image.jpg")]
+    for mime, fmt, quality, name in attempts:
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        ok = img.save(buf, fmt, quality)
+        buf.close()
+        if ok and ba.size() <= _INLINE_MAX_BYTES:
+            return {"mime": mime, "name": name,
+                    "data": base64.b64encode(bytes(ba)).decode("ascii")}
+    # Still too big — shrink harder and accept a lower-quality JPEG.
+    img = img.scaled(900, 900, Qt.AspectRatioMode.KeepAspectRatio,
+                     Qt.TransformationMode.SmoothTransformation)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(buf, "JPG", 55)
+    buf.close()
+    return {"mime": "image/jpeg", "name": "image.jpg",
+            "data": base64.b64encode(bytes(ba)).decode("ascii")}
+
+
+def _pixmap_from_image_dict(d: dict) -> QPixmap | None:
+    try:
+        raw = base64.b64decode(d.get("data", ""))
+    except Exception:
+        return None
+    pm = QPixmap()
+    return pm if pm.loadFromData(raw) and not pm.isNull() else None
 
 
 def _repolish(w: QWidget) -> None:
@@ -416,6 +470,8 @@ class _Composer(QPlainTextEdit):
     """
 
     submit = pyqtSignal()
+    cancel = pyqtSignal()             # Escape pressed (cancel an active reply/edit)
+    imagePasted = pyqtSignal(object)  # QImage pasted/dropped into the composer
     heightChanged = pyqtSignal(int)   # emitted whenever the auto-height changes
 
     def __init__(self, max_lines: int = 6) -> None:
@@ -461,7 +517,25 @@ class _Composer(QPlainTextEdit):
             else:
                 self.submit.emit()              # Enter → send
             return
+        if e.key() == Qt.Key.Key_Escape:
+            self.cancel.emit()                  # Escape → drop reply/edit
+            return
         super().keyPressEvent(e)
+
+    def canInsertFromMimeData(self, source) -> bool:
+        if source.hasImage():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:
+        # A pasted picture (e.g. copied from a website or the Snipping Tool)
+        # becomes an inline image instead of being dropped on the floor.
+        if source.hasImage():
+            img = source.imageData()
+            if isinstance(img, QImage) and not img.isNull():
+                self.imagePasted.emit(img)
+                return
+        super().insertFromMimeData(source)
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -533,6 +607,215 @@ class _SectionHeader(QFrame):
         super().mousePressEvent(e)
 
 
+class _LockGateDialog(QDialog):
+    """Unlock prompt for password-protected chat.
+
+    Two pages: enter the password, or — via "Forgot password?" — answer the
+    security questions to authorise a reset. ``action`` is one of "unlocked",
+    "reset" or "cancel" after the dialog closes.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Chat Locked 🔒")
+        self.setModal(True)
+        self.action = "cancel"
+        self._answers: list[str] = []
+        self.resize(420, 200)
+        outer = QVBoxLayout(self)
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack)
+        self._stack.addWidget(self._password_page())
+        self._stack.addWidget(self._reset_page())
+
+    def _password_page(self) -> QWidget:
+        w = QVBoxLayout()
+        page = QWidget()
+        page.setLayout(w)
+        w.addWidget(QLabel("This chat is locked. Enter your password to unlock."))
+        self._pw = QLineEdit()
+        self._pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw.setPlaceholderText("Password")
+        self._pw.returnPressed.connect(self._try_unlock)
+        w.addWidget(self._pw)
+        self._err = QLabel("")
+        self._err.setStyleSheet("color:#e5534b; font-size:11px;")
+        w.addWidget(self._err)
+        w.addStretch(1)
+        row = QHBoxLayout()
+        forgot = QPushButton("Forgot password?")
+        forgot.setFlat(True)
+        forgot.setCursor(Qt.CursorShape.PointingHandCursor)
+        forgot.clicked.connect(self._go_reset)
+        row.addWidget(forgot)
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        unlock = QPushButton("Unlock")
+        unlock.setProperty("variant", "accent")
+        unlock.setDefault(True)
+        unlock.clicked.connect(self._try_unlock)
+        row.addWidget(cancel)
+        row.addWidget(unlock)
+        w.addLayout(row)
+        return page
+
+    def _reset_page(self) -> QWidget:
+        w = QVBoxLayout()
+        page = QWidget()
+        page.setLayout(w)
+        if chatlock.has_questions():
+            w.addWidget(QLabel("Answer your security questions to reset the "
+                               "password.\n⚠ Resetting permanently deletes the "
+                               "locked chats."))
+            self._answer_edits: list[QLineEdit] = []
+            for q in chatlock.questions():
+                w.addWidget(QLabel(q))
+                e = QLineEdit()
+                w.addWidget(e)
+                self._answer_edits.append(e)
+        else:
+            self._answer_edits = []
+            w.addWidget(QLabel("No security questions were set, so the password "
+                               "can't be recovered.\n\nYou can still reset, which "
+                               "permanently deletes the locked chats."))
+        self._reset_err = QLabel("")
+        self._reset_err.setStyleSheet("color:#e5534b; font-size:11px;")
+        w.addWidget(self._reset_err)
+        w.addStretch(1)
+        row = QHBoxLayout()
+        back = QPushButton("Back")
+        back.clicked.connect(lambda: self._stack.setCurrentIndex(0))
+        row.addWidget(back)
+        row.addStretch(1)
+        reset = QPushButton("Reset & delete locked chats")
+        reset.setProperty("variant", "danger")
+        reset.clicked.connect(self._try_reset)
+        row.addWidget(reset)
+        w.addLayout(row)
+        return page
+
+    def _go_reset(self) -> None:
+        self._stack.setCurrentIndex(1)
+
+    def _try_unlock(self) -> None:
+        if chatlock.unlock(self._pw.text()):
+            self.action = "unlocked"
+            self.accept()
+        else:
+            self._err.setText("Incorrect password.")
+            self._pw.selectAll()
+            self._pw.setFocus()
+
+    def _try_reset(self) -> None:
+        answers = [e.text() for e in self._answer_edits]
+        if chatlock.has_questions() and not chatlock.verify_answers(answers):
+            self._reset_err.setText("One or more answers are incorrect.")
+            return
+        if QMessageBox.warning(
+                self, "Reset chat lock",
+                "This permanently deletes the locked chats and removes the "
+                "password. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.action = "reset"
+            self.accept()
+
+
+class _LockSetupDialog(QDialog):
+    """Create or change the chat-lock password, scope and security questions."""
+
+    def __init__(self, convos: list[tuple[str, str]], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Chat Lock")
+        self.setModal(True)
+        self.resize(460, 520)
+        v = QVBoxLayout(self)
+        changing = chatlock.is_set()
+        v.addWidget(QLabel("Set a password" if not changing else "Change password"))
+        self._pw = QLineEdit(); self._pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw.setPlaceholderText("New password")
+        self._pw2 = QLineEdit(); self._pw2.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw2.setPlaceholderText("Confirm password")
+        v.addWidget(self._pw)
+        v.addWidget(self._pw2)
+        show = QCheckBox("Show password")
+        show.toggled.connect(lambda on: [e.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
+            for e in (self._pw, self._pw2)])
+        v.addWidget(show)
+
+        v.addWidget(hline())
+        self._whole = QCheckBox("Lock the entire chat (ask for the password on launch)")
+        self._whole.setChecked(chatlock.scope() != "selective")
+        v.addWidget(self._whole)
+        v.addWidget(QLabel("Or lock only these conversations:"))
+        self._list = QListWidget()
+        self._list.setMaximumHeight(150)
+        locked = chatlock.locked_keys()
+        for key, label in convos:
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, key)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if key in locked
+                             else Qt.CheckState.Unchecked)
+            self._list.addItem(it)
+        v.addWidget(self._list)
+        self._whole.toggled.connect(lambda on: self._list.setEnabled(not on))
+        self._list.setEnabled(not self._whole.isChecked())
+
+        v.addWidget(hline())
+        v.addWidget(QLabel("Security questions (used to reset a forgotten "
+                           "password — resetting deletes the locked chats):"))
+        self._q_edits: list[tuple[QLineEdit, QLineEdit]] = []
+        existing = chatlock.questions()
+        for i in range(2):
+            qe = QLineEdit(); qe.setPlaceholderText(f"Question {i + 1} (optional)")
+            ae = QLineEdit(); ae.setPlaceholderText("Answer")
+            if i < len(existing):
+                qe.setText(existing[i])
+            v.addWidget(qe); v.addWidget(ae)
+            self._q_edits.append((qe, ae))
+
+        self._err = QLabel(""); self._err.setStyleSheet("color:#e5534b; font-size:11px;")
+        v.addWidget(self._err)
+        v.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        save = QPushButton("Save"); save.setProperty("variant", "accent")
+        save.setDefault(True); save.clicked.connect(self._save)
+        row.addWidget(cancel); row.addWidget(save)
+        v.addLayout(row)
+
+    def values(self) -> dict:
+        return self._result
+
+    def _save(self) -> None:
+        pw = self._pw.text()
+        if len(pw) < 4:
+            self._err.setText("Password must be at least 4 characters.")
+            return
+        if pw != self._pw2.text():
+            self._err.setText("Passwords don't match.")
+            return
+        scope = "global" if self._whole.isChecked() else "selective"
+        keys = []
+        if scope == "selective":
+            for i in range(self._list.count()):
+                it = self._list.item(i)
+                if it.checkState() == Qt.CheckState.Checked:
+                    keys.append(it.data(Qt.ItemDataRole.UserRole))
+            if not keys:
+                self._err.setText("Pick at least one conversation, or lock the whole chat.")
+                return
+        questions = [(qe.text(), ae.text()) for qe, ae in self._q_edits
+                     if qe.text().strip() and ae.text().strip()]
+        self._result = {"password": pw, "scope": scope, "keys": keys,
+                        "questions": questions}
+        self.accept()
+
+
 class ChatWindow(QWidget):
     """Standalone chat window. Closing hides it so conversations persist."""
 
@@ -544,6 +827,8 @@ class ChatWindow(QWidget):
     _xfer_finished = pyqtSignal(str, str, str, str)  # tid, ip, path(""=failed), status text
     _sys_sig = pyqtSignal(str, str)                  # key, text -- post a system line
     _queued_sig = pyqtSignal(str)                    # mid -- message held in offline queue
+    _scan_done = pyqtSignal(str, bool, str, str, bool)  # tid, ok, threat, engine, scanned
+    _scanned_sig = pyqtSignal(str, str)              # tid, scan-badge label (receiver side)
 
     def __init__(self, chat_service, toasts,
                  log_fn=lambda m: None) -> None:
@@ -569,6 +854,13 @@ class ChatWindow(QWidget):
         self._peer_filter = ""
         self._collapsed: set[str] = set()   # roster sections the user folded away
         self._reply_to: dict | None = None
+        # Edit-in-progress: (key, mid) of the outgoing message being edited, or
+        # None. While set, the composer's Send applies an edit instead of a new
+        # message (mirrors the reply bar above the composer).
+        self._editing: tuple[str, str] | None = None
+        # A pasted image staged for sending with the next message (QImage), shown
+        # as a preview chip above the composer until sent or cancelled.
+        self._pending_image: QImage | None = None
         self._notifications_enabled = config.load_notifications_enabled()
         self._popup_paused: bool = False   # bell pause: suppresses window-raise only
         self._last_online_sig: frozenset = frozenset()
@@ -594,6 +886,15 @@ class ChatWindow(QWidget):
         self._offer_states: dict[str, str] = {}
         self._transfer_paths: dict[str, str] = {}
         self._chat_req_states: dict[str, str] = {}
+        # tid -> (ip, path, filename, size, mode) for an outgoing file awaiting
+        # its antivirus scan result before the offer is sent.
+        self._scan_ctx: dict[str, tuple] = {}
+        # tid -> "🛡 Scanned by …" badge shown on the file bubble once it passes.
+        self._scan_info: dict[str, str] = {}
+
+        # Locked (encrypted) conversations whose files we couldn't decrypt yet
+        # because the password hasn't been supplied this session: key -> path.
+        self._locked_files: dict[str, str] = {}
 
         self._ft = FileTransferService(chat_service)
         self._ft.start()
@@ -622,6 +923,8 @@ class ChatWindow(QWidget):
         self._xfer_finished.connect(self._on_xfer_finished)
         self._sys_sig.connect(self._sys)
         self._queued_sig.connect(self._on_queued)
+        self._scan_done.connect(self._on_scan_done)
+        self._scanned_sig.connect(self._on_scanned)
 
         # Debounced history writer. Each message used to spawn a fresh thread
         # that rewrote the whole conversation file from scratch; an always-on
@@ -925,6 +1228,62 @@ class ChatWindow(QWidget):
         self._reply_bar.hide()
         r.addWidget(self._reply_bar)
 
+        # edit bar — shown while editing one of your own recent messages
+        self._edit_bar = QFrame()
+        self._edit_bar.setObjectName("replyBar")
+        eb = QHBoxLayout(self._edit_bar)
+        eb.setContentsMargins(10, 6, 8, 6)
+        estripe = QFrame()
+        estripe.setFixedWidth(3)
+        estripe.setStyleSheet("background:%s; border-radius:2px;" % theme.color("accent"))
+        eb.addWidget(estripe)
+        ebt = QVBoxLayout()
+        ebt.setSpacing(0)
+        ewho = QLabel("✏ Editing message")
+        ewho.setObjectName("accent")
+        self._edit_prev = QLabel("")
+        self._edit_prev.setObjectName("muted")
+        ebt.addWidget(ewho)
+        ebt.addWidget(self._edit_prev)
+        eb.addLayout(ebt, 1)
+        ebx = QPushButton("✕")
+        ebx.setFixedSize(22, 22)
+        ebx.setCursor(Qt.CursorShape.PointingHandCursor)
+        ebx.setStyleSheet(
+            "QPushButton{background:transparent; border:none; padding:0;"
+            " font-size:13px; color:%s;}"
+            "QPushButton:hover{color:%s;}"
+            % (theme.color("text_sec"), theme.color("text_pri")))
+        ebx.clicked.connect(self._cancel_edit)
+        eb.addWidget(ebx)
+        self._edit_bar.hide()
+        r.addWidget(self._edit_bar)
+
+        # image preview bar — a pasted image staged to send with the next message
+        self._img_bar = QFrame()
+        self._img_bar.setObjectName("replyBar")
+        ib = QHBoxLayout(self._img_bar)
+        ib.setContentsMargins(10, 6, 8, 6)
+        self._img_thumb = QLabel()
+        self._img_thumb.setFixedSize(54, 40)
+        self._img_thumb.setScaledContents(False)
+        ib.addWidget(self._img_thumb)
+        ilbl = QLabel("📷 Image ready — add a caption (optional) and press Send")
+        ilbl.setObjectName("muted")
+        ib.addWidget(ilbl, 1)
+        ibx = QPushButton("✕")
+        ibx.setFixedSize(22, 22)
+        ibx.setCursor(Qt.CursorShape.PointingHandCursor)
+        ibx.setStyleSheet(
+            "QPushButton{background:transparent; border:none; padding:0;"
+            " font-size:13px; color:%s;}"
+            "QPushButton:hover{color:%s;}"
+            % (theme.color("text_sec"), theme.color("text_pri")))
+        ibx.clicked.connect(self._cancel_image)
+        ib.addWidget(ibx)
+        self._img_bar.hide()
+        r.addWidget(self._img_bar)
+
         # read-only notice (broadcast channels where you're not an admin)
         self._readonly_lbl = QLabel("📢  Only channel admins can post here.")
         self._readonly_lbl.setObjectName("muted")
@@ -937,8 +1296,10 @@ class ChatWindow(QWidget):
         comp = QHBoxLayout()
         comp.setSpacing(6)
         self._entry = _Composer()
-        self._entry.setPlaceholderText(_PLACEHOLDER + "   (Enter = send · Shift+Enter = new line)")
+        self._entry.setPlaceholderText(_PLACEHOLDER)
         self._entry.submit.connect(self._send)
+        self._entry.cancel.connect(self._on_composer_escape)
+        self._entry.imagePasted.connect(self._stage_image)
         self._entry.textChanged.connect(self._on_typing_edit)
         self._entry.textChanged.connect(self._update_send_enabled)
         comp.addWidget(self._entry, 1)
@@ -1063,6 +1424,7 @@ class ChatWindow(QWidget):
         self.raise_()
         self.activateWindow()
         self._visible = True
+        self._maybe_unlock_on_open()
         if key == "update":
             self._ensure_updates_bot()
             QTimer.singleShot(100, lambda: self.select_peer(UpdatesBot.IP))
@@ -1393,6 +1755,9 @@ class ChatWindow(QWidget):
         self._roster.clear()
         self._rows = {}
 
+        if self._unlock_banner_needed():
+            self._add_unlock_banner()
+
         groups = [f"group:{g}" for g in self._groups if self._matches(f"group:{g}")]
         channels = [f"channel:{c}" for c in self._channels if self._matches(f"channel:{c}")]
         peers_f = [ip for ip in self._visible_peers(peers) if self._matches(ip)]
@@ -1458,6 +1823,20 @@ class ChatWindow(QWidget):
         if self._active:
             self._update_header_sub(peers)
 
+    def _add_unlock_banner(self) -> None:
+        """A clickable roster banner to unlock password-protected chats."""
+        n = len(self._locked_files)
+        banner = QFrame()
+        banner.setObjectName("card2")
+        banner.setCursor(Qt.CursorShape.PointingHandCursor)
+        bl = QHBoxLayout(banner)
+        bl.setContentsMargins(10, 8, 10, 8)
+        lbl = QLabel(f"🔒  {n} locked chat{'s' if n != 1 else ''} — click to unlock")
+        lbl.setStyleSheet("font-weight:700; color:%s;" % theme.color("accent"))
+        bl.addWidget(lbl, 1)
+        banner.mousePressEvent = lambda _e: self._run_unlock_gate()
+        self._roster.add(banner)
+
     def _add_section(self, label: str, count: int) -> bool:
         """Add a collapsible section header; return True if it is collapsed."""
         collapsed = label in self._collapsed
@@ -1515,6 +1894,10 @@ class ChatWindow(QWidget):
     # ── selection ─────────────────────────────────────────────────────────────
     def select_peer(self, key: str) -> None:
         prev = self._active
+        if self._editing and self._editing[0] != key:
+            self._cancel_edit()   # leaving the chat being edited abandons the edit
+        if prev != key and self._pending_image is not None:
+            self._cancel_image()  # a staged image belongs to the chat it was pasted in
         self._active = key
         self._unread[key] = 0
         self._cancel_reply()
@@ -1794,15 +2177,36 @@ class ChatWindow(QWidget):
             bv.addWidget(q)
             bv.addSpacing(2)
 
-        msg = QLabel(text)
-        msg.setWordWrap(True)
-        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        msg.setStyleSheet("color:%s; font-size:13px;" % txcol)
-        bv.addWidget(msg)
+        img_dict = entry.get("image")
+        if isinstance(img_dict, dict):
+            pm = _pixmap_from_image_dict(img_dict)
+            if pm is not None:
+                il = QLabel()
+                il.setPixmap(pm.scaled(
+                    320, 320, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+                il.setStyleSheet("border-radius:8px;")
+                il.setCursor(Qt.CursorShape.PointingHandCursor)
+                il.setToolTip("Click to open")
+                il.mousePressEvent = lambda _e, d=img_dict: self._open_inline_image(d)
+                bv.addWidget(il)
+                if text:
+                    bv.addSpacing(2)
+
+        if text:
+            msg = QLabel(text)
+            msg.setWordWrap(True)
+            msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            msg.setStyleSheet("color:%s; font-size:13px;" % txcol)
+            bv.addWidget(msg)
 
         foot = QHBoxLayout()
         foot.setSpacing(6)
         foot.addStretch(1)
+        if entry.get("edited"):
+            ed = QLabel("edited")
+            ed.setStyleSheet("font-size:10px; font-style:italic; color:%s;" % meta_col)
+            foot.addWidget(ed)
         stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
         stamp.setStyleSheet("font-size:10px; color:%s;" % meta_col)
         foot.addWidget(stamp)
@@ -1897,6 +2301,124 @@ class ChatWindow(QWidget):
         self._reply_to = None
         self._reply_bar.hide()
 
+    # ── edit ──────────────────────────────────────────────────────────────────
+    def _begin_edit(self, entry: dict) -> None:
+        """Load a recent own message back into the composer for editing."""
+        mid = entry.get("mid", "")
+        loc = self._mid_index.get(mid)
+        key = loc[0] if loc else self._active
+        if not key or entry.get("kind") != "out" or not entry.get("text"):
+            return
+        if time.time() - entry.get("ts", 0) > _EDIT_WINDOW:
+            self._log("That message is too old to edit (2 minute limit).")
+            return
+        self._cancel_reply()
+        self._editing = (key, mid)
+        text = entry.get("text", "")
+        self._entry.setPlainText(text)
+        self._entry.moveCursor(QTextCursor.MoveOperation.End)
+        snip = text if len(text) <= 80 else text[:77] + "..."
+        self._edit_prev.setText(snip)
+        self._edit_bar.show()
+        self._entry.setFocus()
+
+    def _cancel_edit(self) -> None:
+        self._editing = None
+        self._edit_bar.hide()
+        self._entry.clear()
+
+    def _on_composer_escape(self) -> None:
+        """Escape in the composer drops an active edit, image, else a reply."""
+        if self._editing:
+            self._cancel_edit()
+        elif self._pending_image is not None:
+            self._cancel_image()
+        elif self._reply_to:
+            self._cancel_reply()
+
+    # ── inline images ─────────────────────────────────────────────────────────
+    def _stage_image(self, img: QImage) -> None:
+        """Stage a pasted image for the next send (1:1 chats only)."""
+        if not self._active or self._is_room(self._active) or self._is_virtual(self._active):
+            self._log("Images can only be pasted into a one-to-one chat.")
+            return
+        if img is None or img.isNull():
+            return
+        self._pending_image = img
+        pm = QPixmap.fromImage(img).scaled(
+            54, 40, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        self._img_thumb.setPixmap(pm)
+        self._img_bar.show()
+        self._update_send_enabled()
+        self._entry.setFocus()
+
+    def _cancel_image(self) -> None:
+        self._pending_image = None
+        self._img_bar.hide()
+        self._update_send_enabled()
+
+    def _open_inline_image(self, d: dict) -> None:
+        """Write an inline image to a temp file and open it in the default viewer."""
+        try:
+            raw = base64.b64decode(d.get("data", ""))
+            ext = ".png" if d.get("mime") == "image/png" else ".jpg"
+            path = os.path.join(config.load_download_dir(),
+                                f"image_{uuid.uuid4().hex[:8]}{ext}")
+            with open(path, "wb") as f:
+                f.write(raw)
+            os.startfile(path)
+        except Exception as e:
+            self._log(f"Couldn't open image: {e}")
+
+    def _apply_edit(self, key: str, mid: str, new_text: str) -> None:
+        """Commit an edit locally and broadcast it to the recipient(s)."""
+        loc = self._mid_index.get(mid)
+        if not loc:
+            self._cancel_edit()
+            return
+        ekey, entry = loc
+        if entry.get("text", "") == new_text:
+            self._cancel_edit()
+            return
+        entry["text"] = new_text
+        entry["edited"] = True
+        self._persist(ekey)
+        if ekey == self._active:
+            self._render(ekey)
+        if self._is_group(ekey):
+            gid = ekey[6:]
+            meta = self._group_meta(gid)
+            targets = [m for m in meta.get("members", []) if m and m != self.chat.my_ip]
+            threading.Thread(
+                target=lambda: [self.chat.send_edit(t, mid, new_text, gid=gid)
+                                for t in targets], daemon=True).start()
+        elif self._is_channel(ekey):
+            cid = ekey[8:]
+            meta = self._channel_meta(cid)
+            targets = [m for m in meta.get("members", []) if m and m != self.chat.my_ip]
+            threading.Thread(
+                target=lambda: [self.chat.send_edit(t, mid, new_text)
+                                for t in targets], daemon=True).start()
+        else:
+            threading.Thread(target=lambda: self.chat.send_edit(ekey, mid, new_text),
+                             daemon=True).start()
+        self._cancel_edit()
+
+    def on_remote_edit(self, from_ip, mid, new_text) -> None:
+        """Apply an edit a peer made to one of their messages."""
+        loc = self._mid_index.get(mid)
+        if not loc:
+            return
+        key, entry = loc
+        if entry.get("kind") != "in" or entry.get("deleted"):
+            return   # only the original sender may edit; never revive a tombstone
+        entry["text"] = str(new_text)
+        entry["edited"] = True
+        self._persist(key)
+        if key == self._active:
+            self._render(key)
+
     def _sync_composer_buttons(self, h: int) -> None:
         """Keep the file + send buttons exactly as tall as the composer."""
         h = max(36, int(h))
@@ -1904,8 +2426,8 @@ class ChatWindow(QWidget):
         self._btn_send.setFixedSize(44, h)
 
     def _update_send_enabled(self) -> None:
-        """Light up the circular Send button only when there's text to send."""
-        has_text = bool(self._entry.text().strip())
+        """Light up the circular Send button when there's text or a staged image."""
+        has_text = bool(self._entry.text().strip()) or self._pending_image is not None
         self._btn_send.setEnabled(has_text)
         if has_text:
             bg, fg = theme.color("accent"), "#ffffff"
@@ -1944,16 +2466,29 @@ class ChatWindow(QWidget):
     def _send(self) -> None:
         key = self._active
         text = self._entry.text().strip()
-        if not key or not text:
+        if not key or (not text and self._pending_image is None):
+            return
+        # An active edit takes over Send: commit the new text instead of posting
+        # a fresh message (the message keeps its id, so receipts/reactions stand).
+        if self._editing:
+            self._stop_typing()
+            self._apply_edit(self._editing[0], self._editing[1], text)
             return
         if not self._can_post(key):
             return   # broadcast channel: only admins may post
         if self._rate_block(key):
             return   # too fast — message kept in the box, user warned
+        # Encode a staged inline image (1:1 chats only).
+        image = None
+        if self._pending_image is not None and not self._is_room(key):
+            image = _encode_image(self._pending_image)
+        self._cancel_image()
         self._entry.clear()
         self._stop_typing()
         reply = self._reply_to
-        entry = _mk_entry("out", "You", text, time.time(), reply=reply, status="sent")
+        extra = {"image": image} if image else {}
+        entry = _mk_entry("out", "You", text, time.time(), reply=reply,
+                          status="sent", **extra)
         mid = entry["mid"]
         self._store(key, entry)
         self._cancel_reply()
@@ -1970,10 +2505,10 @@ class ChatWindow(QWidget):
                              args=(key, meta, text, reply, mid), daemon=True).start()
         else:
             threading.Thread(target=self._send_worker,
-                             args=(key, text, reply, mid), daemon=True).start()
+                             args=(key, text, reply, mid, image), daemon=True).start()
 
-    def _send_worker(self, ip, text, reply, mid) -> None:
-        ok = self.chat.send(ip, text, reply=reply, mid=mid)
+    def _send_worker(self, ip, text, reply, mid, image=None) -> None:
+        ok = self.chat.send(ip, text, reply=reply, mid=mid, image=image)
         if not ok:
             # Held in the offline queue; mark the bubble as queued (🕓).
             self._queued_sig.emit(mid)
@@ -2040,10 +2575,11 @@ class ChatWindow(QWidget):
             if reasons:
                 self._log(f"[sound skipped: {', '.join(reasons)}]")
 
-    def receive_message(self, ip, name, text, ts, reply=None, mid="") -> None:
+    def receive_message(self, ip, name, text, ts, reply=None, mid="", image=None) -> None:
         self._unhide(ip)
         self._names[ip] = name
-        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply)
+        extra = {"image": image} if isinstance(image, dict) else {}
+        entry = _mk_entry("in", name, text, ts, mid=mid, reply=reply, **extra)
         self._store(ip, entry)
         self._save_peer(ip)
         if ip == self._active and self._visible:
@@ -2053,6 +2589,8 @@ class ChatWindow(QWidget):
             self._unread[ip] = self._unread.get(ip, 0) + 1
             self.update_roster(self.chat.peers())
             prev = text if len(text) <= 120 else text[:117] + "..."
+            if image and not text:
+                prev = "📷 Photo"
             self._notify_background("private", ip, name, prev)
 
     def on_group_message(self, group, ip, name, text, ts, reply=None, mid="") -> None:
@@ -2322,6 +2860,9 @@ class ChatWindow(QWidget):
             react_menu.addAction(emoji,
                                  lambda _=False, e=emoji, m_=mid: self._toggle_reaction(m_, e))
         m.addSeparator()
+        if (entry.get("kind") == "out" and entry.get("text")
+                and time.time() - entry.get("ts", 0) <= _EDIT_WINDOW):
+            m.addAction("✏ Edit", lambda: self._begin_edit(entry))
         if (entry.get("kind") == "out"
                 and time.time() - entry.get("ts", 0) <= _DELETE_WINDOW):
             m.addAction("🚫 Delete for everyone", lambda: self._delete_everyone(entry))
@@ -3360,6 +3901,14 @@ class ChatWindow(QWidget):
                 orow.addStretch(1)
                 bv.addLayout(orow)
 
+        av_badge = self._scan_info.get(tid) or entry.get("av")
+        if av_badge:
+            badge = QLabel(av_badge)
+            badge.setStyleSheet("font-size:10px; color:%s;" % txcol)
+            badge.setToolTip("This file was checked for malware before "
+                             "sending/after receiving.")
+            bv.addWidget(badge)
+
         stamp = QLabel(time.strftime("%H:%M", time.localtime(ts)))
         stamp.setStyleSheet("font-size:10px; color:%s;" % txcol)
         bv.addWidget(stamp, alignment=Qt.AlignmentFlag.AlignRight)
@@ -3436,9 +3985,65 @@ class ChatWindow(QWidget):
 
         tid = uuid.uuid4().hex[:12]
         self._transfer_paths[tid] = None
-        self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept..."
+        mode = config.load_av_mode()
+        if mode == "off":
+            self._progress_text[tid] = f"Waiting for {self._display_name(ip)} to accept..."
+            self._add_file_entry(ip, "file_out", tid, filename, size)
+            threading.Thread(target=self._offer_worker,
+                             args=(ip, path, filename, size, tid), daemon=True).start()
+            return
+        # Scan before the offer leaves this PC; show a "Scanning…" bubble and only
+        # offer the file once it comes back clean (or the user overrides in warn mode).
+        self._scan_ctx[tid] = (ip, path, filename, size, mode)
+        self._offer_states[tid] = "scanning"
+        self._progress_text[tid] = "🛡 Scanning for threats…"
         self._add_file_entry(ip, "file_out", tid, filename, size)
+        threading.Thread(target=self._scan_worker, args=(tid, path), daemon=True).start()
 
+    @staticmethod
+    def _scan_badge(engine: str, scanned: bool) -> str:
+        """A short 'scanned by …' label for a file bubble."""
+        eng = (engine or "").strip()
+        if not eng or eng.startswith("heuristics"):
+            return "🛡 Scanned (heuristics)"
+        if len(eng) > 38:
+            eng = eng[:37] + "…"
+        return f"🛡 Scanned by {eng}"
+
+    def _on_scanned(self, tid: str, label: str) -> None:
+        """Record a file's scan badge (receiver side) and refresh its bubble."""
+        self._scan_info[tid] = label
+        if self._active:
+            self._rerender_if_active(self._active)
+
+    def _scan_worker(self, tid: str, path: str) -> None:
+        res = antivirus.scan(path)
+        self._scan_done.emit(tid, res.ok, res.threat, res.engine, res.scanned)
+
+    def _on_scan_done(self, tid, ok, threat, engine, scanned) -> None:
+        ctx = self._scan_ctx.pop(tid, None)
+        if not ctx:
+            return   # cancelled while scanning, or already handled
+        ip, path, filename, size, mode = ctx
+        if not ok:
+            if mode == "block" or QMessageBox.warning(
+                    self, "Threat detected",
+                    f"“{filename}” was flagged by {engine}:\n\n{threat}\n\n"
+                    "Send it anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                self._transfer_paths[tid] = ""
+                self._offer_states[tid] = "blocked"
+                self._set_progress(tid, f"🛡 Blocked — {threat}")
+                self._persist(ip)
+                self._rerender_if_active(ip)
+                return
+        # Clean (or user overrode): proceed with the offer, and tag the bubble
+        # with the antivirus that cleared it.
+        self._scan_info[tid] = self._scan_badge(engine, scanned)
+        self._offer_states[tid] = "pending"
+        self._set_progress(tid, f"Waiting for {self._display_name(ip)} to accept...")
+        self._rerender_if_active(ip)
         threading.Thread(target=self._offer_worker,
                          args=(ip, path, filename, size, tid), daemon=True).start()
 
@@ -3603,6 +4208,23 @@ class ChatWindow(QWidget):
                     tid, _fmt_progress("Receiving", done, total, speed, elapsed, eta))
 
         def fdone(save_path):
+            mode = config.load_av_mode()
+            if mode != "off":
+                res = antivirus.scan(save_path)
+                if not res.ok:
+                    if mode == "block":
+                        try:
+                            os.remove(save_path)
+                        except OSError:
+                            pass
+                        self._xfer_finished.emit(
+                            tid, from_ip, "", f"🛡 Blocked — {res.threat}")
+                        return
+                    # warn mode: keep the file but flag it clearly
+                    self._xfer_finished.emit(
+                        tid, from_ip, save_path, f"⚠ Flagged — {res.threat}")
+                    return
+                self._scanned_sig.emit(tid, self._scan_badge(res.engine, res.scanned))
             self._xfer_finished.emit(tid, from_ip, save_path, "Saved ✓")
 
         def ferr(msg):
@@ -3627,6 +4249,7 @@ class ChatWindow(QWidget):
         threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
 
     def _cancel_file(self, tid) -> None:
+        self._scan_ctx.pop(tid, None)   # if still scanning, abandon the pending offer
         self._ft.cancel_transfer(tid)
         self._transfer_paths[tid] = ""
         self._offer_states[tid] = "cancelled"
@@ -3742,66 +4365,188 @@ class ChatWindow(QWidget):
                 if not fname.endswith(".json"):
                     continue
                 try:
-                    with open(os.path.join(d, fname), "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    ip = data.get("ip")
-                    if not ip:
-                        continue
-                    msgs = [_migrate_entry(m) for m in
-                            data.get("messages", [])[-_MAX_HISTORY:]]
-                    self._conversations[ip] = self._apply_retention(msgs)
-                    self._index_conversation(ip)
-                    self._seed_transfer_state(ip)
-                    if self._is_group(ip) and isinstance(data.get("group"), dict):
-                        gid = ip[6:]
-                        g = data["group"]
-                        self._groups[gid] = {
-                            "name": g.get("name", "Group"),
-                            "members": [m for m in g.get("members", []) if m],
-                            "admins": [a for a in g.get("admins", []) if a]}
-                        for m in self._groups[gid]["members"]:
-                            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
-                                self.chat.add_manual_peer(m)
-                        continue
-                    if self._is_channel(ip) and isinstance(data.get("channel"), dict):
-                        cid = ip[8:]
-                        c = data["channel"]
-                        self._channels[cid] = {
-                            "name": c.get("name", "Channel"),
-                            "members": [m for m in c.get("members", []) if m],
-                            "admins": [a for a in c.get("admins", []) if a]}
-                        for m in self._channels[cid]["members"]:
-                            if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
-                                self.chat.add_manual_peer(m)
-                        continue
-                    if data.get("name"):
-                        self._names[ip] = data["name"]
-                    if data.get("device"):
-                        self._devices[ip] = data["device"]
-                    if data.get("alias"):
-                        self._aliases[ip] = data["alias"]
-                    if data.get("manual"):
-                        self.chat.add_manual_peer(ip)
-                    if data.get("approved"):
-                        self.chat.approve_ip(ip)
-                        self._chat_req_states[ip] = "accepted"
-                    elif data.get("blocked"):
-                        self.chat.block_ip(ip)
-                        self._chat_req_states[ip] = "blocked"
-                    # Restore last-seen so the peer shows "last seen ..." until it
-                    # comes back online; fall back to the newest message time.
-                    ls = data.get("last_seen") or 0.0
-                    if not ls:
-                        try:
-                            ls = max((float(m.get("ts", 0)) for m in self._conversations[ip]),
-                                     default=0.0)
-                        except (TypeError, ValueError):
-                            ls = 0.0
-                    self.chat.seed_last_seen(ip, ls)
+                    path = os.path.join(d, fname)
+                    with open(path, "rb") as f:
+                        raw = f.read()
+                    if chatlock.is_blob(raw):
+                        # Encrypted conversation. Decrypt now if the password has
+                        # been supplied this session; otherwise remember it as a
+                        # locked entry to load once the user unlocks.
+                        key = chatlock.blob_key(raw)
+                        dec = chatlock.decrypt_payload(raw)
+                        if dec is None:
+                            if key:
+                                self._locked_files[key] = path
+                            continue
+                        data = json.loads(dec.decode("utf-8"))
+                    else:
+                        data = json.loads(raw.decode("utf-8"))
+                    self._ingest_history(data)
                 except Exception:
                     pass
         except Exception:
             pass
+
+    def _ingest_history(self, data: dict) -> None:
+        """Populate conversation state from one decoded history record."""
+        ip = data.get("ip")
+        if not ip:
+            return
+        msgs = [_migrate_entry(m) for m in data.get("messages", [])[-_MAX_HISTORY:]]
+        self._conversations[ip] = self._apply_retention(msgs)
+        self._index_conversation(ip)
+        self._seed_transfer_state(ip)
+        if self._is_group(ip) and isinstance(data.get("group"), dict):
+            gid = ip[6:]
+            g = data["group"]
+            self._groups[gid] = {
+                "name": g.get("name", "Group"),
+                "members": [m for m in g.get("members", []) if m],
+                "admins": [a for a in g.get("admins", []) if a]}
+            for m in self._groups[gid]["members"]:
+                if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                    self.chat.add_manual_peer(m)
+            return
+        if self._is_channel(ip) and isinstance(data.get("channel"), dict):
+            cid = ip[8:]
+            c = data["channel"]
+            self._channels[cid] = {
+                "name": c.get("name", "Channel"),
+                "members": [m for m in c.get("members", []) if m],
+                "admins": [a for a in c.get("admins", []) if a]}
+            for m in self._channels[cid]["members"]:
+                if m and m != self.chat.my_ip and not self.chat.is_manual_peer(m):
+                    self.chat.add_manual_peer(m)
+            return
+        if data.get("name"):
+            self._names[ip] = data["name"]
+        if data.get("device"):
+            self._devices[ip] = data["device"]
+        if data.get("alias"):
+            self._aliases[ip] = data["alias"]
+        if data.get("manual"):
+            self.chat.add_manual_peer(ip)
+        if data.get("approved"):
+            self.chat.approve_ip(ip)
+            self._chat_req_states[ip] = "accepted"
+        elif data.get("blocked"):
+            self.chat.block_ip(ip)
+            self._chat_req_states[ip] = "blocked"
+        # Restore last-seen so the peer shows "last seen ..." until it comes back
+        # online; fall back to the newest message time.
+        ls = data.get("last_seen") or 0.0
+        if not ls:
+            try:
+                ls = max((float(m.get("ts", 0)) for m in self._conversations[ip]),
+                         default=0.0)
+            except (TypeError, ValueError):
+                ls = 0.0
+        self.chat.seed_last_seen(ip, ls)
+
+    def _load_locked_after_unlock(self) -> None:
+        """After a successful unlock, decrypt and ingest any deferred files."""
+        for key in list(self._locked_files.keys()):
+            try:
+                with open(self._locked_files[key], "rb") as f:
+                    raw = f.read()
+                dec = chatlock.decrypt_payload(raw)
+                if dec is not None:
+                    self._ingest_history(json.loads(dec.decode("utf-8")))
+                    self._locked_files.pop(key, None)
+            except Exception:
+                pass
+        self.update_roster(self.chat.peers())
+
+    # ── chat lock (encrypted history) ─────────────────────────────────────────
+    def _conversation_choices(self) -> list[tuple[str, str]]:
+        """(key, label) for every known conversation, for the lock-setup picker."""
+        out = []
+        for gid in self._groups:
+            out.append((f"group:{gid}", f"👥 {self._display_name(f'group:{gid}')}"))
+        for cid in self._channels:
+            out.append((f"channel:{cid}", f"📢 {self._display_name(f'channel:{cid}')}"))
+        for ip in self._conversations:
+            if self._is_group(ip) or self._is_channel(ip) or self._is_virtual(ip):
+                continue
+            out.append((ip, f"{self._display_name(ip)} ({ip})"))
+        return out
+
+    def setup_lock(self) -> None:
+        """Create or change the chat-lock password (called from Settings)."""
+        if chatlock.needs_unlock():
+            # Must unlock before changing so existing chats can be re-encrypted.
+            if not self._run_unlock_gate():
+                return
+        dlg = _LockSetupDialog(self._conversation_choices(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        vals = dlg.values()
+        chatlock.set_password(vals["password"])
+        chatlock.set_scope(vals["scope"], vals["keys"])
+        chatlock.set_questions(vals["questions"])
+        # Re-save every now-locked conversation so it is (re-)encrypted on disk,
+        # and every formerly-locked one so it drops back to plaintext.
+        for key in set(self._conversations) | set(self._locked_files):
+            self._persist(key)
+        self._log("Chat lock updated.")
+
+    def remove_lock(self) -> None:
+        """Remove the password and re-save locked chats as plaintext."""
+        if not chatlock.is_set():
+            return
+        if chatlock.needs_unlock() and not self._run_unlock_gate():
+            return
+        was_locked = [k for k in self._conversations if chatlock.is_locked(k)]
+        chatlock.clear()
+        for key in was_locked:
+            self._persist(key)   # now rewritten as plaintext (is_locked → False)
+        self._log("Chat lock removed.")
+
+    def _run_unlock_gate(self) -> bool:
+        """Show the unlock prompt. Returns True once unlocked (or no lock)."""
+        if not chatlock.needs_unlock():
+            return True
+        dlg = _LockGateDialog(self)
+        dlg.exec()
+        if dlg.action == "unlocked":
+            self._load_locked_after_unlock()
+            return True
+        if dlg.action == "reset":
+            self._reset_lock()
+            return False
+        return False
+
+    def _reset_lock(self) -> None:
+        """Delete every locked conversation and forget the password (reset path)."""
+        removed = set(self._locked_files)
+        for key in list(self._conversations):
+            if chatlock.is_locked(key):
+                removed.add(key)
+        for key in removed:
+            self._delete_history_file(key)
+            self._conversations.pop(key, None)
+            self._drop_index(key)
+            self._locked_files.pop(key, None)
+            if self._is_group(key):
+                self._groups.pop(key[6:], None)
+            elif self._is_channel(key):
+                self._channels.pop(key[8:], None)
+        self._flush_saves()   # apply the deletions immediately, not after debounce
+        chatlock.clear()
+        if self._active in removed:
+            self._active = None
+            self._show_empty_state()
+            self._set_composer_visible(False)
+        self.update_roster(self.chat.peers())
+        self._log(f"Chat lock reset — {len(removed)} locked conversation(s) deleted.")
+
+    def _maybe_unlock_on_open(self) -> None:
+        """Global-scope gate shown when the window is opened while locked."""
+        if chatlock.needs_unlock() and chatlock.scope() == "global":
+            self._run_unlock_gate()
+
+    def _unlock_banner_needed(self) -> bool:
+        return bool(self._locked_files) and chatlock.needs_unlock()
 
     def _seed_transfer_state(self, key) -> None:
         """Restore the live transfer dicts from persisted file entries on load,
@@ -3815,6 +4560,8 @@ class ChatWindow(QWidget):
             self._transfer_paths[tid] = e.get("path", "")
             self._progress_text[tid] = e.get("status", "")
             self._offer_states[tid] = e.get("state", "done")
+            if e.get("av"):
+                self._scan_info[tid] = e["av"]
 
     def _freeze_file_entries(self, key) -> None:
         """Snapshot the live transfer state into each file entry so it survives a
@@ -3835,6 +4582,9 @@ class ChatWindow(QWidget):
             e["path"] = path if path else ""
             e["status"] = status
             e["state"] = state
+            av = self._scan_info.get(tid)
+            if av:
+                e["av"] = av
 
     # ── debounced history persistence ─────────────────────────────────────────
     def _enqueue_save(self, stem: str, path: str, data: dict | None,
@@ -3866,9 +4616,15 @@ class ChatWindow(QWidget):
                     if os.path.exists(path):
                         os.remove(path)
                 else:
+                    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                    key = data.get("ip") if isinstance(data, dict) else None
+                    if key and chatlock.is_locked(key):
+                        if not chatlock.is_unlocked():
+                            continue   # never overwrite ciphertext with plaintext
+                        raw = chatlock.encrypt_payload(key, raw)
                     tmp = f"{path}.tmp"
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False)
+                    with open(tmp, "wb") as f:
+                        f.write(raw)
                     os.replace(tmp, path)   # atomic: never leave a half-written file
             except Exception:
                 pass
