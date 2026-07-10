@@ -54,16 +54,23 @@ def _route_cli() -> bool:
             dns_csv         = a[i+5] if i+5 < len(a) else "",
             domain_csv      = a[i+6] if i+6 < len(a) else "",
             old_internet_ip = a[i+7] if i+7 < len(a) else "",
+            ip_mode         = a[i+8] if i+8 < len(a) else "dhcp",
+            curr_ip         = a[i+9] if i+9 < len(a) else "",
+            curr_mask       = a[i+10] if i+10 < len(a) else "",
         ))
     if "--dual-disable" in sys.argv:
         i = sys.argv.index("--dual-disable")
         a = sys.argv
         sys.exit(dual_access._do_disable(
-            internet_ip   = a[i+1] if i+1 < len(a) else "",
-            adapter       = a[i+2] if i+2 < len(a) else "",
-            domain_csv    = a[i+3] if i+3 < len(a) else "",
-            prev_dns_mode = a[i+4] if i+4 < len(a) else "dhcp",
-            prev_dns_csv  = a[i+5] if i+5 < len(a) else "",
+            internet_ip     = a[i+1] if i+1 < len(a) else "",
+            adapter         = a[i+2] if i+2 < len(a) else "",
+            domain_csv      = a[i+3] if i+3 < len(a) else "",
+            prev_dns_mode   = a[i+4] if i+4 < len(a) else "dhcp",
+            prev_dns_csv    = a[i+5] if i+5 < len(a) else "",
+            prev_ip_mode    = a[i+6] if i+6 < len(a) else "dhcp",
+            prev_ip_address = a[i+7] if i+7 < len(a) else "",
+            prev_ip_mask    = a[i+8] if i+8 < len(a) else "",
+            prev_ip_gateway = a[i+9] if i+9 < len(a) else "",
         ))
 
     if "--apply-profile" in sys.argv:

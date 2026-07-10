@@ -15,7 +15,7 @@ import winreg
 
 import psutil
 
-from .netinfo import run_cmd
+from .netinfo import run_cmd, is_valid_ipv4
 from .win_utils import (ELEVATION_CANCELLED, is_admin, run_elevated_and_wait,
                         self_relaunch_cmd)
 
@@ -123,6 +123,67 @@ def get_adapter_dns_config(adapter: str) -> tuple[str, list[str]]:
     return mode, servers
 
 
+def get_adapter_gateway(adapter: str) -> str | None:
+    """Read the default gateway IP configured on *adapter* via PowerShell, with netsh fallback."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NonInteractive", "-NoProfile", "-Command",
+             f"(Get-NetIPConfiguration -InterfaceAlias '{adapter}').IPv4DefaultGateway.NextHop"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        gw = r.stdout.decode(errors="replace").strip()
+        if gw and is_valid_ipv4(gw):
+            return gw
+    except Exception:
+        pass
+
+    try:
+        import re as _re
+        _, out, _ = run_cmd(["netsh", "interface", "ipv4", "show", "config", f"name={adapter}"])
+        m = _re.search(r"(?:Default Gateway|Gateway|Passerelle):\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", out, _re.IGNORECASE)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def get_adapter_ip_config(adapter: str) -> tuple[str, str, str, str]:
+    """Return (mode, ip, mask, gateway) for the adapter's current configuration.
+
+    mode is "dhcp" or "static".
+    """
+    import re as _re
+    _, out, _ = run_cmd(["netsh", "interface", "ipv4", "show", "config", f"name={adapter}"])
+
+    dhcp_enabled = True
+    m_dhcp = _re.search(r"DHCP enabled:\s*(Yes|No)", out, _re.IGNORECASE)
+    if m_dhcp:
+        dhcp_enabled = (m_dhcp.group(1).lower() == "yes")
+
+    mode = "dhcp" if dhcp_enabled else "static"
+
+    ip = ""
+    m_ip = _re.search(r"IP Address:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", out, _re.IGNORECASE)
+    if m_ip:
+        ip = m_ip.group(1)
+
+    mask = "255.255.255.0"
+    m_mask = _re.search(r"Subnet Prefix:.*mask\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", out, _re.IGNORECASE)
+    if m_mask:
+        mask = m_mask.group(1)
+
+    gateway = ""
+    m_gw = _re.search(r"Default Gateway:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", out, _re.IGNORECASE)
+    if m_gw:
+        gateway = m_gw.group(1)
+    else:
+        gateway = get_adapter_gateway(adapter) or ""
+
+    return mode, ip, mask, gateway
+
+
 # ── Status checks ─────────────────────────────────────────────────────────────
 
 def check_secondary_ip(internet_ip: str) -> bool:
@@ -180,13 +241,26 @@ def _ps(command: str) -> int:
 
 def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
                adapter: str, dns_csv: str, domain_csv: str,
-               old_internet_ip: str = "") -> int:
+               old_internet_ip: str = "", ip_mode: str = "dhcp",
+               curr_ip: str = "", curr_mask: str = "") -> int:
     dns_servers = [d.strip() for d in dns_csv.split(",") if d.strip()]
     domains     = [d.strip() for d in domain_csv.split(",") if d.strip()]
 
-    # 0. Remove a previously-bound secondary IP that differs from the new one,
-    #    so changing the internet IP doesn't leave stale addresses stacked on
-    #    the adapter (re-adding the same IP is harmless and needs no delete).
+    # 0. Convert to static if currently in DHCP mode
+    # This prevents Windows from losing our primary intranet address
+    # when we add the secondary IP.
+    if ip_mode == "dhcp" and curr_ip:
+        mask = curr_mask or "255.255.255.0"
+        if intranet_gw:
+            run_cmd(["netsh", "interface", "ip", "set", "address",
+                     adapter, "static", curr_ip, mask, intranet_gw])
+        else:
+            run_cmd(["netsh", "interface", "ip", "set", "address",
+                     adapter, "static", curr_ip, mask])
+
+    # Remove a previously-bound secondary IP that differs from the new one,
+    # so changing the internet IP doesn't leave stale addresses stacked on
+    # the adapter (re-adding the same IP is harmless and needs no delete).
     old_internet_ip = (old_internet_ip or "").strip()
     if old_internet_ip and old_internet_ip != internet_ip:
         run_cmd(["netsh", "interface", "ip", "delete", "address",
@@ -223,11 +297,16 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
         run_cmd(["netsh", "interface", "ip", "add", "dns",
                  adapter, srv, f"index={idx}"])
 
+    # Flush DNS Cache to apply changes immediately
+    run_cmd(["ipconfig", "/flushdns"])
+
     return 0
 
 
 def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
-                prev_dns_mode: str = "dhcp", prev_dns_csv: str = "") -> int:
+                prev_dns_mode: str = "dhcp", prev_dns_csv: str = "",
+                prev_ip_mode: str = "dhcp", prev_ip_address: str = "",
+                prev_ip_mask: str = "", prev_ip_gateway: str = "") -> int:
     domains  = [d.strip() for d in domain_csv.split(",") if d.strip()]
     prev_dns = [d.strip() for d in prev_dns_csv.split(",") if d.strip()]
 
@@ -241,12 +320,30 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
     internet_gw = _derive_gw(internet_ip)
     run_cmd(["route", "delete", "0.0.0.0", "mask", "0.0.0.0", internet_gw])
 
+    # 2.5 Force delete the intranet route we added to prevent it from blackholing corporate LAN
+    run_cmd(["route", "delete", "10.0.0.0", "mask", "255.0.0.0"])
+
     # 3. Remove NRPT rules
     for domain in domains:
         _ps(f'Remove-DnsClientNrptRule -Namespace ".{domain}" '
             f'-Force -ErrorAction SilentlyContinue')
 
-    # 4. Restore DNS exactly as it was before dual access was enabled
+    # 4. Restore IP address mode (DHCP vs Static)
+    if prev_ip_mode == "dhcp":
+        run_cmd(["netsh", "interface", "ip", "set", "address", adapter, "dhcp"])
+    else:
+        # If it was originally static, netsh interface ip delete address already removed the secondary IP,
+        # but we can make sure the primary IP/gateway are correctly set just in case.
+        if prev_ip_address:
+            mask = prev_ip_mask or "255.255.255.0"
+            if prev_ip_gateway:
+                run_cmd(["netsh", "interface", "ip", "set", "address",
+                         adapter, "static", prev_ip_address, mask, prev_ip_gateway])
+            else:
+                run_cmd(["netsh", "interface", "ip", "set", "address",
+                         adapter, "static", prev_ip_address, mask])
+
+    # 5. Restore DNS exactly as it was before dual access was enabled
     if prev_dns_mode == "static" and prev_dns:
         run_cmd(["netsh", "interface", "ip", "set", "dns",
                  adapter, "static", prev_dns[0], "primary"])
@@ -255,6 +352,9 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
                      adapter, srv, f"index={idx}"])
     else:
         run_cmd(["netsh", "interface", "ip", "set", "dns", adapter, "dhcp"])
+
+    # Flush DNS Cache to restore correct resolution immediately
+    run_cmd(["ipconfig", "/flushdns"])
 
     return 0
 
@@ -283,24 +383,28 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
     if not adapter:
         return False, f"Cannot find adapter for intranet IP {intranet_ip}."
 
-    intranet_gw  = _derive_gw(intranet_ip)
-    internet_gw  = _derive_gw(internet_ip)
-    # Read DNS already configured on this adapter; fall back to built-in defaults
-    dns_servers  = get_adapter_dns_servers(adapter) or DEFAULT_DNS
-    dns_csv      = ",".join(dns_servers)
-    domain_csv   = ",".join(domains)
+    # Get current IP configuration of the adapter
+    ip_mode, curr_ip, curr_mask, curr_gw = get_adapter_ip_config(adapter)
 
-    # Remember the original DNS setup so disable can restore it exactly.
+    # Remember original DNS and IP setups so disable can restore them exactly.
     # Only capture it the first time (when dual access isn't already on) so a
     # re-enable doesn't overwrite the real previous DNS with our own settings.
     from . import config
     old_internet_ip = config.load_dual_active_ip()
     if not old_internet_ip:
-        prev_mode, prev_servers = get_adapter_dns_config(adapter)
-        config.save_dual_prev_dns(prev_mode, prev_servers)
+        config.save_dual_prev_ip(ip_mode, curr_ip, curr_mask, curr_gw)
+        prev_dns_mode, prev_dns_servers = get_adapter_dns_config(adapter)
+        config.save_dual_prev_dns(prev_dns_mode, prev_dns_servers)
+
+    intranet_gw = curr_gw or _derive_gw(intranet_ip)
+    internet_gw = _derive_gw(internet_ip)
+    # Read DNS already configured on this adapter; fall back to built-in defaults
+    dns_servers  = get_adapter_dns_servers(adapter) or DEFAULT_DNS
+    dns_csv      = ",".join(dns_servers)
+    domain_csv   = ",".join(domains)
 
     args = [intranet_gw, internet_ip, internet_gw, adapter, dns_csv, domain_csv,
-            old_internet_ip]
+            old_internet_ip, ip_mode, curr_ip, curr_mask]
     if is_admin():
         code = _do_enable(*args)
     else:
@@ -328,9 +432,12 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
     # the edit field — they differ if the user edited it after enabling.
     active_ip = config.load_dual_active_ip() or internet_ip
     # Restore the DNS setup captured when dual access was enabled
-    prev_mode, prev_servers = config.load_dual_prev_dns()
-    prev_dns_csv = ",".join(prev_servers)
-    args = [active_ip, adapter, domain_csv, prev_mode, prev_dns_csv]
+    prev_dns_mode, prev_dns_servers = config.load_dual_prev_dns()
+    prev_dns_csv = ",".join(prev_dns_servers)
+    # Restore the IP configuration setup captured when dual access was enabled
+    prev_ip_mode, prev_ip_address, prev_ip_mask, prev_ip_gateway = config.load_dual_prev_ip()
+    args = [active_ip, adapter, domain_csv, prev_dns_mode, prev_dns_csv,
+            prev_ip_mode, prev_ip_address, prev_ip_mask, prev_ip_gateway]
     if is_admin():
         code = _do_disable(*args)
     else:

@@ -147,14 +147,25 @@ def run_cmd(args: list[str]) -> tuple[int, str, str]:
 
 
 def check_internet_connection() -> bool:
-    """True if a public DNS server is reachable."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1.5)
-            s.connect(("8.8.8.8", 53))
-            return True
-    except Exception:
-        return False
+    """True if we can connect to any of several public internet hosts/ports.
+
+    Checks standard Web/HTTPS ports (www.google.com:443, 1.1.1.1:443) before
+    falling back to public DNS (8.8.8.8:53) to avoid firewall blocks.
+    """
+    targets = [
+        ("www.google.com", 443),
+        ("1.1.1.1", 443),
+        ("8.8.8.8", 53),
+    ]
+    for host, port in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.5)
+                s.connect((host, port))
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def check_host_reachable(ip: str, port: int) -> bool:
@@ -167,15 +178,23 @@ def check_host_reachable(ip: str, port: int) -> bool:
 
 def check_internet_via_proxy(proxy_host: str, proxy_port: int) -> bool:
     """Verify the proxy can tunnel to a public host via a CONNECT request."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2.0)
-            s.connect((proxy_host, proxy_port))
-            s.sendall(b"CONNECT 8.8.8.8:53 HTTP/1.1\r\n\r\n")
-            resp = s.recv(1024)
-            return b"200" in resp
-    except Exception:
-        return False
+    targets = [
+        ("www.google.com", 443),
+        ("1.1.1.1", 443),
+        ("8.8.8.8", 53),
+    ]
+    for host, port in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect((proxy_host, proxy_port))
+                s.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
+                resp = s.recv(1024)
+                if b"200" in resp:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def is_valid_ipv4(host: str) -> bool:

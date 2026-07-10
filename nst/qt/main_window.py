@@ -110,12 +110,23 @@ class MainWindow(QMainWindow):
         self._detected_gw = None
         self._route_network: str = "10.0.0.0"  # updated when route is added
         self._dual_active: bool = False
+        self._client_fail_count = 0
+        self._beacon_fail_count = 0
+        self._dual_warned = False
         self._last_net = psutil.net_io_counters()
         self._last_net_t = time.time()
 
         self._build_menu()
         self._build_ui()
         self._connect_signals()
+
+        # Auto-start proxy server if enabled
+        if config.load_proxy_autostart():
+            ok, msg = self._proxy.start()
+            if ok:
+                self.log("Proxy server automatically started.")
+            else:
+                self.log(f"Failed to auto-start proxy: {msg}")
 
         self._update_route_btn()
         self._update_proxy_btn()
@@ -721,6 +732,14 @@ class MainWindow(QMainWindow):
 
     # ── tabs ──────────────────────────────────────────────────────────────────
     def _show_tab(self, idx: int) -> None:
+        if idx == 2 and not getattr(self, "_dual_warned", False):
+            self._dual_warned = True
+            QMessageBox.critical(
+                self,
+                "Beta Feature Warning",
+                "This is a testing feature in beta and may cause LAN problems connecting to SAP.",
+                QMessageBox.StandardButton.Ok
+            )
         self._stack.setCurrentIndex(idx)
         self._tab_host.setProperty("active", "true" if idx == 0 else "false")
         self._tab_client.setProperty("active", "true" if idx == 1 else "false")
@@ -795,14 +814,19 @@ class MainWindow(QMainWindow):
             ok, msg = self._proxy.stop()
             if ok:
                 self._beacon.stop()
+                config.save_proxy_autostart(False)
         else:
             ok, msg = self._proxy.start()
-            if ok and self._detected_ip:
-                self._beacon.start(self._detected_ip)
+            if ok:
+                config.save_proxy_autostart(True)
+                if self._detected_ip:
+                    self._beacon.start(self._detected_ip)
         self.log(msg)
         self._update_proxy_btn()
 
     def _toggle_client(self) -> None:
+        self._client_fail_count = 0
+        self._beacon_fail_count = 0
         if self._client_connected:
             ok, msg = clear_proxy()
             if ok:
@@ -878,6 +902,8 @@ class MainWindow(QMainWindow):
             self._route_network = _network_from_ip(ip)
             if self._beacon.running:
                 self._beacon.ip = ip
+            elif self._proxy.running:
+                self._beacon.start(ip)
             # Auto-fill internet IP once from DHCP cache if field is empty
             if not self._dual_ip_edit.text().strip():
                 suggested, _ = detect_internet_ip(ip)
@@ -924,8 +950,18 @@ class MainWindow(QMainWindow):
 
     # ── background loops ──────────────────────────────────────────────────────
     def _internet_loop(self) -> None:
+        fail_count = 0
         while True:
-            res = check_internet_connection()
+            ok = check_internet_connection()
+            if ok:
+                fail_count = 0
+                res = True
+            else:
+                fail_count += 1
+                if fail_count >= 3:
+                    res = False
+                else:
+                    res = True
             self.sig.internet.emit(res)
             time.sleep(3)
 
@@ -946,11 +982,17 @@ class MainWindow(QMainWindow):
             return
         host_ok = check_host_reachable(host, PROXY_PORT)
         inet_ok = check_internet_via_proxy(host, PROXY_PORT) if host_ok else False
-        if not host_ok or not inet_ok:
-            reason = "Host unreachable" if not host_ok else "No Internet access through proxy"
-            self.sig.client_auto_off.emit(reason)
+        if host_ok and inet_ok:
+            self._client_fail_count = 0
+        else:
+            self._client_fail_count += 1
+            if self._client_fail_count >= 3:
+                reason = "Host unreachable" if not host_ok else "No Internet access through proxy"
+                self.sig.client_auto_off.emit(reason)
 
     def _on_client_auto_off(self, reason: str) -> None:
+        self._client_fail_count = 0
+        self._beacon_fail_count = 0
         if self._client_connected:
             ok, _ = clear_proxy()
             if ok:
@@ -968,9 +1010,13 @@ class MainWindow(QMainWindow):
         if self._host_edit.text().strip() != ip:
             self._host_edit.setText(ip)
             self.log(f"Host beacon detected: {ip} — IP auto-filled.")
-        if self._client_connected and self._client_host == ip and not has_internet \
-                and self._chk_disable.isChecked():
-            self._on_client_auto_off("Host lost internet")
+        if self._client_connected and self._client_host == ip and self._chk_disable.isChecked():
+            if not has_internet:
+                self._beacon_fail_count += 1
+                if self._beacon_fail_count >= 5:
+                    self._on_client_auto_off("Host lost internet")
+            else:
+                self._beacon_fail_count = 0
 
     # ── about / close ─────────────────────────────────────────────────────────
     def _about(self) -> None:

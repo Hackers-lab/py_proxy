@@ -723,3 +723,33 @@ def save_ip_profile(n: int, name: str, adapter: str, mode: str,
     return ok
 
 
+# ── Proxy Server Autostart ───────────────────────────────────────────────────
+
+def load_proxy_autostart() -> bool:
+    """Whether the host proxy server should start automatically on app launch."""
+    return bool(_read_value("ProxyServerAutoStart", 0))
+
+
+def save_proxy_autostart(enabled: bool) -> bool:
+    return _write_value("ProxyServerAutoStart", winreg.REG_DWORD, 1 if enabled else 0)
+
+
+# ── Dual Access Original IP Config ───────────────────────────────────────────
+
+def save_dual_prev_ip(mode: str, ip: str, mask: str, gateway: str) -> bool:
+    ok = _write_value("DualPrevIpMode", winreg.REG_SZ, mode or "dhcp")
+    ok &= _write_value("DualPrevIpAddress", winreg.REG_SZ, ip or "")
+    ok &= _write_value("DualPrevIpMask", winreg.REG_SZ, mask or "")
+    return _write_value("DualPrevIpGateway", winreg.REG_SZ, gateway or "") and ok
+
+
+def load_dual_prev_ip() -> tuple[str, str, str, str]:
+    mode = str(_read_value("DualPrevIpMode", "dhcp")).strip() or "dhcp"
+    ip = str(_read_value("DualPrevIpAddress", "")).strip()
+    mask = str(_read_value("DualPrevIpMask", "")).strip()
+    gateway = str(_read_value("DualPrevIpGateway", "")).strip()
+    return mode, ip, mask, gateway
+
+
+
+
