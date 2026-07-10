@@ -732,8 +732,7 @@ class MainWindow(QMainWindow):
 
     # ── tabs ──────────────────────────────────────────────────────────────────
     def _show_tab(self, idx: int) -> None:
-        if idx == 2 and not getattr(self, "_dual_warned", False):
-            self._dual_warned = True
+        if idx == 2:
             QMessageBox.critical(
                 self,
                 "Beta Feature Warning",

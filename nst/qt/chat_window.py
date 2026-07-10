@@ -887,6 +887,7 @@ class ChatWindow(QWidget):
         self._offer_states: dict[str, str] = {}
         self._transfer_paths: dict[str, str] = {}
         self._chat_req_states: dict[str, str] = {}
+        self._xfer_chat_keys: dict[str, str] = {}
         # tid -> (ip, path, filename, size, mode) for an outgoing file awaiting
         # its antivirus scan result before the offer is sent.
         self._scan_ctx: dict[str, tuple] = {}
@@ -1952,8 +1953,8 @@ class ChatWindow(QWidget):
         self._btn_manage.setVisible(is_room)
         self._btn_save.setVisible(not is_room and not self._is_virtual(key))
         self._btn_remote.setVisible(not is_room and not self._is_virtual(key))
-        # File send and emoji: 1:1 peers only.
-        self._btn_file.setVisible(not is_room)
+        # File send and emoji: 1:1 peers or groups.
+        self._btn_file.setVisible(not is_room or is_grp)
         self._btn_emoji.setVisible(not is_room)
         self._set_composer_visible(True)
         # Broadcast channels are post-only for admins; members read.
@@ -3997,7 +3998,7 @@ class ChatWindow(QWidget):
 
     def _attach_file(self) -> None:
         ip = self._active
-        if not ip or self._is_room(ip):
+        if not ip or (self._is_room(ip) and not self._is_group(ip)):
             return
         path, _ = QFileDialog.getOpenFileName(self, "Send file")
         if path:
@@ -4006,7 +4007,7 @@ class ChatWindow(QWidget):
     def _attach_file_path(self, path: str) -> None:
         """Send a file by path (used by both file picker and drag-and-drop)."""
         ip = self._active
-        if not ip or self._is_room(ip):
+        if not ip or (self._is_room(ip) and not self._is_group(ip)):
             return
         if not os.path.isfile(path):
             return
@@ -4087,7 +4088,7 @@ class ChatWindow(QWidget):
 
     # -- drag & drop -------------------------------------------------------
     def _can_drop(self) -> bool:
-        return bool(self._active) and not self._is_room(self._active)
+        return bool(self._active) and (not self._is_room(self._active) or self._is_group(self._active))
 
     def _show_drop_overlay(self) -> None:
         name = self._display_name(self._active)
@@ -4181,13 +4182,19 @@ class ChatWindow(QWidget):
         def expire():
             self._xfer_finished.emit(tid, ip, "", "No response -- expired")
 
+        group_dict = None
+        if self._is_group(ip):
+            gid = ip[6:]
+            group_dict = self._groups.get(gid)
+
         try:
             self._ft.offer_file(ip, path, tid=tid, progress_cb=progress, done_cb=done,
-                                error_cb=error, expire_cb=expire)
+                                error_cb=error, expire_cb=expire, group=group_dict)
         except Exception as e:
             self._xfer_finished.emit(tid, ip, "", f"Failed: {e}")
 
     def _add_file_entry(self, ip, kind, tid, filename, size, from_ip=None) -> None:
+        self._xfer_chat_keys[tid] = ip
         entry = _mk_entry(kind, "", "", time.time(), tid=tid, filename=filename,
                           size=size, from_ip=from_ip)
         self._store(ip, entry)
@@ -4208,30 +4215,42 @@ class ChatWindow(QWidget):
 
     def _on_xfer_finished(self, tid: str, ip: str, path: str, text: str) -> None:
         """Terminal state (done / failed / expired): record result and re-render."""
+        chat_key = self._xfer_chat_keys.get(tid, ip)
         self._transfer_paths[tid] = path   # real path = success, "" = failed
         self._offer_states[tid] = "done" if path else "failed"
         self._set_progress(tid, text)
-        self._persist(ip)                  # keep this transfer in history
-        self._render(ip)
+        self._persist(chat_key)                  # keep this transfer in history
+        self._render(chat_key)
 
     def on_file_offer_received(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
-        self._unhide(ip)
+        group = msg.get("group")
+        if group and group.get("gid"):
+            key = f"group:{group['gid']}"
+        else:
+            key = ip
+        self._xfer_chat_keys[tid] = key
+        self._unhide(key)
         self._names[ip] = name
         self._offer_states[tid] = "pending"
-        self._add_file_entry(ip, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
-        if not (ip == self._active and self._visible):
-            self._notify_background("private", ip, name,
-                                    f"📎 Wants to send: {msg['filename']}")
+        self._add_file_entry(key, "file_in_offer", tid, msg["filename"], msg["size"], from_ip=ip)
+        if not (key == self._active and self._visible):
+            if group and group.get("gid"):
+                self._notify_background("group", key, name,
+                                        f"📎 [{group.get('name', 'Group')}] {name} sent: {msg['filename']}")
+            else:
+                self._notify_background("private", ip, name,
+                                        f"📎 Wants to send: {msg['filename']}")
 
     def _accept_file(self, tid, from_ip, filename, size) -> None:
         from_ip = from_ip or self._active
+        chat_key = self._xfer_chat_keys.get(tid, from_ip)
         if not from_ip:
             return
         self._offer_states[tid] = "accepted"
         self._transfer_paths[tid] = None
         self._set_progress(tid, "Connecting...")
-        self._render(from_ip)  # show the progress bubble immediately
+        self._render(chat_key)  # show the progress bubble immediately
 
         # Callbacks run on a transfer worker thread -- emit signals (queued to the
         # GUI thread) rather than touching widgets or using QTimer here.
@@ -4276,13 +4295,14 @@ class ChatWindow(QWidget):
 
     def _reject_file(self, tid, from_ip) -> None:
         from_ip = from_ip or self._active
+        chat_key = self._xfer_chat_keys.get(tid, from_ip)
         if not from_ip:
             return
         self._offer_states[tid] = "rejected"
         self._transfer_paths[tid] = ""
         self._set_progress(tid, "Rejected")
-        self._persist(from_ip)
-        self._rerender_if_active(from_ip)
+        self._persist(chat_key)
+        self._rerender_if_active(chat_key)
 
         threading.Thread(target=lambda: self._ft.send_reject(from_ip, tid), daemon=True).start()
 
@@ -4293,21 +4313,25 @@ class ChatWindow(QWidget):
         self._offer_states[tid] = "cancelled"
         self._set_progress(tid, "Cancelled")
         if self._active:
-            self._persist(self._active)
-            self._render(self._active)
+            chat_key = self._xfer_chat_keys.get(tid, self._active)
+            self._persist(chat_key)
+            self._render(chat_key)
 
     def on_file_accepted(self, ip, name, msg) -> None:
-        self._set_progress(msg["transfer_id"], f"{name} accepted -- sending...")
-        self._render(ip)  # Always render to show updated status
+        tid = msg["transfer_id"]
+        chat_key = self._xfer_chat_keys.get(tid, ip)
+        self._set_progress(tid, f"{name} accepted -- sending...")
+        self._render(chat_key)  # Always render to show updated status
 
     def on_file_rejected(self, ip, name, msg) -> None:
         tid = msg["transfer_id"]
+        chat_key = self._xfer_chat_keys.get(tid, ip)
         self._ft.cancel_offer(tid)
         self._transfer_paths[tid] = ""
         self._offer_states[tid] = "rejected"
         self._set_progress(tid, f"Rejected by {name}")
-        self._persist(ip)
-        self._render(ip)  # Always render to show rejection status
+        self._persist(chat_key)
+        self._render(chat_key)  # Always render to show rejection status
 
     # ── chat requests (external IP first contact) ─────────────────────────────
     def _make_req_bubble(self, entry: dict) -> QWidget:
@@ -4595,6 +4619,7 @@ class ChatWindow(QWidget):
             tid = e.get("tid")
             if not tid:
                 continue
+            self._xfer_chat_keys[tid] = key
             self._transfer_paths[tid] = e.get("path", "")
             self._progress_text[tid] = e.get("status", "")
             self._offer_states[tid] = e.get("state", "done")

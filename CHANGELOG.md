@@ -8,6 +8,12 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.2 — 2026-07-10
+- **New: file sharing in group chats.** You can now offer and receive files directly
+  in group chats, with support for concurrent downloads by multiple group members.
+- **Improved: Dual Access warning popup behaves consistently.** The beta feature warning
+  critical popup now appears every time the Dual Access tab is clicked.
+
 ## v4.13.1 — 2026-06-25
 - **Fixed: unlocking a locked chat no longer crashes the app.** Clicking the
   "🔒 locked chats — click to unlock" banner caused an immediate

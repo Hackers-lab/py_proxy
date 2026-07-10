@@ -1,6 +1,10 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.2": [
+        "👥 New: file sharing in groups — you can now send and receive files in group chats just like private chats, with support for concurrent downloads by multiple group members.",
+        "⚠️ Improved: the Dual Access testing warning popup now always appears when the tab is clicked, ensuring lan connection problems/beta state are clearly flagged.",
+    ],
     "4.13.1": [
         "🔓 Fixed: unlocking a locked chat no longer crashes the app — clicking the unlock banner caused a TypeError that closed the window immediately.",
         "🔄 Fixed: silent self-updates that download but never install. The installer is now fully detached from the parent process so it survives the app closing, and retries automatically if it fails.",

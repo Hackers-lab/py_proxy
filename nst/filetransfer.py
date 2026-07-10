@@ -55,7 +55,8 @@ class FileTransferService:
     # ── sender ────────────────────────────────────────────────────────────────
     def offer_file(self, ip: str, path: str, tid: str = None,
                    progress_cb=None, done_cb=None, error_cb=None,
-                   expire_cb=None, expire_after: int | None = None) -> str:
+                   expire_cb=None, expire_after: int | None = None,
+                   group: dict | None = None) -> str:
         """Register a pending send, notify peer. Returns transfer_id. Raises on network error.
 
         ``expire_after`` defaults to the user-configured temporary-file expiry
@@ -81,27 +82,54 @@ class FileTransferService:
         timer.daemon = True
 
         with self._lock:
-            self._pending_sends[tid] = (path, size, progress_cb, done_cb, error_cb, timer)
+            self._pending_sends[tid] = (path, size, progress_cb, done_cb, error_cb, timer, bool(group))
             self._cancel_events[tid] = cancel_event
         timer.start()
 
-        payload = json.dumps({
+        msg_dict = {
             "type": "file_offer",
             "transfer_id": tid,
             "filename": filename,
             "size": size,
             "from_name": self._chat.my_name,
             "from_ip": self._chat.my_ip,
-        }).encode() + b"\n"
-        try:
-            with socket.create_connection((ip, CHAT_TCP_PORT), timeout=3.0) as s:
-                s.sendall(payload)
-        except Exception:
+        }
+        if group:
+            msg_dict["group"] = group
+        payload = json.dumps(msg_dict).encode() + b"\n"
+
+        # Determine target IPs:
+        if group:
+            my_ips = {self._chat.my_ip}
+            try:
+                for addrs in self._chat._net_if_addrs().values():
+                    for addr in addrs:
+                        if addr.family == socket.AF_INET and addr.address:
+                            my_ips.add(addr.address)
+            except Exception:
+                pass
+            targets = [m for m in group.get("members", []) if m and m not in my_ips]
+        else:
+            targets = [ip]
+
+        # Send offer to all target IPs:
+        success = False
+        last_exc = None
+        for target in targets:
+            try:
+                with socket.create_connection((target, CHAT_TCP_PORT), timeout=3.0) as s:
+                    s.sendall(payload)
+                success = True
+            except Exception as e:
+                last_exc = e
+
+        if not success:
             timer.cancel()
             with self._lock:
                 self._pending_sends.pop(tid, None)
                 self._cancel_events.pop(tid, None)
-            raise
+            raise last_exc or ConnectionError("Could not connect to any recipient")
+
         return tid
 
     def cancel_offer(self, tid: str) -> None:
@@ -149,6 +177,7 @@ class FileTransferService:
     def _serve_one(self, conn: socket.socket) -> None:
         tid = None
         entry = None
+        is_group = False
         try:
             conn.settimeout(5.0)
             buf = b""
@@ -166,7 +195,8 @@ class FileTransferService:
             path, size, progress_cb, done_cb, error_cb = (
                 entry[0], entry[1], entry[2], entry[3], entry[4])
             timer = entry[5] if len(entry) > 5 else None
-            if timer:
+            is_group = entry[6] if len(entry) > 6 else False
+            if timer and not is_group:
                 timer.cancel()
             filename = os.path.basename(path)
             header = json.dumps({"filename": filename, "size": size}).encode() + b"\n"
@@ -188,13 +218,14 @@ class FileTransferService:
                         speed = sent / elapsed
                         eta = (size - sent) / speed if speed > 0 else 0
                         progress_cb(sent, size, speed, elapsed, eta)
-            with self._lock:
-                self._pending_sends.pop(tid, None)
-                self._cancel_events.pop(tid, None)
+            if not is_group:
+                with self._lock:
+                    self._pending_sends.pop(tid, None)
+                    self._cancel_events.pop(tid, None)
             if done_cb:
                 done_cb()
         except InterruptedError as e:
-            if tid:
+            if tid and not is_group:
                 with self._lock:
                     self._pending_sends.pop(tid, None)
                     self._cancel_events.pop(tid, None)
@@ -203,10 +234,13 @@ class FileTransferService:
         except Exception as e:
             if tid:
                 with self._lock:
-                    _entry = self._pending_sends.pop(tid, None)
-                    self._cancel_events.pop(tid, None)
+                    if not is_group:
+                        _entry = self._pending_sends.pop(tid, None)
+                        self._cancel_events.pop(tid, None)
+                    else:
+                        _entry = self._pending_sends.get(tid)
                 if _entry:
-                    if len(_entry) > 5 and _entry[5]:
+                    if not is_group and len(_entry) > 5 and _entry[5]:
                         _entry[5].cancel()
                     if _entry[4]:
                         _entry[4](str(e))
