@@ -1,6 +1,9 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.3": [
+        "🛡 Antivirus false-positive fixes: disabled UPX compression and updated installer settings (Program Files location, admin privileges, zip compression) to eliminate heuristic flags.",
+    ],
     "4.13.2": [
         "👥 New: file sharing in groups — you can now send and receive files in group chats just like private chats, with support for concurrent downloads by multiple group members.",
         "⚠️ Improved: the Dual Access testing warning popup now always appears when the tab is clicked, ensuring lan connection problems/beta state are clearly flagged.",

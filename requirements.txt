@@ -1,0 +1,4 @@
+psutil
+PyQt6
+nuitka>=2.0
+zstandard>=0.21

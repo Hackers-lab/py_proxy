@@ -74,8 +74,8 @@ change, not after — it's easy to forget.
 
 On `git push` of a `v*` tag, `.github/workflows/release.yml`:
 1. Reads `__version__` from `nst/__init__.py`.
-2. Builds the **one-folder** app: `pyinstaller NetSplitTunnel.spec --noconfirm --clean`.
-3. Compiles the per-user installer: `ISCC /DAppVersion=<version> installer.iss`
+2. Builds the app using Nuitka C++ compilation: `python build.py`.
+3. Compiles the installer: `ISCC /DAppVersion=<version> installer.iss`
    → `Output/NetSplitTunnel_Setup_vX.Y.Z.exe` (Output/ is wiped first).
 4. Publishes a GitHub Release with **only** that one installer attached.
 
@@ -102,9 +102,9 @@ You should never run any of this by hand for a release — just push the tag.
 ## Local build / test (optional, no push)
 
 ```powershell
-pyinstaller NetSplitTunnel.spec --noconfirm --clean
+python build.py
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=X.Y.Z installer.iss
-# Installs to %LOCALAPPDATA%\Programs\NetSplitTunnel (no admin):
+# Installs under Program Files:
 Output\NetSplitTunnel_Setup_vX.Y.Z.exe
 ```
 

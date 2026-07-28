@@ -240,10 +240,10 @@ Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes t
 ## Build from source
 
 ```bat
-pip install psutil PyQt6 pyinstaller
-pyinstaller NetSplitTunnel.spec --noconfirm
+pip install -r requirements.txt
+python build.py
 ```
 
-Output: `dist\NetSplitTunnel_v4.9.exe` — a single-file executable that prompts for admin via an embedded UAC manifest.
+Output: compiled standalone directory in `dist\NetSplitTunnel\`.
 
 To regenerate the app icon: `pip install Pillow` then `python make_icon.py`.

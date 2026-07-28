@@ -1,15 +1,12 @@
-; Inno Setup script for Net Split-Tunneler — per-user, no-admin installer.
+; Inno Setup script for Net Split-Tunneler — admin installer.
 ;
-; Build (after PyInstaller produces the onedir folder dist\NetSplitTunnel\):
-;   ISCC /DAppVersion=4.9.5 installer.iss
+; Build (after Nuitka produces output in dist\NetSplitTunnel\):
+;   ISCC /DAppVersion=4.13.3 installer.iss
 ; Output: Output\NetSplitTunnel_Setup_v<ver>.exe
 ;
-; Per-user (PrivilegesRequired=lowest) means no admin/UAC to install or update.
-; A silent self-update (run with /VERYSILENT by nst.updater) closes the running
-; app, replaces the folder and relaunches the new version via [Run].
 
 #ifndef AppVersion
-  #define AppVersion "4.13.2"
+  #define AppVersion "4.13.3"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"
@@ -21,16 +18,16 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} v{#AppVersion}
 AppPublisher=Hackers-lab
-DefaultDirName={localappdata}\Programs\NetSplitTunnel
+DefaultDirName={autopf}\NetSplitTunnel
 DisableProgramGroupPage=yes
 DisableDirPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 OutputDir=Output
 OutputBaseFilename=NetSplitTunnel_Setup_v{#AppVersion}
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#ExeName}
-Compression=lzma2/max
-SolidCompression=yes
+Compression=zip
+SolidCompression=no
 WizardStyle=modern
 ; Detect/close the running instance via its single-instance mutex.
 AppMutex=NetSplitTunnel_SingleInstance_Mutex_3248

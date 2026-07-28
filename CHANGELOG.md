@@ -8,6 +8,9 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.3 — 2026-07-28
+- **Antivirus false-positive fixes.** Disabled UPX compression (`--noupx`) and updated Inno Setup installer configuration (defaulting to Program Files directory `{autopf}\NetSplitTunnel`, admin privileges `PrivilegesRequired=admin`, and `Compression=zip` with `SolidCompression=no`) to eliminate heuristic AV flags (e.g. Seqrite / Quick Heal `Trojan.Generic...`).
+
 ## v4.13.2 — 2026-07-10
 - **New: file sharing in group chats.** You can now offer and receive files directly
   in group chats, with support for concurrent downloads by multiple group members.

@@ -201,12 +201,18 @@ _DETACH_FLAGS = (
 
 
 def _launch_installer(path: str) -> bool:
-    """Start the staged installer silently and fully detached.
+    """Start the staged installer silently.
 
-    Uses Windows creation flags to ensure the installer process is independent
-    of this application — it will keep running even after we call sys.exit().
+    Tries os.startfile (ShellExecute) first for direct background installer execution,
+    falling back to subprocess.Popen with detached process creation flags.
     """
     try:
+        if hasattr(os, "startfile"):
+            try:
+                os.startfile(path, "open", " ".join(_SILENT_FLAGS))
+                return True
+            except Exception:
+                pass
         subprocess.Popen(
             [path, *_SILENT_FLAGS],
             creationflags=_DETACH_FLAGS,
