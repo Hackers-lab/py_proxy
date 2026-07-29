@@ -170,13 +170,23 @@ def _download(url: str, version: str, progress=None) -> str:
     return dest
 
 
+def _is_frozen() -> bool:
+    """True if running inside a compiled executable (PyInstaller or Nuitka)."""
+    return (
+        getattr(sys, "frozen", False)
+        or "__nuitka_binary__" in globals()
+        or hasattr(sys, "__compiled__")
+        or hasattr(sys, "nuitka_version")
+    )
+
+
 def _check_for_update(progress=None) -> tuple[str, str] | None:
     """Find + download a newer installer. Returns ``(version, path)`` or None.
 
     No-ops when running from source (not frozen). *progress* is forwarded to
     :func:`_download` for event-log reporting.
     """
-    if not getattr(sys, "frozen", False):
+    if not _is_frozen():
         return None
     latest = _fetch_latest()
     if not latest:

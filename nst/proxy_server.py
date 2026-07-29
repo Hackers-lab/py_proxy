@@ -14,7 +14,7 @@ _connected_clients: dict[str, dict] = {}
 
 # List of dicts: timestamp, client_ip, method, host, path, blocked, bytes
 _link_logs: list[dict] = []
-_MAX_LINK_LOGS = 2000
+_MAX_LINK_LOGS = 500
 _LOG_TTL_SECONDS = 24 * 60 * 60  # 1 day
 
 
