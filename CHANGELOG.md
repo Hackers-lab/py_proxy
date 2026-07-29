@@ -8,6 +8,15 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.7 — 2026-07-29
+- **Speed & RAM Optimizations.** Added thread-safe in-memory configuration caching, single-threaded non-blocking `select()` proxy forwarding, zero-copy screen capture buffer handling, and direct registry NRPT checking to eliminate background `powershell.exe` polling.
+- **Fixed Proxy Host Control dashboard AttributeError.** Replaced invalid `QTableWidgetItem.setStyleSheet()` with `QTableWidgetItem.setForeground(QColor(...))` to prevent crashes on opening Host Control & Blocker.
+- **Fixed elevated UAC working directory path.** Added explicit working directory specification (`info.lpDirectory = os.path.dirname(...)`) for elevated Windows UAC executions.
+
+## v4.13.6 — 2026-07-29
+- **Fixed Proxy Host Control & Blocker dialog freeze/crash.** Resolved PyQt6 signal re-entrance during domain list synchronization and timer updates.
+- **Fixed Dual Access diagnostic step UI resetting.** Reset all step icon widgets to pending state before diagnostic runs so cancelled/failed steps don't display stale checkmarks.
+
 ## v4.13.5 — 2026-07-29
 - **Fixed UAC Elevation path error on compiled client PCs.** Resolved `Windows cannot find python.exe` error during Dual Access / IP Switch privilege elevation by enhancing `is_frozen()` to detect Nuitka standalone executables (`NetSplitTunnel.exe`) and avoiding invocation of missing `python.exe` binaries.
 

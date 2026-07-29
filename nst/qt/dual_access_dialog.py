@@ -244,6 +244,12 @@ class DualAccessDiagnosticDialog(QDialog):
         self.progress_bar.setValue(0)
         self.cmd_log.clear()
 
+        # Reset all step UI widgets back to initial pending state
+        for step_id, (lbl_icon, lbl_text, lbl_status) in self.step_widgets.items():
+            lbl_icon.setText("⏳")
+            lbl_status.setText("Pending")
+            lbl_status.setStyleSheet("color: gray;")
+
         self.worker = DualAccessWorker(
             mode=self.mode,
             intranet_ip=self.intranet_ip,

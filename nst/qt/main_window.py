@@ -871,6 +871,8 @@ class MainWindow(QMainWindow):
 
     # ── polling ───────────────────────────────────────────────────────────────
     def _poll_status(self) -> None:
+        if not self.isVisible() or self.isMinimized():
+            return
         ip = get_intranet_ip()
         if ip:
             gw = calculate_gateway(ip)

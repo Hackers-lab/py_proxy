@@ -62,6 +62,8 @@ def check_single_instance() -> bool:
 
 def hide_console() -> None:
     """Hide the console window of the current process, if any."""
+    if not is_frozen():
+        return
     try:
         hwnd = ctypes.windll.kernel32.GetConsoleWindow()
         if hwnd:
@@ -121,6 +123,7 @@ def run_elevated_and_wait(args: list[str]) -> int:
     info.lpVerb = "runas"
     info.lpFile = args[0]
     info.lpParameters = params
+    info.lpDirectory = os.path.dirname(os.path.abspath(args[0])) or os.getcwd()
     info.nShow = SW_HIDE
 
     try:
@@ -167,6 +170,9 @@ def set_app_user_model_id(appid: str = "hackerslab.netsplittunnel.v4") -> None:
 
 
 def show_already_running_dialog() -> None:
+    if not is_frozen():
+        sys.stderr.write("Another instance of Net Split-Tunneler is already running.\n")
+        return
     ctypes.windll.user32.MessageBoxW(
         None,
         "Another instance of Net Split-Tunneler is already running.",

@@ -1,8 +1,8 @@
-"""A forwarding HTTP/HTTPS proxy with ACL IP filtering, Domain Blocking, and Link Inspection (host side)."""
-
+import select
 import socket
 import threading
 import time
+from collections import deque
 from . import config
 from .constants import BUFFER_SIZE, CONN_TIMEOUT, PROXY_PORT
 
@@ -12,16 +12,16 @@ _lock = threading.Lock()
 # client_ip -> dict(first_seen, last_seen, active_conns, bytes_transferred)
 _connected_clients: dict[str, dict] = {}
 
-# List of dicts: timestamp, client_ip, method, host, path, blocked, bytes
-_link_logs: list[dict] = []
+# Deque of dicts: timestamp, client_ip, method, host, path, blocked, bytes
 _MAX_LINK_LOGS = 500
 _LOG_TTL_SECONDS = 24 * 60 * 60  # 1 day
+_link_logs: deque = deque(maxlen=_MAX_LINK_LOGS)
 
 
 def _prune_old_logs() -> None:
     now = time.time()
     global _link_logs
-    _link_logs = [log for log in _link_logs if now - log["timestamp"] < _LOG_TTL_SECONDS][:_MAX_LINK_LOGS]
+    _link_logs = deque([log for log in _link_logs if now - log["timestamp"] < _LOG_TTL_SECONDS], maxlen=_MAX_LINK_LOGS)
 
 
 def get_active_clients() -> list[dict]:
@@ -76,24 +76,42 @@ def _is_domain_blocked(host: str) -> bool:
     return False
 
 
-def _pipe(src: socket.socket, dst: socket.socket, tracker: dict | None = None) -> None:
+def _pipe_bidirectional(s1: socket.socket, s2: socket.socket, tracker: dict | None = None) -> None:
+    """Pump data bidirectionally between s1 and s2 in a single thread using select."""
+    s1.setblocking(False)
+    s2.setblocking(False)
+    sockets = [s1, s2]
+    bytes_transferred = 0
     try:
-        while chunk := src.recv(BUFFER_SIZE):
-            dst.sendall(chunk)
-            if tracker is not None:
-                with _lock:
-                    tracker["bytes"] += len(chunk)
+        while True:
+            readable, _, _ = select.select(sockets, [], [], CONN_TIMEOUT)
+            if not readable:
+                break
+            for src in readable:
+                dst = s2 if src is s1 else s1
+                try:
+                    chunk = src.recv(BUFFER_SIZE)
+                except (socket.error, OSError):
+                    chunk = b""
+                if not chunk:
+                    return
+                dst.sendall(chunk)
+                bytes_transferred += len(chunk)
     except Exception:
         pass
-    for s in (src, dst):
-        try:
-            s.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        try:
-            s.close()
-        except Exception:
-            pass
+    finally:
+        if tracker is not None and bytes_transferred > 0:
+            with _lock:
+                tracker["bytes"] += bytes_transferred
+        for s in (s1, s2):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                s.close()
+            except Exception:
+                pass
 
 
 def _handle_client(client: socket.socket, client_ip: str) -> None:
@@ -155,7 +173,7 @@ def _handle_client(client: socket.socket, client_ip: str) -> None:
         # Log link if tracking enabled
         if config.load_proxy_link_tracking():
             with _lock:
-                _link_logs.insert(0, {
+                _link_logs.appendleft({
                     "timestamp": time.time(),
                     "client_ip": client_ip,
                     "method": method,
@@ -164,7 +182,6 @@ def _handle_client(client: socket.socket, client_ip: str) -> None:
                     "blocked": is_blocked,
                     "bytes": len(raw),
                 })
-                _prune_old_logs()
 
         if is_blocked:
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nBlocked: Access to this website is restricted by proxy admin.\r\n")
@@ -180,10 +197,7 @@ def _handle_client(client: socket.socket, client_ip: str) -> None:
             remote = socket.create_connection((host, port), timeout=CONN_TIMEOUT)
             remote.sendall(b"\r\n".join(lines))
 
-        t1 = threading.Thread(target=_pipe, args=(client, remote, client_tracker), daemon=True)
-        t2 = threading.Thread(target=_pipe, args=(remote, client, client_tracker), daemon=True)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        _pipe_bidirectional(client, remote, client_tracker)
     except Exception:
         pass
     finally:

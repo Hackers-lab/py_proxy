@@ -24,12 +24,32 @@ class ProxyDashboardDialog(QDialog):
         self.setMinimumWidth(720)
         self.setMinimumHeight(560)
 
+        self._in_sync = False
         self._build_ui()
 
         # Timer to auto-refresh live views every 2 seconds
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_all)
         self._timer.start(2000)
+
+    def done(self, r):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        super().done(r)
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._timer.stop()
+        super().reject()
+
+    def accept(self):
+        self._timer.stop()
+        super().accept()
 
     def _build_ui(self):
         v = QVBoxLayout(self)
@@ -121,7 +141,6 @@ class ProxyDashboardDialog(QDialog):
 
         for chk in (self.chk_yt, self.chk_wa, self.chk_ig):
             v.addWidget(chk)
-            chk.stateChanged.connect(self._sync_domain_toggles)
 
         lbl_cust = QLabel("BLOCKED DOMAINS LIST (CSV Format):")
         lbl_cust.setStyleSheet("font-weight: bold; margin-top: 10px;")
@@ -136,10 +155,14 @@ class ProxyDashboardDialog(QDialog):
         btn_save_dom.clicked.connect(self._save_domain_rules)
         v.addWidget(btn_save_dom)
 
-        # Load existing blocked domains
+        # Load existing blocked domains safely without triggering recursion
         blocked = config.load_proxy_blocked_domains()
         self.edit_domains.setPlainText(", ".join(blocked))
         self._update_toggles_from_list(blocked)
+
+        # Connect signals AFTER initial values set
+        for chk in (self.chk_yt, self.chk_wa, self.chk_ig):
+            chk.stateChanged.connect(self._sync_domain_toggles)
 
         return w
 
@@ -167,33 +190,40 @@ class ProxyDashboardDialog(QDialog):
         return w
 
     def _refresh_all(self):
-        # Refresh Active Clients
-        clients = get_active_clients()
-        self.table_clients.setRowCount(len(clients))
-        for row, c in enumerate(clients):
-            self.table_clients.setItem(row, 0, QTableWidgetItem(c["ip"]))
-            self.table_clients.setItem(row, 1, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(c["first_seen"]))))
-            self.table_clients.setItem(row, 2, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(c["last_seen"]))))
-            self.table_clients.setItem(row, 3, QTableWidgetItem(str(c["active_conns"])))
-            self.table_clients.setItem(row, 4, QTableWidgetItem(f"{c['bytes'] / 1024:.1f} KB"))
+        if self._in_sync:
+            return
+        self._in_sync = True
+        try:
+            # Refresh Active Clients
+            clients = get_active_clients()
+            self.table_clients.setRowCount(len(clients))
+            for row, c in enumerate(clients):
+                self.table_clients.setItem(row, 0, QTableWidgetItem(c["ip"]))
+                self.table_clients.setItem(row, 1, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(c["first_seen"]))))
+                self.table_clients.setItem(row, 2, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(c["last_seen"]))))
+                self.table_clients.setItem(row, 3, QTableWidgetItem(str(c["active_conns"])))
+                self.table_clients.setItem(row, 4, QTableWidgetItem(f"{c['bytes'] / 1024:.1f} KB"))
 
-        # Refresh Link Logs
-        logs = get_link_logs()
-        self.table_logs.setRowCount(len(logs))
-        for row, l in enumerate(logs[:200]):  # display top 200 recent
-            t_str = time.strftime("%H:%M:%S", time.localtime(l["timestamp"]))
-            self.table_logs.setItem(row, 0, QTableWidgetItem(t_str))
-            self.table_logs.setItem(row, 1, QTableWidgetItem(l["client_ip"]))
-            self.table_logs.setItem(row, 2, QTableWidgetItem(l["method"]))
-            self.table_logs.setItem(row, 3, QTableWidgetItem(l["host"]))
-            self.table_logs.setItem(row, 4, QTableWidgetItem(l["path"]))
+            # Refresh Link Logs
+            logs = get_link_logs()
+            self.table_logs.setRowCount(min(len(logs), 200))
+            for row, l in enumerate(logs[:200]):  # display top 200 recent
+                t_str = time.strftime("%H:%M:%S", time.localtime(l["timestamp"]))
+                self.table_logs.setItem(row, 0, QTableWidgetItem(t_str))
+                self.table_logs.setItem(row, 1, QTableWidgetItem(l["client_ip"]))
+                self.table_logs.setItem(row, 2, QTableWidgetItem(l["method"]))
+                self.table_logs.setItem(row, 3, QTableWidgetItem(l["host"]))
+                self.table_logs.setItem(row, 4, QTableWidgetItem(l["path"]))
 
-            item_status = QTableWidgetItem("🚫 BLOCKED" if l["blocked"] else "✅ Allowed")
-            if l["blocked"]:
-                item_status.setStyleSheet("color: red; font-weight: bold;")
-            else:
-                item_status.setStyleSheet("color: green;")
-            self.table_logs.setItem(row, 5, item_status)
+                from PyQt6.QtGui import QColor
+                item_status = QTableWidgetItem("🚫 BLOCKED" if l["blocked"] else "✅ Allowed")
+                if l["blocked"]:
+                    item_status.setForeground(QColor("#ef4444"))
+                else:
+                    item_status.setForeground(QColor("#10b981"))
+                self.table_logs.setItem(row, 5, item_status)
+        finally:
+            self._in_sync = False
 
     def _block_selected_client(self):
         row = self.table_clients.currentRow()
@@ -216,29 +246,39 @@ class ProxyDashboardDialog(QDialog):
         QMessageBox.information(self, "Saved", "IP Access Control settings saved.")
 
     def _sync_domain_toggles(self):
-        domains = set(x.strip() for x in self.edit_domains.toPlainText().replace("\n", ",").split(",") if x.strip())
-        yt = {"youtube.com", "googlevideo.com"}
-        wa = {"whatsapp.com", "whatsapp.net"}
-        ig = {"instagram.com", "fbcdn.net"}
+        if self._in_sync:
+            return
+        self._in_sync = True
+        try:
+            domains = set(x.strip() for x in self.edit_domains.toPlainText().replace("\n", ",").split(",") if x.strip())
+            yt = {"youtube.com", "googlevideo.com"}
+            wa = {"whatsapp.com", "whatsapp.net"}
+            ig = {"instagram.com", "fbcdn.net"}
 
-        if self.chk_yt.isChecked(): domains.update(yt)
-        else: domains.difference_update(yt)
+            if self.chk_yt.isChecked(): domains.update(yt)
+            else: domains.difference_update(yt)
 
-        if self.chk_wa.isChecked(): domains.update(wa)
-        else: domains.difference_update(wa)
+            if self.chk_wa.isChecked(): domains.update(wa)
+            else: domains.difference_update(wa)
 
-        if self.chk_ig.isChecked(): domains.update(ig)
-        else: domains.difference_update(ig)
+            if self.chk_ig.isChecked(): domains.update(ig)
+            else: domains.difference_update(ig)
 
-        self.edit_domains.blockSignals(True)
-        self.edit_domains.setPlainText(", ".join(sorted(domains)))
-        self.edit_domains.blockSignals(False)
+            self.edit_domains.blockSignals(True)
+            self.edit_domains.setPlainText(", ".join(sorted(domains)))
+            self.edit_domains.blockSignals(False)
+        finally:
+            self._in_sync = False
 
     def _update_toggles_from_list(self, domains: list[str]):
         d_set = set(domains)
+        for chk in (self.chk_yt, self.chk_wa, self.chk_ig):
+            chk.blockSignals(True)
         self.chk_yt.setChecked("youtube.com" in d_set)
         self.chk_wa.setChecked("whatsapp.com" in d_set)
         self.chk_ig.setChecked("instagram.com" in d_set)
+        for chk in (self.chk_yt, self.chk_wa, self.chk_ig):
+            chk.blockSignals(False)
 
     def _save_domain_rules(self):
         domains = [x.strip() for x in self.edit_domains.toPlainText().replace("\n", ",").split(",") if x.strip()]

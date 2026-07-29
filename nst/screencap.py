@@ -167,9 +167,8 @@ class ScreenGrabber:
         _gdi32.GetDIBits(self._hdc_mem, self._hbmp, 0, self._h, self._buf,
                          ctypes.byref(self._bmi), _DIB_RGB_COLORS)
         # Format_RGB32 is 0xffRRGGBB, stored BGRA in memory on little-endian —
-        # exactly what GetDIBits produced. copy() detaches from our reused buffer.
-        img = QImage(self._buf, self._w, self._h, QImage.Format.Format_RGB32)
-        return img.copy()
+        # exactly what GetDIBits produced. Zero-copy wrapper over self._buf.
+        return QImage(self._buf, self._w, self._h, QImage.Format.Format_RGB32)
 
     def grab_frame(self, max_edge: int, quality: int,
                    lossless: bool = False) -> tuple[bytes, int, int] | None:
@@ -188,10 +187,11 @@ class ScreenGrabber:
             return None
         longest = max(img.width(), img.height())
         if max_edge and longest > max_edge:
+            mode = Qt.TransformationMode.SmoothTransformation if lossless else Qt.TransformationMode.FastTransformation
             if img.width() >= img.height():
-                img = img.scaledToWidth(max_edge, Qt.TransformationMode.SmoothTransformation)
+                img = img.scaledToWidth(max_edge, mode)
             else:
-                img = img.scaledToHeight(max_edge, Qt.TransformationMode.SmoothTransformation)
+                img = img.scaledToHeight(max_edge, mode)
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QBuffer.OpenModeFlag.WriteOnly)

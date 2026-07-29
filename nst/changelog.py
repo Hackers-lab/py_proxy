@@ -1,6 +1,14 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.7": [
+        "🚀 Speed & RAM Optimizations: thread-safe in-memory config caching, zero-copy screen capture buffers, single-thread non-blocking proxy forwarding, and registry NRPT checking.",
+        "🛡 Fixed: resolved QTableWidgetItem setStyleSheet AttributeError in Proxy Host Control dashboard and added working directory resolving to elevated UAC commands.",
+    ],
+    "4.13.6": [
+        "⚡ Fixed: resolved Host Control & Blocker dialog freeze/crash caused by PyQt6 signal re-entrance during domain list sync.",
+        "🔄 Fixed: Dual Access step progression state resetting so failed/cancelled UAC elevation steps do not retain previous checkmarks.",
+    ],
     "4.13.5": [
         "🔓 Fixed: resolved 'Windows cannot find python.exe' elevation error on client PCs during Dual Access enablement by improving executable path detection for Nuitka standalone builds.",
     ],

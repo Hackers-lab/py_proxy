@@ -209,13 +209,52 @@ def check_intranet_route() -> bool:
 
 def check_nrpt(domain: str) -> bool:
     """True if an NRPT rule for *.domain already exists."""
-    r = subprocess.run(
-        ["powershell", "-NonInteractive", "-NoProfile", "-Command",
-         f'Get-DnsClientNrptRule | Where-Object {{$_.Namespace -eq ".{domain}"}}'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    return bool(r.stdout.strip())
+    target = f".{domain.strip('.').lower()}"
+    target_plain = domain.strip('.').lower()
+    reg_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig"),
+    ]
+    for root, subkey_path in reg_paths:
+        try:
+            with winreg.OpenKey(root, subkey_path, 0, winreg.KEY_READ) as k:
+                i = 0
+                while True:
+                    try:
+                        rule_guid = winreg.EnumKey(k, i)
+                        i += 1
+                        try:
+                            with winreg.OpenKey(root, f"{subkey_path}\\{rule_guid}", 0, winreg.KEY_READ) as rk:
+                                for val_name in ("Name", "Namespace"):
+                                    try:
+                                        ns, _ = winreg.QueryValueEx(rk, val_name)
+                                        if isinstance(ns, (list, tuple)):
+                                            if any(str(x).strip().lower() in (target, target_plain) for x in ns):
+                                                return True
+                                        elif isinstance(ns, str):
+                                            if ns.strip().lower() in (target, target_plain):
+                                                return True
+                                    except FileNotFoundError:
+                                        pass
+                        except OSError:
+                            pass
+                    except OSError:
+                        break
+        except OSError:
+            pass
+
+    # Fallback to PowerShell if registry inspection is inconclusive
+    try:
+        r = subprocess.run(
+            ["powershell", "-NonInteractive", "-NoProfile", "-Command",
+             f'Get-DnsClientNrptRule | Where-Object {{$_.Namespace -eq ".{domain}"}}'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=3.0,
+        )
+        return bool(r.stdout.strip())
+    except Exception:
+        return False
 
 
 def status(internet_ip: str, internet_gw: str, domains: list[str]) -> dict:

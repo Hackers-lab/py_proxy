@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import uuid
 import winreg
 
@@ -75,9 +76,17 @@ def is_autostart_enabled() -> bool:
     except Exception:
         return False
 
-# ── Generic app-key helpers ───────────────────────────────────────────────────
+# ── Generic app-key helpers (in-memory cached) ─────────────────────────────
+
+_CACHE: dict[str, object] = {}
+_CACHE_LOCK = threading.Lock()
+
 
 def _read_value(name: str, default):
+    with _CACHE_LOCK:
+        if name in _CACHE:
+            return _CACHE[name]
+
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_APP_PATH, 0, winreg.KEY_READ)
         try:
@@ -85,9 +94,12 @@ def _read_value(name: str, default):
         except FileNotFoundError:
             val = default
         winreg.CloseKey(key)
-        return val
     except Exception:
-        return default
+        val = default
+
+    with _CACHE_LOCK:
+        _CACHE[name] = val
+    return val
 
 
 def _write_value(name: str, regtype: int, value) -> bool:
@@ -99,6 +111,8 @@ def _write_value(name: str, regtype: int, value) -> bool:
                                  0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, name, 0, regtype, value)
         winreg.CloseKey(key)
+        with _CACHE_LOCK:
+            _CACHE[name] = value
         return True
     except Exception:
         return False
@@ -640,6 +654,8 @@ def clear_lock() -> None:
     """Remove every lock-related value from the registry."""
     for name in ("LockSalt", "LockVerifier", "LockScope", "LockedChats",
                  "LockQuestions"):
+        with _CACHE_LOCK:
+            _CACHE.pop(name, None)
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_APP_PATH, 0,
                                  winreg.KEY_SET_VALUE)

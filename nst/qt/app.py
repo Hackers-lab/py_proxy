@@ -198,6 +198,9 @@ def run() -> None:
     silent_start = updated_ver is not None or "--autostart" in sys.argv
     if not silent_start:
         chat_window.open()
+        main.showNormal()
+        main.raise_()
+        main.activateWindow()
     if updated_ver:
         toasts.notify("Net Split-Tunneler",
                       f"Updated to v{updated_ver} — tap to see what's new.", "update")
