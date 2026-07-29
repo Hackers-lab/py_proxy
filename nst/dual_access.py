@@ -474,13 +474,27 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
     dns_csv      = ",".join(dns_servers)
     domain_csv   = ",".join(domains)
 
-    args = [intranet_gw, internet_ip, internet_gw, adapter, dns_csv, domain_csv,
-            old_internet_ip, ip_mode, curr_ip, curr_mask]
+    import base64
+    import json
+    data_en = {
+        "intranet_gw": intranet_gw,
+        "internet_ip": internet_ip,
+        "internet_gw": internet_gw,
+        "adapter": adapter,
+        "dns_csv": dns_csv,
+        "domain_csv": domain_csv,
+        "old_internet_ip": old_internet_ip,
+        "ip_mode": ip_mode,
+        "curr_ip": curr_ip,
+        "curr_mask": curr_mask,
+    }
+    b64_payload_en = base64.b64encode(json.dumps(data_en).encode()).decode()
+
     if is_admin():
         code = _do_enable(*args)
     else:
         code = run_elevated_and_wait(
-            self_relaunch_cmd() + ["--dual-enable"] + args)
+            self_relaunch_cmd() + ["--dual-enable-b64", b64_payload_en])
 
     if code == 0:
         config.save_dual_active_ip(internet_ip)
@@ -515,11 +529,24 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
     prev_ip_mode, prev_ip_address, prev_ip_mask, prev_ip_gateway = config.load_dual_prev_ip()
     args = [active_ip, adapter, domain_csv, prev_dns_mode, prev_dns_csv,
             prev_ip_mode, prev_ip_address, prev_ip_mask, prev_ip_gateway]
+    data_dis = {
+        "internet_ip": active_ip,
+        "adapter": adapter,
+        "domain_csv": domain_csv,
+        "prev_dns_mode": prev_dns_mode,
+        "prev_dns_csv": prev_dns_csv,
+        "prev_ip_mode": prev_ip_mode,
+        "prev_ip_address": prev_ip_address,
+        "prev_ip_mask": prev_ip_mask,
+        "prev_ip_gateway": prev_ip_gateway,
+    }
+    b64_payload_dis = base64.b64encode(json.dumps(data_dis).encode()).decode()
+
     if is_admin():
         code = _do_disable(*args)
     else:
         code = run_elevated_and_wait(
-            self_relaunch_cmd() + ["--dual-disable"] + args)
+            self_relaunch_cmd() + ["--dual-disable-b64", b64_payload_dis])
 
     if code == 0:
         config.save_dual_active_ip("")

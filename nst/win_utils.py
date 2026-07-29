@@ -127,16 +127,27 @@ def run_elevated_and_wait(args: list[str]) -> int:
     info.nShow = SW_HIDE
 
     try:
-        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
-            return ELEVATION_CANCELLED
-        if not info.hProcess:
-            return ELEVATION_CANCELLED
-        kernel32 = ctypes.windll.kernel32
-        kernel32.WaitForSingleObject(info.hProcess, INFINITE)
-        code = ctypes.c_ulong()
-        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
-        kernel32.CloseHandle(info.hProcess)
-        return int(code.value)
+        if ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)) and info.hProcess:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+            kernel32.CloseHandle(info.hProcess)
+            return int(code.value)
+    except Exception:
+        pass
+
+    # Fallback to PowerShell elevated invocation if ShellExecuteExW is restricted by GPO / UAC policies
+    try:
+        exe_path = args[0]
+        arg_str = " ".join(f"'{a}'" for a in args[1:])
+        ps_cmd = f"Start-Process -FilePath '{exe_path}' -ArgumentList \"{arg_str}\" -Verb RunAs -Wait -WindowStyle Hidden"
+        r = subprocess.run(
+            ["powershell", "-NonInteractive", "-NoProfile", "-Command", ps_cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return r.returncode
     except Exception:
         return ELEVATION_CANCELLED
 

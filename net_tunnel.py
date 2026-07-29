@@ -42,7 +42,20 @@ def _route_cli() -> bool:
         network = sys.argv[i + 1] if i + 1 < len(sys.argv) else "10.0.0.0"
         sys.exit(routing._do_del_route(network))
 
+    import base64
+    import json
     from nst import dual_access
+
+    if "--dual-enable-b64" in sys.argv:
+        i = sys.argv.index("--dual-enable-b64")
+        data = json.loads(base64.b64decode(sys.argv[i + 1]).decode())
+        sys.exit(dual_access._do_enable(**data))
+
+    if "--dual-disable-b64" in sys.argv:
+        i = sys.argv.index("--dual-disable-b64")
+        data = json.loads(base64.b64decode(sys.argv[i + 1]).decode())
+        sys.exit(dual_access._do_disable(**data))
+
     if "--dual-enable" in sys.argv:
         i = sys.argv.index("--dual-enable")
         a = sys.argv
