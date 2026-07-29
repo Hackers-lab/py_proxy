@@ -1,6 +1,9 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.5": [
+        "🔓 Fixed: resolved 'Windows cannot find python.exe' elevation error on client PCs during Dual Access enablement by improving executable path detection for Nuitka standalone builds.",
+    ],
     "4.13.4": [
         "🌐 New Dual Access Diagnostics & Verification modal: live 8-step execution checks, SkipAsSource=True secondary IP binding, DNS host routes, 1-click command log exporter, and Demo/Simulation Mode.",
         "🛡 Proxy Host Control Dashboard: IP Whitelisting/Blacklisting, domain blocking (YouTube, WhatsApp, Instagram, custom sites), and live Link Inspector with 24-hour log auto-pruning.",

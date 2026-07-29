@@ -170,14 +170,7 @@ def _download(url: str, version: str, progress=None) -> str:
     return dest
 
 
-def _is_frozen() -> bool:
-    """True if running inside a compiled executable (PyInstaller or Nuitka)."""
-    return (
-        getattr(sys, "frozen", False)
-        or "__nuitka_binary__" in globals()
-        or hasattr(sys, "__compiled__")
-        or hasattr(sys, "nuitka_version")
-    )
+from .win_utils import is_frozen as _is_frozen
 
 
 def _check_for_update(progress=None) -> tuple[str, str] | None:

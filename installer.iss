@@ -1,12 +1,12 @@
 ; Inno Setup script for Net Split-Tunneler — admin installer.
 ;
 ; Build (after Nuitka produces output in dist\NetSplitTunnel\):
-;   ISCC /DAppVersion=4.13.4 installer.iss
+;   ISCC /DAppVersion=4.13.5 installer.iss
 ; Output: Output\NetSplitTunnel_Setup_v<ver>.exe
 ;
 
 #ifndef AppVersion
-  #define AppVersion "4.13.4"
+  #define AppVersion "4.13.5"
 #endif
 #define AppName "Net Split-Tunneler"
 #define ExeName "NetSplitTunnel.exe"

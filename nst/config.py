@@ -18,6 +18,8 @@ import winreg
 
 from .constants import REG_APP_PATH, REG_RUN_PATH, RUN_VALUE_NAME
 
+from .win_utils import is_frozen
+
 # ── Autostart (HKCU Run key) ──────────────────────────────────────────────────
 
 def _autostart_command() -> str:
@@ -25,7 +27,7 @@ def _autostart_command() -> str:
 
     The --autostart flag makes the app start to the tray (no main window).
     """
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         return f'"{sys.executable}" --autostart'
     return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}" --autostart'
 

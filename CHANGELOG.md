@@ -8,6 +8,9 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.5 — 2026-07-29
+- **Fixed UAC Elevation path error on compiled client PCs.** Resolved `Windows cannot find python.exe` error during Dual Access / IP Switch privilege elevation by enhancing `is_frozen()` to detect Nuitka standalone executables (`NetSplitTunnel.exe`) and avoiding invocation of missing `python.exe` binaries.
+
 ## v4.13.4 — 2026-07-29
 - **New Dual Access Diagnostics & Verification modal.** Runs live 8-step execution checks (Secondary IP binding with `SkipAsSource=True`, Default Internet Route, Intranet Route, Corporate DNS Host Route, Split DNS/NRPT, Internet Ping, Corporate Gateway Ping, and LAN Services test with 3-attempt retry loops). Includes a 1-click **Copy Commands** exporter and a **Demo/Simulation Mode** switch for single-network testing.
 - **New Proxy Host Control Dashboard.** Adds Client IP Whitelisting/Blacklisting, domain blocking (YouTube, WhatsApp, Instagram, and custom sites) returning `HTTP 403 Forbidden`, and a real-time **Link Inspector** with a 24-hour log auto-pruning window.
