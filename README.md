@@ -229,6 +229,8 @@ Open Settings from the **⚙** gear next to *YOU* in the chat sidebar. Changes t
 
 ## Other features
 
+- **Dual Access Diagnostics & Verification** — visual 8-step execution modal with live checkmarks `[✓]`, `SkipAsSource=True` secondary IP binding, DNS host routes, 1-click **Copy Commands** exporter, and a **Demo/Simulation Mode** switch for single-network PCs.
+- **Proxy Host Controls & Domain Blocker** — click **⚙ Host Control & Blocker** next to Start Proxy Server to manage connected client IPs (Whitelist/Blacklist), block websites (YouTube, WhatsApp, Instagram, custom sites with HTTP 403 Forbidden), and inspect live URLs in real-time.
 - **Light / Dark theme** — toggle with ☀ / 🌙 (top-right) or in Settings. Remembered across restarts.
 - **Tray behaviour** — closing the window hides to the system tray (keeps everything running). Use **File → Exit** or tray → **Quit** to fully shut down.
 - **Demo Bot** — no second PC? Click **✨ Try Demo Chat** to chat with a built-in Demo Bot and see all chat features working.

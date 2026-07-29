@@ -268,9 +268,12 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
         run_cmd(["route", "delete", "0.0.0.0", "mask", "0.0.0.0",
                  _derive_gw(old_internet_ip)])
 
-    # 1. Add secondary internet IP to the adapter
+    # 1. Add secondary internet IP to the adapter and set SkipAsSource=True
+    # SkipAsSource=True prevents Windows from using the 192.168.x.x IP as the default
+    # sender address for LAN chat, presence broadcasts, and corporate DNS traffic.
     run_cmd(["netsh", "interface", "ip", "add", "address",
              adapter, internet_ip, "255.255.255.0"])
+    _ps(f'Set-NetIPAddress -IPAddress "{internet_ip}" -SkipAsSource $true -ErrorAction SilentlyContinue')
 
     # 2. Add internet default route with a low metric so it wins over the
     #    adapter's existing default (e.g. the intranet gateway, which has no
@@ -284,9 +287,17 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
         run_cmd(["route", "add", "10.0.0.0", "mask", "255.0.0.0",
                  intranet_gw, "-p"])
 
+    # 3.5 Add explicit host route for corporate DNS servers via intranet gateway
+    # This guarantees Windows routes DNS queries to corporate DNS over the primary 10.x interface
+    for srv in dns_servers:
+        run_cmd(["route", "add", srv, "mask", "255.255.255.255", intranet_gw])
+
     # 4. Add NRPT rules — one per domain
     dns_str = ",".join(f'"{s}"' for s in dns_servers)
     for domain in domains:
+        # Pre-clean any stale rule to prevent ObjectAlreadyExists error
+        _ps(f'Get-DnsClientNrptRule | Where-Object {{$_.Namespace -eq ".{domain}"}} | '
+            f'Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue')
         _ps(f'Add-DnsClientNrptRule -Namespace ".{domain}" '
             f'-NameServers {dns_str} -ErrorAction SilentlyContinue')
 
@@ -299,6 +310,14 @@ def _do_enable(intranet_gw: str, internet_ip: str, internet_gw: str,
 
     # Flush DNS Cache to apply changes immediately
     run_cmd(["ipconfig", "/flushdns"])
+
+    # Step-by-step verification checks
+    if not check_secondary_ip(internet_ip):
+        return 10  # Step 1 failed: Secondary IP was not bound to adapter
+    if not check_internet_route(internet_gw):
+        return 11  # Step 2 failed: Internet default route could not be added
+    if not check_intranet_route():
+        return 12  # Step 3 failed: Intranet route 10.0.0.0/8 could not be added
 
     return 0
 
@@ -323,10 +342,18 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
     # 2.5 Force delete the intranet route we added to prevent it from blackholing corporate LAN
     run_cmd(["route", "delete", "10.0.0.0", "mask", "255.0.0.0"])
 
-    # 3. Remove NRPT rules
+    # 3. Remove NRPT rules using valid PowerShell pipeline syntax
     for domain in domains:
-        _ps(f'Remove-DnsClientNrptRule -Namespace ".{domain}" '
-            f'-Force -ErrorAction SilentlyContinue')
+        _ps(f'Get-DnsClientNrptRule | Where-Object {{$_.Namespace -eq ".{domain}"}} | '
+            f'Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue')
+
+    # Verify NRPT rules were actually removed
+    stale_nrpt = [d for d in domains if check_nrpt(d)]
+    if stale_nrpt:
+        # Fallback: force remove all matching NRPT rules by Namespace regex
+        for domain in stale_nrpt:
+            _ps(f'Get-DnsClientNrptRule | Where-Object {{$_.Namespace -like "*{domain}*"}} | '
+                f'Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue')
 
     # 4. Restore IP address mode (DHCP vs Static)
     if prev_ip_mode == "dhcp":
@@ -355,6 +382,11 @@ def _do_disable(internet_ip: str, adapter: str, domain_csv: str,
 
     # Flush DNS Cache to restore correct resolution immediately
     run_cmd(["ipconfig", "/flushdns"])
+
+    # Verification: verify NRPT rules are completely gone
+    remaining_nrpt = [d for d in domains if check_nrpt(d)]
+    if remaining_nrpt:
+        return 2  # Partial success: disabled network settings, but NRPT rule removal requires manual cleanup
 
     return 0
 
@@ -415,6 +447,12 @@ def enable_dual_access(intranet_ip: str, internet_ip: str,
         config.save_dual_active_ip(internet_ip)
         return True, (f"Dual access enabled — internet via {internet_gw}, "
                       f"intranet via {intranet_gw}.")
+    if code == 10:
+        return False, f"Dual access enable failed: Secondary IP {internet_ip} could not be bound to adapter."
+    if code == 11:
+        return False, f"Dual access enable failed: Default internet route via {internet_gw} could not be added."
+    if code == 12:
+        return False, f"Dual access enable failed: Intranet route 10.0.0.0/8 via {intranet_gw} could not be added."
     if code == ELEVATION_CANCELLED:
         return False, "Dual access cancelled (administrator approval required)."
     return False, f"Dual access enable failed (exit {code})."
@@ -447,6 +485,11 @@ def disable_dual_access(intranet_ip: str, internet_ip: str,
     if code == 0:
         config.save_dual_active_ip("")
         return True, "Dual access disabled — intranet only."
+    if code == 2:
+        config.save_dual_active_ip("")
+        return True, ("Dual access disabled, but NRPT rules require manual cleanup. "
+                      "Run in PowerShell as Admin: "
+                      "Get-DnsClientNrptRule | Where-Object {$_.Namespace -like '*.wbsedcl*'} | Remove-DnsClientNrptRule -Force")
     if code == ELEVATION_CANCELLED:
         return False, "Dual access disable cancelled."
     return False, f"Dual access disable failed (exit {code})."
@@ -456,3 +499,60 @@ def _derive_gw(ip: str) -> str:
     parts = ip.split(".")
     parts[-1] = "1"
     return ".".join(parts)
+
+
+# ── Live Connectivity & Service Testing (Retry Loops) ──────────────────────────
+
+import time  # noqa: E402
+
+
+def test_internet_ping(target: str = "8.8.8.8", retries: int = 3) -> bool:
+    """Ping public Internet target (e.g., 8.8.8.8) with retries."""
+    for attempt in range(retries):
+        try:
+            r = subprocess.run(
+                ["ping", "-n", "1", "-w", "1500", target],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return False
+
+
+def test_intranet_ping(target_ip: str, retries: int = 3) -> bool:
+    """Ping corporate gateway or intranet IP with retries."""
+    if not target_ip:
+        return False
+    for attempt in range(retries):
+        try:
+            r = subprocess.run(
+                ["ping", "-n", "1", "-w", "1500", target_ip],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return False
+
+
+def test_sap_connection(host: str = "erpprd.wbsedcl.in", port: int = 3600, retries: int = 3) -> tuple[bool, str]:
+    """Test DNS resolution & TCP socket handshake to SAP ERP (e.g. erpprd.wbsedcl.in:3600)."""
+    for attempt in range(retries):
+        try:
+            resolved_ip = socket.gethostbyname(host)
+            with socket.create_connection((resolved_ip, port), timeout=3.0):
+                return True, f"Connected to {host} ({resolved_ip}:{port})"
+        except socket.gaierror as e:
+            msg = f"DNS resolution failed for {host}: {e}"
+        except Exception as e:
+            msg = f"TCP connection to {host}:{port} failed: {e}"
+        time.sleep(1.0)
+    return False, msg
+

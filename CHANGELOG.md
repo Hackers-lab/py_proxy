@@ -8,6 +8,10 @@ release (see [RELEASING.md](RELEASING.md)). Newest first.
 - What changed, in plain language (one bullet per user-visible change).
 -->
 
+## v4.13.4 — 2026-07-29
+- **New Dual Access Diagnostics & Verification modal.** Runs live 8-step execution checks (Secondary IP binding with `SkipAsSource=True`, Default Internet Route, Intranet Route, Corporate DNS Host Route, Split DNS/NRPT, Internet Ping, Corporate Gateway Ping, and LAN Services test with 3-attempt retry loops). Includes a 1-click **Copy Commands** exporter and a **Demo/Simulation Mode** switch for single-network testing.
+- **New Proxy Host Control Dashboard.** Adds Client IP Whitelisting/Blacklisting, domain blocking (YouTube, WhatsApp, Instagram, and custom sites) returning `HTTP 403 Forbidden`, and a real-time **Link Inspector** with a 24-hour log auto-pruning window.
+
 ## v4.13.3 — 2026-07-28
 - **Antivirus false-positive fixes.** Disabled UPX compression (`--noupx`) and updated Inno Setup installer configuration (defaulting to Program Files directory `{autopf}\NetSplitTunnel`, admin privileges `PrivilegesRequired=admin`, and `Compression=zip` with `SolidCompression=no`) to eliminate heuristic AV flags (e.g. Seqrite / Quick Heal `Trojan.Generic...`).
 

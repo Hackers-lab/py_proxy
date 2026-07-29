@@ -1,6 +1,10 @@
 """Per-version what's-new bullets shown in the in-app Updates chat on launch."""
 
 NOTES: dict[str, list[str]] = {
+    "4.13.4": [
+        "🌐 New Dual Access Diagnostics & Verification modal: live 8-step execution checks, SkipAsSource=True secondary IP binding, DNS host routes, 1-click command log exporter, and Demo/Simulation Mode.",
+        "🛡 Proxy Host Control Dashboard: IP Whitelisting/Blacklisting, domain blocking (YouTube, WhatsApp, Instagram, custom sites), and live Link Inspector with 24-hour log auto-pruning.",
+    ],
     "4.13.3": [
         "🛡 Antivirus false-positive fixes: disabled UPX compression and updated installer settings (Program Files location, admin privileges, zip compression) to eliminate heuristic flags.",
     ],

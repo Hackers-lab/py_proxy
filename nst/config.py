@@ -748,7 +748,42 @@ def load_dual_prev_ip() -> tuple[str, str, str, str]:
     ip = str(_read_value("DualPrevIpAddress", "")).strip()
     mask = str(_read_value("DualPrevIpMask", "")).strip()
     gateway = str(_read_value("DualPrevIpGateway", "")).strip()
-    return mode, ip, mask, gateway
+# ── Proxy Host ACL, Domain Blocking & Link Tracking ─────────────────────────
+
+def load_proxy_allowed_ips() -> list[str]:
+    s = str(_read_value("ProxyAllowedIPs", "")).strip()
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def save_proxy_allowed_ips(ips: list[str]) -> bool:
+    return _write_value("ProxyAllowedIPs", winreg.REG_SZ, ",".join(ips))
+
+
+def load_proxy_blocked_ips() -> list[str]:
+    s = str(_read_value("ProxyBlockedIPs", "")).strip()
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def save_proxy_blocked_ips(ips: list[str]) -> bool:
+    return _write_value("ProxyBlockedIPs", winreg.REG_SZ, ",".join(ips))
+
+
+def load_proxy_blocked_domains() -> list[str]:
+    s = str(_read_value("ProxyBlockedDomains", "youtube.com,googlevideo.com,whatsapp.com,whatsapp.net,instagram.com,fbcdn.net")).strip()
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def save_proxy_blocked_domains(domains: list[str]) -> bool:
+    return _write_value("ProxyBlockedDomains", winreg.REG_SZ, ",".join(domains))
+
+
+def load_proxy_link_tracking() -> bool:
+    return bool(_read_value("ProxyLinkTrackingEnabled", 1))
+
+
+def save_proxy_link_tracking(enabled: bool) -> bool:
+    return _write_value("ProxyLinkTrackingEnabled", winreg.REG_DWORD, 1 if enabled else 0)
+
 
 
 

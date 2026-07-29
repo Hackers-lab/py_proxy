@@ -24,7 +24,7 @@ from ..proxy_registry import clear_proxy, read_current_proxy, set_proxy
 from ..proxy_server import ProxyServer
 from ..dual_access import (check_secondary_ip, check_internet_route,
                            check_intranet_route, check_nrpt,
-                           detect_internet_ip,
+                           detect_internet_ip, _derive_gw,
                            enable_dual_access, disable_dual_access)
 from ..routing import (add_intranet_route, check_route_exists,
                        delete_intranet_route, _network_from_ip)
@@ -33,6 +33,8 @@ from ..win_utils import is_admin
 from .signals import MainSignals
 from .theme import theme
 from .widgets import hline
+from .dual_access_dialog import DualAccessDiagnosticDialog
+from .proxy_dashboard_dialog import ProxyDashboardDialog
 
 _MONO       = "font-family:'Consolas','Cascadia Mono',monospace; font-size:12px;"
 _MONO_INPUT = _MONO + "padding: 3px 5px; min-height: 22px;"
@@ -284,9 +286,17 @@ class MainWindow(QMainWindow):
         self._btn_proxy = QPushButton("▶  Start Proxy Server")
         self._btn_proxy.setProperty("variant", "proxy")
         self._btn_proxy.clicked.connect(self._toggle_proxy)
-        brow.addWidget(self._btn_route); brow.addWidget(self._btn_proxy); brow.addStretch(1)
+        brow.addWidget(self._btn_route); brow.addWidget(self._btn_proxy)
+        self._btn_proxy_dash = QPushButton("⚙ Host Control & Blocker")
+        self._btn_proxy_dash.clicked.connect(self._open_proxy_dashboard)
+        brow.addWidget(self._btn_proxy_dash)
+        brow.addStretch(1)
         v.addLayout(brow)
         return card
+
+    def _open_proxy_dashboard(self) -> None:
+        dlg = ProxyDashboardDialog(self)
+        dlg.exec()
 
     def _build_client(self) -> QWidget:
         card, v = self._card("CLIENT MODE")
@@ -328,19 +338,9 @@ class MainWindow(QMainWindow):
         ip_row.addWidget(self._btn_dual_detect)
         v.addLayout(ip_row)
 
-        # Domains row
-        v.addWidget(QLabel("NRPT Domains  (comma-separated)"))
+        # Domains hidden input (managed automatically)
         self._dual_dom_edit = QLineEdit(",".join(config.load_dual_domains()))
-        self._dual_dom_edit.setStyleSheet(_MONO_INPUT)
-        self._dual_dom_edit.setPlaceholderText("e.g. corp.local,company.in")
-        self._dual_dom_edit.textChanged.connect(
-            lambda t: config.save_dual_domains(
-                [s.strip() for s in t.split(",") if s.strip()]))
-        v.addWidget(self._dual_dom_edit)
-
-        hint = QLabel("Intranet DNS is auto-read from your adapter — no extra config needed.")
-        hint.setObjectName("muted")
-        v.addWidget(hint)
+        self._dual_dom_edit.setVisible(False)
 
         v.addWidget(hline())
 
@@ -390,7 +390,7 @@ class MainWindow(QMainWindow):
         # button is correct after the app is closed and reopened (the network
         # config persists); fall back to the edit field when nothing is bound.
         internet_ip = config.load_dual_active_ip() or self._dual_ip_edit.text().strip()
-        internet_gw = _derive_internet_gw(internet_ip)
+        internet_gw = _derive_gw(internet_ip) if internet_ip else ""
         domains     = list(config.load_dual_domains())
         threading.Thread(
             target=self._check_dual_status_bg,
@@ -465,25 +465,10 @@ class MainWindow(QMainWindow):
             return
 
         domains = config.load_dual_domains()
-        enabling = not self._dual_active
+        mode = "enable" if not self._dual_active else "disable"
 
-        if enabling:
-            ok, msg = enable_dual_access(self._detected_ip, internet_ip, domains)
-        else:
-            ok, msg = disable_dual_access(self._detected_ip, internet_ip, domains)
-
-        self.log(msg)
-
-        if ok:
-            # Reflect the action immediately so the button is never stuck on
-            # "Enable" after a successful enable. The status re-check below only
-            # refreshes the component labels and can lag the OS by a moment;
-            # gating the button on it caused the "enable 2-3 times" symptom.
-            self._dual_active = enabling
-            self._set_btn(
-                self._btn_dual,
-                "■  Disable Dual Access" if enabling else "▶  Enable Dual Access",
-                "danger" if enabling else "success")
+        dlg = DualAccessDiagnosticDialog(mode, self._detected_ip, internet_ip, domains, parent=self)
+        dlg.exec()
 
         # Refresh the component status labels once the OS has settled.
         self._dual_checking = False   # allow an immediate recheck
@@ -733,12 +718,7 @@ class MainWindow(QMainWindow):
     # ── tabs ──────────────────────────────────────────────────────────────────
     def _show_tab(self, idx: int) -> None:
         if idx == 2:
-            QMessageBox.critical(
-                self,
-                "Beta Feature Warning",
-                "This is a testing feature in beta and may cause LAN problems connecting to SAP.",
-                QMessageBox.StandardButton.Ok
-            )
+            self._update_dual_status()
         self._stack.setCurrentIndex(idx)
         self._tab_host.setProperty("active", "true" if idx == 0 else "false")
         self._tab_client.setProperty("active", "true" if idx == 1 else "false")

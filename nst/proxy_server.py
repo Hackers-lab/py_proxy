@@ -1,15 +1,88 @@
-"""A minimal forwarding HTTP/HTTPS proxy (host side)."""
+"""A forwarding HTTP/HTTPS proxy with ACL IP filtering, Domain Blocking, and Link Inspection (host side)."""
 
 import socket
 import threading
-
+import time
+from . import config
 from .constants import BUFFER_SIZE, CONN_TIMEOUT, PROXY_PORT
 
+# Thread-safe client connection and link tracking data structures
+_lock = threading.Lock()
 
-def _pipe(src: socket.socket, dst: socket.socket) -> None:
+# client_ip -> dict(first_seen, last_seen, active_conns, bytes_transferred)
+_connected_clients: dict[str, dict] = {}
+
+# List of dicts: timestamp, client_ip, method, host, path, blocked, bytes
+_link_logs: list[dict] = []
+_MAX_LINK_LOGS = 2000
+_LOG_TTL_SECONDS = 24 * 60 * 60  # 1 day
+
+
+def _prune_old_logs() -> None:
+    now = time.time()
+    global _link_logs
+    _link_logs = [log for log in _link_logs if now - log["timestamp"] < _LOG_TTL_SECONDS][:_MAX_LINK_LOGS]
+
+
+def get_active_clients() -> list[dict]:
+    """Return summary of all client IPs that have connected to the proxy."""
+    with _lock:
+        clients = []
+        for ip, info in _connected_clients.items():
+            clients.append({
+                "ip": ip,
+                "first_seen": info["first_seen"],
+                "last_seen": info["last_seen"],
+                "active_conns": info["active_conns"],
+                "bytes": info["bytes"],
+            })
+        return clients
+
+
+def get_link_logs() -> list[dict]:
+    """Return copy of real-time link inspection logs."""
+    with _lock:
+        _prune_old_logs()
+        return list(_link_logs)
+
+
+def clear_link_logs() -> None:
+    """Clear in-memory link inspection logs."""
+    with _lock:
+        _link_logs.clear()
+
+
+def _is_ip_allowed(client_ip: str) -> bool:
+    """Check IP against Whitelist and Blacklist."""
+    blocked_ips = config.load_proxy_blocked_ips()
+    if client_ip in blocked_ips:
+        return False
+
+    allowed_ips = config.load_proxy_allowed_ips()
+    if allowed_ips and client_ip not in allowed_ips:
+        return False
+
+    return True
+
+
+def _is_domain_blocked(host: str) -> bool:
+    """Check if target host matches blocked domain list (e.g. youtube.com, instagram.com)."""
+    blocked_domains = config.load_proxy_blocked_domains()
+    host_lower = host.lower().split(":")[0]
+    for domain in blocked_domains:
+        domain_lower = domain.lower()
+        if host_lower == domain_lower or host_lower.endswith("." + domain_lower):
+            return True
+    return False
+
+
+def _pipe(src: socket.socket, dst: socket.socket, tracker: dict | None = None) -> None:
     try:
         while chunk := src.recv(BUFFER_SIZE):
             dst.sendall(chunk)
+            if tracker is not None:
+                with _lock:
+                    tracker["bytes"] += len(chunk)
     except Exception:
         pass
     for s in (src, dst):
@@ -23,7 +96,32 @@ def _pipe(src: socket.socket, dst: socket.socket) -> None:
             pass
 
 
-def _handle_client(client: socket.socket) -> None:
+def _handle_client(client: socket.socket, client_ip: str) -> None:
+    # 1. IP ACL Check
+    if not _is_ip_allowed(client_ip):
+        try:
+            client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nAccess Denied: Your IP is not authorized to use this proxy.\r\n")
+            client.close()
+        except Exception:
+            pass
+        return
+
+    # Track active client
+    now = time.time()
+    with _lock:
+        if client_ip not in _connected_clients:
+            _connected_clients[client_ip] = {
+                "first_seen": now,
+                "last_seen": now,
+                "active_conns": 1,
+                "bytes": 0,
+            }
+        else:
+            _connected_clients[client_ip]["last_seen"] = now
+            _connected_clients[client_ip]["active_conns"] += 1
+
+    client_tracker = _connected_clients[client_ip]
+
     try:
         client.settimeout(CONN_TIMEOUT)
         raw = b""
@@ -42,8 +140,7 @@ def _handle_client(client: socket.socket) -> None:
         if method == "CONNECT":
             hp = url.rsplit(":", 1)
             host, port = hp[0], int(hp[1]) if len(hp) > 1 else 443
-            remote = socket.create_connection((host, port), timeout=CONN_TIMEOUT)
-            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            path = "/"
         else:
             stripped = url[7:] if url.startswith("http://") else url
             idx = stripped.find("/")
@@ -51,18 +148,49 @@ def _handle_client(client: socket.socket) -> None:
             path = stripped[idx:] if idx != -1 else "/"
             hp2 = host_part.rsplit(":", 1)
             host, port = hp2[0], int(hp2[1]) if len(hp2) > 1 else 80
+
+        # 2. Domain Block Check
+        is_blocked = _is_domain_blocked(host)
+
+        # Log link if tracking enabled
+        if config.load_proxy_link_tracking():
+            with _lock:
+                _link_logs.insert(0, {
+                    "timestamp": time.time(),
+                    "client_ip": client_ip,
+                    "method": method,
+                    "host": host,
+                    "path": path,
+                    "blocked": is_blocked,
+                    "bytes": len(raw),
+                })
+                _prune_old_logs()
+
+        if is_blocked:
+            client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nBlocked: Access to this website is restricted by proxy admin.\r\n")
+            return
+
+        # 3. Forward request to remote host
+        if method == "CONNECT":
+            remote = socket.create_connection((host, port), timeout=CONN_TIMEOUT)
+            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        else:
             lines = raw.split(b"\r\n")
             lines[0] = f"{method} {path} HTTP/1.1".encode()
             remote = socket.create_connection((host, port), timeout=CONN_TIMEOUT)
             remote.sendall(b"\r\n".join(lines))
 
-        t1 = threading.Thread(target=_pipe, args=(client, remote), daemon=True)
-        t2 = threading.Thread(target=_pipe, args=(remote, client), daemon=True)
+        t1 = threading.Thread(target=_pipe, args=(client, remote, client_tracker), daemon=True)
+        t2 = threading.Thread(target=_pipe, args=(remote, client, client_tracker), daemon=True)
         t1.start(); t2.start()
         t1.join(); t2.join()
     except Exception:
         pass
     finally:
+        with _lock:
+            if client_ip in _connected_clients:
+                _connected_clients[client_ip]["active_conns"] = max(0, _connected_clients[client_ip]["active_conns"] - 1)
+                _connected_clients[client_ip]["last_seen"] = time.time()
         try:
             client.close()
         except Exception:
@@ -102,8 +230,9 @@ class ProxyServer:
     def _loop(self) -> None:
         while self.running:
             try:
-                client, _ = self._sock.accept()
-                threading.Thread(target=_handle_client, args=(client,),
+                client, addr = self._sock.accept()
+                client_ip = addr[0]
+                threading.Thread(target=_handle_client, args=(client, client_ip),
                                  daemon=True).start()
             except socket.timeout:
                 continue
